@@ -1,0 +1,43 @@
+# Dependencies
+node_modules/
+
+# Local Codex/agent workspace metadata
+.agents/
+.codex/
+
+# Next.js build/cache output
+.next/
+out/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+*secret*
+*credential*
+*token*
+serviceAccount*.json
+
+# Runtime uploads and generated workbooks
+/tmp/
+/uploads/
+/jobs/
+
+# Local extraction/debug artifacts that may contain source forms or student data
+/tmp_extracted/
+/tmp_orig_extracted/
+/tmp_sat_orig_extracted/
+/tmp_*.zip
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
