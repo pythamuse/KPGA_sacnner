@@ -12,6 +12,22 @@ interface ImageUploadPanelProps {
 
 type UploadKind = 'cagi' | 'satisfaction';
 
+const MAX_UPLOAD_IMAGE_BYTES = 3.8 * 1024 * 1024;
+const PDF_RENDER_OPTIONS = [
+  { scale: 1.5, quality: 0.86 },
+  { scale: 1.25, quality: 0.82 },
+  { scale: 1.0, quality: 0.78 },
+];
+
+const canvasToBlob = (canvas: HTMLCanvasElement, mimeType: string, quality: number): Promise<Blob> => (
+  new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (blob) resolve(blob);
+      else reject(new Error('PDF 페이지 이미지를 만들 수 없습니다.'));
+    }, mimeType, quality);
+  })
+);
+
 export default function ImageUploadPanel({
   mode,
   jobId,
@@ -52,11 +68,45 @@ export default function ImageUploadPanel({
     }
   }, [cameraFlow.active]);
 
+  const renderPdfPageToFile = async (page: any, type: UploadKind, pageNumber: number): Promise<File> => {
+    let fallbackBlob: Blob | null = null;
+    const pageIndexStr = String(pageNumber).padStart(3, '0');
+
+    for (const option of PDF_RENDER_OPTIONS) {
+      const viewport = page.getViewport({ scale: option.scale });
+      const canvas = document.createElement('canvas');
+      const context = canvas.getContext('2d');
+
+      if (!context) {
+        throw new Error('브라우저에서 PDF 페이지를 그릴 수 없습니다.');
+      }
+
+      canvas.height = viewport.height;
+      canvas.width = viewport.width;
+      await page.render({ canvasContext: context, viewport }).promise;
+
+      const blob = await canvasToBlob(canvas, 'image/jpeg', option.quality);
+      canvas.width = 1;
+      canvas.height = 1;
+
+      fallbackBlob = blob;
+      if (blob.size <= MAX_UPLOAD_IMAGE_BYTES) {
+        return new File([blob], `${type}_page_${pageIndexStr}.jpg`, { type: 'image/jpeg' });
+      }
+    }
+
+    if (!fallbackBlob) {
+      throw new Error('PDF 페이지 이미지를 만들 수 없습니다.');
+    }
+
+    return new File([fallbackBlob], `${type}_page_${pageIndexStr}.jpg`, { type: 'image/jpeg' });
+  };
+
   const convertPdfToImages = async (file: File, type: UploadKind): Promise<File[]> => {
     // @ts-ignore
     const pdfjsLib = window.pdfjsLib;
     if (!pdfjsLib) {
-      throw new Error('PDF 변환 라이브러리가 로드되지 않았습니다.');
+      throw new Error('PDF 변환 라이브러리가 로드되지 않았습니다. 페이지를 새로고침한 뒤 다시 시도해주세요.');
     }
 
     pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.worker.min.js';
@@ -65,24 +115,12 @@ export default function ImageUploadPanel({
     const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
     const imageFiles: File[] = [];
 
-    setBatchStatusMessage(`PDF ${pdf.numPages}페이지를 이미지로 변환하고 있습니다.`);
+    setBatchStatusMessage(`PDF ${pdf.numPages}페이지를 업로드용 이미지로 변환하고 있습니다.`);
 
     for (let i = 1; i <= pdf.numPages; i++) {
+      setBatchStatusMessage(`PDF 페이지를 변환하고 있습니다. (${i}/${pdf.numPages})`);
       const page = await pdf.getPage(i);
-      const viewport = page.getViewport({ scale: 2.0 });
-      const canvas = document.createElement('canvas');
-      const context = canvas.getContext('2d');
-      if (!context) continue;
-
-      canvas.height = viewport.height;
-      canvas.width = viewport.width;
-      await page.render({ canvasContext: context, viewport }).promise;
-
-      const dataUrl = canvas.toDataURL('image/png');
-      const res = await fetch(dataUrl);
-      const blob = await res.blob();
-      const pageIndexStr = String(i).padStart(3, '0');
-      imageFiles.push(new File([blob], `${type}_page_${pageIndexStr}.png`, { type: 'image/png' }));
+      imageFiles.push(await renderPdfPageToFile(page, type, i));
     }
 
     return imageFiles;
@@ -115,8 +153,21 @@ export default function ImageUploadPanel({
     });
 
     if (!res.ok) {
-      const errData = await res.json();
-      throw new Error(errData.error || '업로드 실패');
+      let errorMessage = '업로드에 실패했습니다.';
+
+      if (res.status === 413) {
+        errorMessage = '업로드 파일 용량이 너무 큽니다. PDF를 더 낮은 해상도로 변환한 뒤 다시 시도해주세요.';
+      } else {
+        const errText = await res.text();
+        try {
+          const errData = JSON.parse(errText);
+          errorMessage = errData.error || errorMessage;
+        } catch {
+          if (errText) errorMessage = errText.slice(0, 200);
+        }
+      }
+
+      throw new Error(errorMessage);
     }
 
     return await res.json();
