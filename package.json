@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "도박예방교육 선별검사지 및 만족도조사 자동 작성을 위한 엑셀 자동작성 웹앱",
   "main": "index.js",
+  "engines": {
+    "node": "20.x"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
