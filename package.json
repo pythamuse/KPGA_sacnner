@@ -1,0 +1,33 @@
+{
+  "name": "gambling-prevention-excel-automation",
+  "version": "1.0.0",
+  "description": "도박예방교육 선별검사지 및 만족도조사 자동 작성을 위한 엑셀 자동작성 웹앱",
+  "main": "index.js",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "test": "vitest run",
+    "check:staged": "powershell -ExecutionPolicy Bypass -File scripts/check-staged-sensitive.ps1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "adm-zip": "^0.5.12",
+    "exceljs": "^4.4.0",
+    "next": "^14.2.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "sharp": "^0.33.4",
+    "tesseract.js": "^5.1.0"
+  },
+  "devDependencies": {
+    "@types/adm-zip": "^0.5.8",
+    "@types/node": "^20.14.9",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "typescript": "^5.5.2",
+    "vitest": "^1.6.0"
+  }
+}

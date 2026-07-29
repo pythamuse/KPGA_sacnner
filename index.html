@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>한국도박문제예방치유원 — 도박예방교육 자동작성 시스템</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              purple: '#6d48a6',
+              purpleHover: '#56348b',
+              sky: '#00a5e3',
+              orange: '#ff6c00',
+              charcoal: '#2d2c2a',
+              warmWhite: '#fcfbfa',
+              border: '#e8e5e0'
+            }
+          },
+          fontFamily: {
+            sans: ['Pretendard', 'Inter', '-apple-system', 'sans-serif'],
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    @import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard-dynamic-subset.css');
+  </style>
+</head>
+<body style="background-color: #fcfbfa;" class="font-sans text-brand-charcoal antialiased min-h-screen flex flex-col justify-between">
+
+  <!-- 1. Hero Section -->
+  <section class="w-full max-w-5xl mx-auto px-6 pt-16 pb-12 flex flex-col items-center text-center">
+    <!-- Logo -->
+    <div class="flex items-center gap-3 mb-8">
+      <svg class="h-10 w-auto" viewBox="0 0 120 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M10 5L28 20L10 35V5Z" fill="#ff6c00"/>
+        <path d="M22 8L36 20L22 32V8Z" fill="#00a5e3" fill-opacity="0.8"/>
+      </svg>
+      <div class="text-left border-l border-brand-border pl-3">
+        <h3 class="text-base font-bold tracking-tight text-brand-charcoal leading-none">한국도박문제예방치유원</h3>
+        <span class="text-[9px] text-gray-400 block mt-1">Korea Problem Gambling Agency</span>
+      </div>
+    </div>
+
+    <!-- Title & Desc -->
+    <h1 class="text-3xl md:text-5xl font-extrabold tracking-tight text-brand-charcoal leading-tight max-w-3xl mb-6">
+      도박예방교육 선별검사·만족도조사<br class="hidden md:inline"/>
+      <span class="text-brand-purple">엑셀 자동작성 시스템</span>
+    </h1>
+    <p class="text-base md:text-lg text-gray-500 max-w-xl font-light leading-relaxed mb-8">
+      예방강사의 응답지 일괄 입력 부담을 덜어주고, 중앙 시스템 유효성 검사 규칙을 사전에 자가 진단하여 완벽한 포맷의 엑셀 산출물을 보증합니다.
+    </p>
+
+    <!-- CTAs -->
+    <div class="flex flex-col sm:flex-row gap-4 w-full justify-center max-w-md">
+      <a href="#ledger" class="px-6 py-3.5 bg-brand-purple hover:bg-brand-purpleHover text-white font-medium rounded-lg shadow-sm transition-all duration-200 text-center text-sm">
+        작성 완료 파일 다운로드
+      </a>
+      <button onclick="toggleUsageModal()" class="px-6 py-3.5 bg-white hover:bg-gray-50 text-brand-charcoal font-medium rounded-lg border border-brand-border transition-all duration-200 text-center text-sm">
+        자세한 사용법
+      </button>
+    </div>
+  </section>
+
+  <!-- 2. Hidden INDEX Section (Usage Instructions Modal/Panel) -->
+  <div id="usage-modal" class="fixed inset-0 bg-brand-charcoal/40 backdrop-blur-sm z-50 flex items-center justify-center hidden p-4">
+    <div class="bg-white border border-brand-border rounded-2xl w-full max-w-2xl max-h-[85vh] overflow-y-auto p-6 md:p-8 shadow-xl relative animate-fade-in">
+      <button onclick="toggleUsageModal()" class="absolute top-4 right-4 text-gray-400 hover:text-brand-charcoal text-xl p-2 font-bold">
+        &times;
+      </button>
+      
+      <div class="mb-6">
+        <span class="text-xs font-bold uppercase tracking-widest text-brand-purple">Usage Manual</span>
+        <h2 class="text-2xl font-bold mt-1 text-brand-charcoal">도박예방교육 자동작성기 사용 가이드</h2>
+      </div>
+
+      <div class="space-y-6 text-sm text-gray-600 leading-relaxed">
+        <!-- Step 1 -->
+        <div class="flex flex-col md:flex-row gap-4 border-b border-gray-100 pb-5">
+          <div class="md:w-1/3 shrink-0 bg-gray-50 rounded-xl p-3 flex items-center justify-center border border-gray-200/50">
+            <span class="text-4xl">📤</span>
+          </div>
+          <div>
+            <h4 class="font-bold text-brand-charcoal text-base mb-1">01. 설문 양식 업로드</h4>
+            <p>모바일 개별 촬영 또는 PC 일괄 스캔 문서(PDF/이미지 번들)를 앞면(선별검사지)과 뒷면(만족도조사지) 각각의 업로드 박스에 등록합니다.</p>
+          </div>
+        </div>
+
+        <!-- Step 2 -->
+        <div class="flex flex-col md:flex-row gap-4 border-b border-gray-100 pb-5">
+          <div class="md:w-1/3 shrink-0 bg-gray-50 rounded-xl p-3 flex items-center justify-center border border-gray-200/50">
+            <span class="text-4xl">⚠️</span>
+          </div>
+          <div>
+            <h4 class="font-bold text-brand-charcoal text-base mb-1">02. 업로드 개수 및 순서 정렬 일치 검증</h4>
+            <p class="text-red-500 font-medium">※ 매우 중요: 앞면 파일의 개수와 뒷면 파일의 개수가 일치하지 않으면 시스템이 자동으로 에러 경고를 표시하고 동작을 차단합니다.</p>
+            <p class="mt-1">또한, 업로드된 사진들이 학생별 촬영/정렬 순서(일련번호)와 정확히 일치하는지 다시 한 번 확인해 주세요.</p>
+          </div>
+        </div>
+
+        <!-- Step 3 -->
+        <div class="flex flex-col md:flex-row gap-4">
+          <div class="md:w-1/3 shrink-0 bg-gray-50 rounded-xl p-3 flex items-center justify-center border border-gray-200/50">
+            <span class="text-4xl">📥</span>
+          </div>
+          <div>
+            <h4 class="font-bold text-brand-charcoal text-base mb-1">03. 데이터 자가진단 및 다운로드</h4>
+            <p>검출된 마킹 데이터를 화면에서 간편하게 검수·정정한 뒤 저장합니다. 완료되면 드롭다운 유효성 규칙이 완벽 보존된 최종 엑셀 2종을 즉시 다운로드할 수 있습니다.</p>
+          </div>
+        </div>
+      </div>
+      
+      <div class="mt-8 flex justify-end">
+        <button onclick="toggleUsageModal()" class="px-6 py-2.5 bg-brand-charcoal hover:bg-brand-charcoal/90 text-white font-medium rounded-lg text-xs">
+          가이드 닫기
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 3. LEDGER Section (Modified to Download Grid Section) -->
+  <section id="ledger" class="w-full max-w-5xl mx-auto px-6 py-16 border-t border-brand-border">
+    <div class="mb-10 text-center md:text-left">
+      <span class="text-xs font-bold uppercase tracking-widest text-brand-purple">Download Files</span>
+      <h2 class="text-2xl font-bold mt-2">작성 완료 파일 다운로드</h2>
+      <p class="text-sm text-gray-400 mt-1">작성된 중앙 시스템 업로드용 엑셀 2종 파일을 개별 다운로드할 수 있습니다.</p>
+    </div>
+
+    <!-- Ledger Grid Style Download Cards -->
+    <div class="grid grid-cols-1 md:grid-cols-2 border-t border-l border-brand-border rounded-lg overflow-hidden shadow-sm bg-white">
+      
+      <!-- Download Box 1 -->
+      <a href="/api/download?type=cagi" class="border-r border-b border-brand-border p-6 transition-all duration-200 hover:bg-brand-charcoal hover:text-white group flex flex-col justify-between min-h-[140px] decoration-none">
+        <div>
+          <span class="text-[10px] font-semibold text-brand-sky block mb-1">FORM 01</span>
+          <h4 class="text-base font-extrabold text-brand-charcoal group-hover:text-white">양식_청소년도박문제선별검사_CAGI_3.xlsx</h4>
+        </div>
+        <div class="flex justify-between items-center mt-6">
+          <span class="text-xs text-gray-400 group-hover:text-gray-300">선별검사 데이터(A~M열) 작성본</span>
+          <span class="text-brand-purple group-hover:text-brand-sky font-bold text-xs">📥 다운로드</span>
+        </div>
+      </a>
+
+      <!-- Download Box 2 -->
+      <a href="/api/download?type=satisfaction" class="border-r border-b border-brand-border p-6 transition-all duration-200 hover:bg-brand-charcoal hover:text-white group flex flex-col justify-between min-h-[140px] decoration-none">
+        <div>
+          <span class="text-[10px] font-semibold text-brand-orange block mb-1">FORM 02</span>
+          <h4 class="text-base font-extrabold text-brand-charcoal group-hover:text-white">청소년예방교육만족도.xlsx</h4>
+        </div>
+        <div class="flex justify-between items-center mt-6">
+          <span class="text-xs text-gray-400 group-hover:text-gray-300">예방만족도 설문 데이터(A~N열) 작성본</span>
+          <span class="text-brand-purple group-hover:text-brand-orange font-bold text-xs">📥 다운로드</span>
+        </div>
+      </a>
+
+    </div>
+  </section>
+
+  <!-- 4. Contact Section -->
+  <footer class="w-full bg-white border-t border-brand-border py-12 px-6">
+    <div class="max-w-5xl mx-auto flex flex-col md:flex-row justify-between items-center gap-6">
+      
+      <div class="text-center md:text-left">
+        <h4 class="text-sm font-bold text-brand-charcoal">한국도박문제예방치유원 예방교육지원팀</h4>
+        <p class="text-xs text-gray-400 mt-1">Copyright © Korea Problem Gambling Agency. All Rights Reserved.</p>
+      </div>
+
+      <div class="flex gap-4 text-xs text-gray-500">
+        <a href="tel:1336" class="hover:text-brand-purple font-bold">헬프라인 1336</a>
+        <span>•</span>
+        <a href="https://www.kcgp.or.kr" target="_blank" class="hover:text-brand-purple">공식 홈페이지</a>
+      </div>
+
+    </div>
+  </footer>
+
+  <!-- Script for Modal toggling -->
+  <script>
+    function toggleUsageModal() {
+      const modal = document.getElementById('usage-modal');
+      if (modal) {
+        modal.classList.toggle('hidden');
+      }
+    }
+  </script>
+</body>
+</html>

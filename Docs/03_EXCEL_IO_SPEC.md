@@ -1,0 +1,178 @@
+# EXCEL_IO_SPEC — 엑셀 입출력 명세
+
+## 1. 원본 템플릿
+
+서버에는 다음 두 원본 템플릿을 보관한다.
+
+1. `templates/cagi/양식_청소년도박문제선별검사_CAGI_3.xlsx`
+2. `templates/satisfaction/청소년예방교육만족도.xlsx`
+
+사용자가 새 작업을 시작하면 원본 템플릿을 직접 수정하지 않고, 작업 세션별 복사본을 만든다.
+
+---
+
+## 2. 파일별 시트명
+
+| 파일 | 입력 시트명 | 코드 시트명 |
+|---|---|---|
+| CAGI | 청소년도박문제선별검사 | 코드 |
+| 만족도 | 청소년예방교육만족도 | 코드 |
+
+시트명을 하드코딩하되, 저장 전 존재 여부를 검증한다. 시트명이 없으면 템플릿 오류로 처리한다.
+
+---
+
+## 3. 입력 시작 행
+
+두 파일 모두 3행부터 실제 학생 데이터를 입력한다.
+
+| 학생 순번 | 엑셀 행 |
+|---:|---:|
+| 1 | 3 |
+| 2 | 4 |
+| 3 | 5 |
+| 10 | 12 |
+
+행을 새로 삽입하지 않는다. 다음 빈 행에 값을 쓴다.
+
+---
+
+## 4. 다음 빈 행 계산
+
+### 4.1 원칙
+
+CAGI 파일과 만족도 파일의 행 번호는 항상 동일해야 한다.
+
+따라서 다음 빈 행은 앱 내부 학생 리스트 기준으로 계산하는 것을 권장한다.
+
+```ts
+const targetRow = 3 + confirmedStudents.length;
+```
+
+파일에서 직접 빈 행을 찾는 경우 CAGI와 만족도 파일의 상태가 불일치할 수 있으므로 주의한다.
+
+### 4.2 저장 트랜잭션
+
+학생 1명 저장 시 다음 순서를 따른다.
+
+1. 학생 데이터 검증
+2. 대상 행 번호 계산
+3. CAGI 행 데이터 생성
+4. 만족도 행 데이터 생성
+5. 두 워크북에 값 입력
+6. 저장 전 메모리 검증
+7. 두 워크북 저장
+8. 저장 성공 후 학생 상태를 saved로 변경
+
+어느 한 단계라도 실패하면 두 파일 모두 저장하지 않는다.
+
+---
+
+## 5. CAGI 행 쓰기
+
+```ts
+function writeCagiRow(sheet, row, student) {
+  sheet.getCell(`A${row}`).value = student.basic.age;
+  sheet.getCell(`B${row}`).value = student.basic.gender;
+  sheet.getCell(`C${row}`).value = student.basic.schoolType;
+  sheet.getCell(`D${row}`).value = student.basic.grade;
+  sheet.getCell(`E${row}`).value = student.cagi.q01;
+  sheet.getCell(`F${row}`).value = student.cagi.q02;
+  sheet.getCell(`G${row}`).value = student.cagi.q03;
+  sheet.getCell(`H${row}`).value = student.cagi.q04;
+  sheet.getCell(`I${row}`).value = student.cagi.q05;
+  sheet.getCell(`J${row}`).value = student.cagi.q06;
+  sheet.getCell(`K${row}`).value = student.cagi.q07;
+  sheet.getCell(`L${row}`).value = student.cagi.q08;
+  sheet.getCell(`M${row}`).value = student.cagi.q09;
+}
+```
+
+---
+
+## 6. 만족도 행 쓰기
+
+```ts
+function writeSatisfactionRow(sheet, row, student) {
+  sheet.getCell(`A${row}`).value = student.basic.age;
+  sheet.getCell(`B${row}`).value = student.basic.gender;
+  sheet.getCell(`C${row}`).value = student.basic.schoolType;
+  sheet.getCell(`D${row}`).value = student.basic.grade;
+  sheet.getCell(`E${row}`).value = student.satisfaction.q01;
+  sheet.getCell(`F${row}`).value = student.satisfaction.q02;
+  sheet.getCell(`G${row}`).value = student.satisfaction.q03;
+  sheet.getCell(`H${row}`).value = student.satisfaction.q04;
+  sheet.getCell(`I${row}`).value = student.satisfaction.q05;
+  sheet.getCell(`J${row}`).value = student.satisfaction.q06;
+  sheet.getCell(`K${row}`).value = student.satisfaction.q07;
+  sheet.getCell(`L${row}`).value = student.satisfaction.q08;
+  sheet.getCell(`M${row}`).value = student.satisfaction.q09;
+  sheet.getCell(`N${row}`).value = student.satisfaction.q10;
+}
+```
+
+---
+
+## 7. 데이터 타입
+
+| 값 | 엑셀 타입 |
+|---|---|
+| age | number |
+| gender | string |
+| schoolType | string |
+| grade | string |
+| cagi 응답 | number |
+| satisfaction 응답 | number |
+
+숫자값을 문자열로 저장하지 않는다. 특히 `"0"`, `"1"` 대신 `0`, `1`로 저장한다.
+
+---
+
+## 8. 데이터 유효성 검사 보존
+
+기존 엑셀 템플릿의 유효성 검사는 일반적인 `dataValidations`가 아니라 Excel 확장 영역인 `x14:dataValidations`에 존재한다.
+
+따라서 다음 보존 조건을 만족해야 한다.
+
+1. 원본 workbook structure 보존
+2. 시트명 보존
+3. 병합셀 보존
+4. 스타일 보존
+5. 코드 시트 보존
+6. extLst 보존
+7. x14:dataValidations 보존
+
+개발 중 사용하는 라이브러리가 저장 과정에서 x14 확장 영역을 제거할 가능성이 있다. 반드시 저장 후 파일을 재열어 드롭다운이 유지되는지 확인한다.
+
+---
+
+## 9. 엑셀 저장 후 검증
+
+저장 후 다음을 자동 검증한다.
+
+| 검증 | 성공 조건 |
+|---|---|
+| 파일 열기 | 저장된 xlsx가 정상적으로 열림 |
+| 시트 존재 | 지정 시트와 코드 시트가 존재함 |
+| 3행 값 확인 | 저장한 값과 읽은 값이 일치함 |
+| 드롭다운 보존 | A~D 및 문항 열의 데이터 유효성 검사 유지 |
+| 행 번호 일치 | 두 파일의 학생 데이터 행 수가 동일함 |
+| 잘못된 값 없음 | 앱 내부 검증 재통과 |
+
+---
+
+## 10. 파일명 규칙
+
+다운로드 파일명 예시:
+
+```text
+도박예방교육_CAGI_2026-07-09.xlsx
+도박예방교육_만족도_2026-07-09.xlsx
+```
+
+학교명 또는 기관명을 사용자가 입력하는 경우:
+
+```text
+도박예방교육_CAGI_2026-07-09_○○중학교.xlsx
+도박예방교육_만족도_2026-07-09_○○중학교.xlsx
+```
