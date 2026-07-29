@@ -1,0 +1,246 @@
+import sharp from 'sharp';
+import { ChoiceGroup, NormalizedRect } from './roiTemplates';
+
+export interface ImageAnalysisData {
+  width: number;
+  height: number;
+  pixels: Buffer;
+  contentBounds?: PixelBounds;
+}
+
+export interface PixelBounds {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+export interface CandidateScore {
+  value: number | string;
+  score: number;
+}
+
+export interface ChoiceGroupResult {
+  field: string;
+  value?: number | string;
+  confidence: 'high' | 'medium' | 'low';
+  candidates: CandidateScore[];
+}
+
+export async function loadImageAnalysisData(filePath: string): Promise<ImageAnalysisData> {
+  const image = sharp(filePath).rotate().flatten({ background: '#ffffff' }).grayscale();
+  const metadata = await image.metadata();
+  const width = metadata.width || 0;
+  const height = metadata.height || 0;
+
+  if (width <= 0 || height <= 0) {
+    throw new Error('이미지 크기를 읽을 수 없습니다.');
+  }
+
+  const pixels = await image.raw().toBuffer();
+  return {
+    width,
+    height,
+    pixels,
+    contentBounds: detectContentBounds({ width, height, pixels }),
+  };
+}
+
+export function calculateDarkPixelDensity(
+  image: ImageAnalysisData,
+  normalizedRect: NormalizedRect,
+  darkThreshold = 150,
+): number {
+  const bounds = image.contentBounds || {
+    left: 0,
+    top: 0,
+    right: image.width,
+    bottom: image.height,
+  };
+  const baseWidth = bounds.right - bounds.left;
+  const baseHeight = bounds.bottom - bounds.top;
+  const left = clamp(Math.floor(bounds.left + normalizedRect.x * baseWidth), 0, image.width - 1);
+  const top = clamp(Math.floor(bounds.top + normalizedRect.y * baseHeight), 0, image.height - 1);
+  const right = clamp(Math.ceil(bounds.left + (normalizedRect.x + normalizedRect.width) * baseWidth), left + 1, image.width);
+  const bottom = clamp(Math.ceil(bounds.top + (normalizedRect.y + normalizedRect.height) * baseHeight), top + 1, image.height);
+
+  let darkPixels = 0;
+  let totalPixels = 0;
+
+  for (let y = top; y < bottom; y++) {
+    for (let x = left; x < right; x++) {
+      const value = image.pixels[y * image.width + x];
+      if (value < darkThreshold) {
+        darkPixels++;
+      }
+      totalPixels++;
+    }
+  }
+
+  return totalPixels === 0 ? 0 : darkPixels / totalPixels;
+}
+
+export function detectContentBounds(image: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>): PixelBounds {
+  const frameBounds = detectFrameBounds(image);
+  if (frameBounds) {
+    return frameBounds;
+  }
+
+  const darkThreshold = 220;
+  const minX = Math.floor(image.width * 0.02);
+  const maxX = Math.ceil(image.width * 0.98);
+  const minY = Math.floor(image.height * 0.05);
+  const maxY = Math.ceil(image.height * 0.98);
+
+  let left = maxX;
+  let right = minX;
+  let top = maxY;
+  let bottom = minY;
+
+  for (let y = minY; y < maxY; y++) {
+    for (let x = minX; x < maxX; x++) {
+      const value = image.pixels[y * image.width + x];
+      if (value < darkThreshold) {
+        left = Math.min(left, x);
+        right = Math.max(right, x + 1);
+        top = Math.min(top, y);
+        bottom = Math.max(bottom, y + 1);
+      }
+    }
+  }
+
+  if (left >= right || top >= bottom) {
+    return {
+      left: 0,
+      top: 0,
+      right: image.width,
+      bottom: image.height,
+    };
+  }
+
+  const paddingX = Math.round((right - left) * 0.005);
+  const paddingY = Math.round((bottom - top) * 0.005);
+
+  return {
+    left: clamp(left - paddingX, 0, image.width - 1),
+    top: clamp(top - paddingY, 0, image.height - 1),
+    right: clamp(right + paddingX, 1, image.width),
+    bottom: clamp(bottom + paddingY, 1, image.height),
+  };
+}
+
+function detectFrameBounds(image: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>): PixelBounds | null {
+  const darkThreshold = 220;
+  const minX = Math.floor(image.width * 0.05);
+  const maxX = Math.ceil(image.width * 0.95);
+  const minY = Math.floor(image.height * 0.07);
+  const maxY = Math.ceil(image.height * 0.95);
+  const horizontalRows: number[] = [];
+
+  for (let y = minY; y < maxY; y++) {
+    let darkCount = 0;
+    for (let x = minX; x < maxX; x++) {
+      if (image.pixels[y * image.width + x] < darkThreshold) {
+        darkCount++;
+      }
+    }
+
+    if (darkCount >= image.width * 0.35) {
+      horizontalRows.push(y);
+    }
+  }
+
+  if (horizontalRows.length < 2) {
+    return null;
+  }
+
+  const top = horizontalRows[0];
+  const bottom = horizontalRows[horizontalRows.length - 1] + 1;
+  const minVerticalDarkPixels = Math.max(80, (bottom - top) * 0.12);
+  const verticalCols: number[] = [];
+
+  for (let x = minX; x < maxX; x++) {
+    let darkCount = 0;
+    for (let y = top; y < bottom; y++) {
+      if (image.pixels[y * image.width + x] < darkThreshold) {
+        darkCount++;
+      }
+    }
+
+    if (darkCount >= minVerticalDarkPixels) {
+      verticalCols.push(x);
+    }
+  }
+
+  if (verticalCols.length < 2) {
+    return null;
+  }
+
+  const left = verticalCols[0];
+  const right = verticalCols[verticalCols.length - 1] + 1;
+
+  if ((right - left) < image.width * 0.45 || (bottom - top) < image.height * 0.45) {
+    return null;
+  }
+
+  return {
+    left,
+    top,
+    right,
+    bottom,
+  };
+}
+
+export function analyzeChoiceGroup(image: ImageAnalysisData, group: ChoiceGroup): ChoiceGroupResult {
+  const candidates = group.candidates
+    .map((candidate) => ({
+      value: candidate.value,
+      score: roundScore(calculateDarkPixelDensity(image, candidate.rect)),
+    }))
+    .sort((a, b) => b.score - a.score);
+
+  const best = candidates[0];
+  const second = candidates[1];
+
+  if (!best) {
+    return {
+      field: group.field,
+      confidence: 'low',
+      candidates,
+    };
+  }
+
+  const gap = best.score - (second?.score || 0);
+
+  if (best.score >= 0.35 && gap >= 0.12) {
+    return {
+      field: group.field,
+      value: best.value,
+      confidence: 'high',
+      candidates,
+    };
+  }
+
+  if (best.score >= 0.22 && gap >= 0.06) {
+    return {
+      field: group.field,
+      value: best.value,
+      confidence: 'medium',
+      candidates,
+    };
+  }
+
+  return {
+    field: group.field,
+    confidence: 'low',
+    candidates,
+  };
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
+}
+
+function roundScore(value: number): number {
+  return Math.round(value * 1000) / 1000;
+}

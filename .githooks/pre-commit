@@ -1,0 +1,17 @@
+#!/bin/sh
+
+blocked_regex='^(node_modules/|\.next/|out/|\.agents/|\.codex/|tmp/|uploads/|jobs/|tmp_extracted/|tmp_orig_extracted/|tmp_sat_orig_extracted/|tmp_.*\.zip$|\.env(\..*)?$|.*\.(pem|key|p12|pfx|crt|cer)$|(.*/)?[^/]*(secret|credential|token)[^/]*|(.*/)?serviceAccount[^/]*\.json$)'
+
+blocked_files="$(git diff --cached --name-only --diff-filter=ACMR | tr '\\' '/' | grep -Ei "$blocked_regex" || true)"
+
+if [ -n "$blocked_files" ]; then
+  echo ""
+  echo "Blocked commit: sensitive/runtime files are staged."
+  echo "Unstage these files before committing:"
+  echo "$blocked_files" | sed 's/^/ - /'
+  echo ""
+  echo "Tip: git restore --staged <path>"
+  exit 1
+fi
+
+exit 0
