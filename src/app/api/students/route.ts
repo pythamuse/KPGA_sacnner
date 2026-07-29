@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server';
-import path from 'path';
 import { validateStudent } from '../../../lib/validation/validateStudent';
 import { 
   normalizeGender, 
@@ -13,7 +12,8 @@ import {
   restoreExtLst, 
   backupJobFiles, 
   rollbackJobFiles, 
-  commitJobFiles 
+  commitJobFiles,
+  getTemplateFiles,
 } from '../../../lib/excel/templateManager';
 import { writeCagiRow } from '../../../lib/excel/writeCagi';
 import { writeSatisfactionRow } from '../../../lib/excel/writeSatisfaction';
@@ -69,10 +69,9 @@ export async function POST(req: NextRequest) {
     await satisfactionWorkbook.xlsx.writeFile(satisfactionPath);
 
     // 드롭다운 유효성 검사 복원
-    const origCagi = path.resolve(process.cwd(), 'templates', 'cagi', '양식_청소년도박문제선별검사_CAGI_3.xlsx');
-    const origSat = path.resolve(process.cwd(), 'templates', 'satisfaction', '청소년예방교육만족도.xlsx');
-    restoreExtLst(origCagi, cagiPath);
-    restoreExtLst(origSat, satisfactionPath);
+    const templates = getTemplateFiles();
+    restoreExtLst(templates.cagiPath, cagiPath);
+    restoreExtLst(templates.satisfactionPath, satisfactionPath);
 
     // 4. 저장 후 재읽기 자체 검증
     const updatedStudents = [...session.students, student];
