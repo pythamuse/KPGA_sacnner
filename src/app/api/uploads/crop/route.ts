@@ -67,7 +67,7 @@ export async function GET(req: NextRequest) {
       ? await addDebugOverlay(extracted, cropBox, `${field} ${serializeRect(cropRect)}`)
       : await extracted.png().toBuffer();
 
-    return new NextResponse(cropBuffer, {
+    return new NextResponse(new Uint8Array(cropBuffer), {
       headers: {
         'Content-Type': 'image/png',
         'Cache-Control': 'private, max-age=300',
