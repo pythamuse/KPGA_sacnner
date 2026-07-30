@@ -360,3 +360,102 @@ npm.cmd run build
 - 빨간 ROI 박스가 실제 체크박스 또는 입력칸을 정확히 감싸는지 확인한다.
 - debug crop 상단 라벨의 field명과 좌표를 보고 `roiTemplates.ts`에서 수정할 항목을 식별한다.
 - 박스가 밀려 있으면 `src/lib/recognition/roiTemplates.ts`의 해당 field 좌표를 보정한다.
+
+---
+
+## 2026-07-30 추가 구현 기록
+
+### Vercel 업로드 세션 안정화
+
+관련 파일:
+
+- `src/lib/storage/jobStore.ts`
+- `src/app/api/jobs/route.ts`
+- `src/app/api/upload/route.ts`
+- `src/app/api/recognize/route.ts`
+- `src/app/api/students/route.ts`
+- `src/app/api/download/route.ts`
+
+문제 원인:
+
+- Vercel Serverless 환경에서는 `/api/jobs`, `/api/upload`, `/api/recognize` 요청이 항상 같은 함수 인스턴스에서 처리된다고 보장할 수 없다.
+- 기존 구현은 작업 세션을 `activeJobs` 인메모리 `Map`에만 저장했다.
+- 따라서 새 작업을 만든 직후라도 업로드 요청이 다른 인스턴스에서 처리되면 `hasJobSession(jobId)`가 false가 되어 선별검사지 업로드 중 세션 없음/서버 오류가 발생할 수 있었다.
+- 이 문제는 로컬 서버에서는 잘 재현되지 않고, Vercel 배포본에서 간헐적으로 발생할 수 있다.
+
+수정 내용:
+
+- 작업 생성 시 `session.json`을 작업 폴더에 저장한다.
+- `getJobSession(jobId)`는 메모리 세션이 없으면 `session.json`에서 세션을 복구한다.
+- `hasJobSession(jobId)`는 파일 기반 세션 복구 결과를 기준으로 판단한다.
+- 학생 저장/삭제 시 세션 파일도 함께 갱신한다.
+
+운영 주의:
+
+- 현재 저장 위치는 Vercel 함수의 임시 파일 영역이다.
+- 같은 작업 흐름 내 단기 세션 복구에는 도움이 되지만, 장시간 보관 또는 인스턴스 간 영구 공유가 필요한 구조는 아니다.
+- 학생 데이터와 업로드 파일을 운영 환경에서 안정적으로 오래 유지하려면 Vercel Blob, 외부 DB, Supabase Storage 같은 영구 저장소로 전환해야 한다.
+
+재발 방지 규칙:
+
+- 새 API가 `jobId`를 검증할 때 인메모리 `Map`만 직접 참조하지 않는다.
+- 반드시 `getJobSession()` 또는 `hasJobSession()`을 사용해 파일 기반 복구 경로를 거친다.
+- 새로 추가하는 세션 상태는 `addStudentToSession()`처럼 메모리와 `session.json`을 함께 갱신해야 한다.
+
+로컬/배포 테스트 포인트:
+
+- 새 작업 생성 직후 선별검사지 PDF 또는 이미지를 업로드했을 때 404/500 세션 오류가 나지 않아야 한다.
+- 선별검사지 업로드 후 만족도조사 업로드가 같은 jobId에 누적되어야 한다.
+- 인식, 검수 저장, 다운로드까지 같은 jobId로 이어져야 한다.
+
+### PDF 업로드 용량 안정화
+
+관련 파일:
+
+- `src/components/ImageUploadPanel.tsx`
+
+문제 원인:
+
+- PDF 페이지를 `scale=2.0` PNG로 변환하면 페이지당 이미지 용량이 커져 Vercel 요청 제한 또는 브라우저 메모리 문제를 유발할 수 있다.
+- 특히 선별검사지처럼 페이지 수가 많은 PDF는 중간 페이지에서 업로드 실패가 발생할 수 있다.
+
+수정 내용:
+
+- PDF 페이지를 PNG 대신 JPEG로 변환한다.
+- 페이지 이미지가 큰 경우 `scale`과 JPEG 품질을 단계적으로 낮춰 업로드 크기를 줄인다.
+- Vercel이 JSON이 아닌 오류 응답을 반환해도 사용자에게 읽을 수 있는 업로드 실패 메시지를 표시한다.
+
+테스트 포인트:
+
+- 선별검사지 PDF 1개 업로드 시 모든 페이지가 끝까지 업로드되는지 확인한다.
+- 만족도조사 PDF 1개 업로드 시 모든 페이지가 끝까지 업로드되는지 확인한다.
+- 업로드 중 실패하면 alert 문구와 Network의 `/api/upload` 상태 코드를 함께 기록한다.
+
+### CAGI 조기개입 서비스 표기 처리
+
+관련 파일:
+
+- `src/lib/recognition/cagiEarlyIntervention.ts`
+- `src/lib/recognition/classifyForm.ts`
+- `src/app/api/recognize/route.ts`
+- `src/app/page.tsx`
+
+정책:
+
+- 선별검사지 하단의 조기개입 서비스 영역은 엑셀 추출 대상이 아니다.
+- 수기 작성 과정에서 조기개입 서비스에 표기했다가 삭제한 흔적이 있어도 CAGI 문항 인식은 계속 진행한다.
+- 조기개입 서비스 표기 흔적은 오류가 아니라 안내 노티스로만 표시한다.
+
+수정 내용:
+
+- 선별검사지 조기개입 서비스 영역의 표기 흔적을 별도 ROI로 감지한다.
+- 해당 흔적 때문에 선별검사지가 만족도조사로 오판되는 경우 `FORM_TYPE_MISMATCH`로 막지 않고 선별검사지로 유지한다.
+- 화면에는 `선별검사지 N페이지에서 조기개입 서비스 표기 흔적이 감지되었습니다...` 형태의 노티스를 표시한다.
+- 만족도조사 양식 판별 점수에서는 선별검사지 하단 조기개입 영역과 겹칠 수 있는 하단 문항 영역을 제외해 오판 가능성을 낮춘다.
+
+테스트 포인트:
+
+- 조기개입 서비스 표기/삭제 흔적이 있는 선별검사지는 오류 없이 검수 화면으로 넘어가야 한다.
+- 노티스에는 해당 선별검사지 페이지 번호가 표시되어야 한다.
+- CAGI 문항 1~9만 추출되어야 하며 조기개입 서비스 값은 저장되지 않아야 한다.
+- 실제로 만족도조사를 선별검사지 칸에 올린 경우에는 여전히 `FORM_TYPE_MISMATCH`가 발생해야 한다.
