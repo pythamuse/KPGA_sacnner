@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
 import { getJobDir } from '../../../lib/excel/templateManager';
-import { hasJobSession } from '../../../lib/storage/jobStore';
+import { ensureJobSession } from '../../../lib/storage/jobStore';
 
 export async function POST(req: NextRequest) {
   try {
@@ -16,8 +16,8 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: '필수 파라미터가 누락되었습니다.' }, { status: 400 });
     }
 
-    if (!hasJobSession(jobId)) {
-      return NextResponse.json({ error: '?묒뾽 ?몄뀡??議댁옱?섏? ?딆뒿?덈떎. ???묒뾽???앹꽦?댁＜?몄슂.' }, { status: 404 });
+    if (!ensureJobSession(jobId)) {
+      return NextResponse.json({ error: '작업 세션이 유효하지 않습니다. 새 작업을 시작해주세요.' }, { status: 404 });
     }
 
     const jobDir = getJobDir(jobId);

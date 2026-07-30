@@ -388,6 +388,7 @@ npm.cmd run build
 - 작업 생성 시 `session.json`을 작업 폴더에 저장한다.
 - `getJobSession(jobId)`는 메모리 세션이 없으면 `session.json`에서 세션을 복구한다.
 - `hasJobSession(jobId)`는 파일 기반 세션 복구 결과를 기준으로 판단한다.
+- `/api/upload`는 유효한 `job_숫자` 형식의 jobId에 대해 메모리/세션 파일이 없어도 작업 폴더와 세션을 즉시 복구한 뒤 업로드를 받는다.
 - 학생 저장/삭제 시 세션 파일도 함께 갱신한다.
 
 운영 주의:
@@ -400,6 +401,7 @@ npm.cmd run build
 
 - 새 API가 `jobId`를 검증할 때 인메모리 `Map`만 직접 참조하지 않는다.
 - 반드시 `getJobSession()` 또는 `hasJobSession()`을 사용해 파일 기반 복구 경로를 거친다.
+- 업로드 API처럼 사용자 파일을 처음 받는 경로는 `ensureJobSession()`을 사용해 Vercel의 콜드 스타트/인스턴스 분리 상황에서도 작업공간을 복구해야 한다.
 - 새로 추가하는 세션 상태는 `addStudentToSession()`처럼 메모리와 `session.json`을 함께 갱신해야 한다.
 
 로컬/배포 테스트 포인트:

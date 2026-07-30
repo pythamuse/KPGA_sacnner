@@ -1,7 +1,7 @@
 import { StudentData } from '../validation/types';
 import fs from 'fs';
 import path from 'path';
-import { getJobDir } from '../excel/templateManager';
+import { getJobDir, getJobFiles, initJobWorkspace } from '../excel/templateManager';
 
 export interface JobSession {
   jobId: string;
@@ -13,6 +13,7 @@ export interface JobSession {
 const activeJobs = new Map<string, JobSession>();
 export const DEFAULT_JOB_TTL_MS = 24 * 60 * 60 * 1000;
 const SESSION_FILE = 'session.json';
+const JOB_ID_PATTERN = /^job_\d+$/;
 
 function getSessionPath(jobId: string): string {
   return path.join(getJobDir(jobId), SESSION_FILE);
@@ -63,6 +64,28 @@ export function getJobSession(jobId: string): JobSession | undefined {
 
 export function hasJobSession(jobId: string): boolean {
   return Boolean(getJobSession(jobId));
+}
+
+export function ensureJobSession(jobId: string): JobSession | undefined {
+  const existing = getJobSession(jobId);
+  if (existing) {
+    ensureJobWorkspaceFiles(jobId);
+    return existing;
+  }
+
+  if (!JOB_ID_PATTERN.test(jobId)) {
+    return undefined;
+  }
+
+  ensureJobWorkspaceFiles(jobId);
+  return createJobSession(jobId);
+}
+
+function ensureJobWorkspaceFiles(jobId: string): void {
+  const files = getJobFiles(jobId);
+  if (!fs.existsSync(files.cagiPath) || !fs.existsSync(files.satisfactionPath)) {
+    initJobWorkspace(jobId);
+  }
 }
 
 export function clearJobUploads(jobId: string) {

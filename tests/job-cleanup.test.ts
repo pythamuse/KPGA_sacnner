@@ -71,6 +71,25 @@ describe('?묒뾽 ?몄뀡 諛??낅줈???뚯씪 ?뺣━', () => {
     expect(recognizeResponse.status).toBe(404);
   });
 
+  it('Vercel 업로드 요청에서 메모리 세션이 없어도 유효한 jobId 작업공간을 복구한다', async () => {
+    const jobId = `job_${Date.now()}999`;
+    const jobDir = getJobDir(jobId);
+
+    try {
+      const uploadResponse = await uploadImage(jobId, 'cagi');
+      expect(uploadResponse.status).toBe(200);
+
+      const uploadDir = path.join(jobDir, 'uploads');
+      expect(fs.existsSync(path.join(jobDir, 'session.json'))).toBe(true);
+      expect(fs.existsSync(uploadDir)).toBe(true);
+      expect(fs.readdirSync(uploadDir).some((filename) => filename.startsWith('cagi_'))).toBe(true);
+    } finally {
+      if (fs.existsSync(jobDir)) {
+        fs.rmSync(jobDir, { recursive: true, force: true });
+      }
+    }
+  });
+
   it('POST /api/jobs/cleanup?scope=expired ???뚮옒???묒뾽 ?몄뀡怨??뚯씪???쒓굅', async () => {
     const jobId = await createJob();
     const jobDir = getJobDir(jobId);
