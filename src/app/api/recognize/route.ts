@@ -6,6 +6,7 @@ import { classifyForm } from '../../../lib/recognition/classifyForm';
 import { recognizeStudentForms } from '../../../lib/recognition/detectCheckmarks';
 import { matchBatch } from '../../../lib/recognition/batchMatcher';
 import { hasJobSession } from '../../../lib/storage/jobStore';
+import { hasCagiEarlyInterventionMarks } from '../../../lib/recognition/cagiEarlyIntervention';
 
 export async function POST(req: NextRequest) {
   try {
@@ -44,14 +45,31 @@ export async function POST(req: NextRequest) {
       uploadedAs: 'cagi' | 'satisfaction';
       detectedAs: 'cagi' | 'satisfaction';
     }> = [];
+    const earlyInterventionFilenames = new Set<string>();
 
     await Promise.all(
       allFiles.map(async (filename) => {
         const filePath = path.join(uploadDir, filename);
         const formType = await classifyForm(filePath);
         const uploadedAs = getUploadedFormType(filename);
+        const hasEarlyInterventionMarks = uploadedAs === 'cagi'
+          ? await hasCagiEarlyInterventionMarks(filePath)
+          : false;
 
-        if (uploadedAs && formType !== 'unknown' && uploadedAs !== formType) {
+        if (hasEarlyInterventionMarks) {
+          earlyInterventionFilenames.add(filename);
+        }
+
+        const shouldKeepAsCagiWithNotice = uploadedAs === 'cagi' &&
+          formType === 'satisfaction' &&
+          hasEarlyInterventionMarks;
+
+        if (
+          uploadedAs &&
+          formType !== 'unknown' &&
+          uploadedAs !== formType &&
+          !shouldKeepAsCagiWithNotice
+        ) {
           typeMismatches.push({
             filename,
             uploadedAs,
@@ -60,9 +78,11 @@ export async function POST(req: NextRequest) {
           return;
         }
 
-        if (formType === 'cagi') {
+        const effectiveFormType = shouldKeepAsCagiWithNotice ? 'cagi' : formType;
+
+        if (effectiveFormType === 'cagi') {
           cagiPaths.push(filePath);
-        } else if (formType === 'satisfaction') {
+        } else if (effectiveFormType === 'satisfaction') {
           satisfactionPaths.push(filePath);
         }
       })
@@ -70,6 +90,7 @@ export async function POST(req: NextRequest) {
 
     const cagiCount = cagiPaths.length;
     const satisfactionCount = satisfactionPaths.length;
+    const earlyInterventionWarnings = buildEarlyInterventionWarnings(cagiPaths, earlyInterventionFilenames);
 
     if (typeMismatches.length > 0) {
       return NextResponse.json({
@@ -129,7 +150,7 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({
       studentDrafts,
-      warnings: []
+      warnings: earlyInterventionWarnings
     });
 
   } catch (err: any) {
@@ -138,6 +159,32 @@ export async function POST(req: NextRequest) {
       { status: 500 }
     );
   }
+}
+
+function buildEarlyInterventionWarnings(cagiPaths: string[], markedFilenames: Set<string>): string[] {
+  if (markedFilenames.size === 0) {
+    return [];
+  }
+
+  const sortedCagiFilenames = [...cagiPaths]
+    .map((filePath) => path.basename(filePath))
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
+
+  const pageNumbers = sortedCagiFilenames
+    .map((filename, index) => markedFilenames.has(filename) ? index + 1 : undefined)
+    .filter((pageNumber): pageNumber is number => pageNumber !== undefined);
+
+  if (pageNumbers.length === 0) {
+    return [];
+  }
+
+  return [
+    `선별검사지 ${formatPageNumbers(pageNumbers)}페이지에서 조기개입 서비스 표기 흔적이 감지되었습니다. 해당 영역은 엑셀 추출 대상에서 제외하고 선별검사지 문항만 인식했습니다.`
+  ];
+}
+
+function formatPageNumbers(pageNumbers: number[]): string {
+  return pageNumbers.join(', ');
 }
 
 function getUploadedFormType(filename: string): 'cagi' | 'satisfaction' | undefined {

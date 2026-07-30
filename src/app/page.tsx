@@ -120,6 +120,7 @@ export default function Home() {
   const [isSaving, setIsSaving] = useState(false);
   const [isUploadingFiles, setIsUploadingFiles] = useState(false);
   const [errors, setErrors] = useState<ValidationError[]>([]);
+  const [notices, setNotices] = useState<string[]>([]);
 
   const resetDraft = () => {
     setCagiImageId(null);
@@ -127,6 +128,7 @@ export default function Home() {
     setDrafts(null);
     setCurrentDraftIndex(0);
     setErrors([]);
+    setNotices([]);
   };
 
   const handleStartNewJob = async (selectedMode: UploadMode) => {
@@ -139,6 +141,7 @@ export default function Home() {
       setStudents([]);
       resetDraft();
       setErrors([]);
+      setNotices([]);
     } catch (err: any) {
       alert(`새 작업을 시작할 수 없습니다: ${err.message}`);
     }
@@ -159,6 +162,7 @@ export default function Home() {
     if (currentCagi && currentSat && jobId) {
       setIsRecognizing(true);
       setErrors([]);
+      setNotices([]);
       try {
         const res = await fetch('/api/recognize', {
           method: 'POST',
@@ -174,6 +178,7 @@ export default function Home() {
         }
 
         setDrafts(data.studentDrafts);
+        setNotices(data.warnings || []);
         setCurrentDraftIndex(0);
       } catch (err: any) {
         setErrors([{ code: 'API_ERROR', message: `이미지 인식 요청 오류: ${err.message}` }]);
@@ -188,6 +193,7 @@ export default function Home() {
 
     setIsRecognizing(true);
     setErrors([]);
+    setNotices([]);
     try {
       const res = await fetch('/api/recognize', {
         method: 'POST',
@@ -203,6 +209,7 @@ export default function Home() {
       }
 
       setDrafts(data.studentDrafts);
+      setNotices(data.warnings || []);
       setCurrentDraftIndex(0);
     } catch (err: any) {
       setErrors([{ code: 'API_ERROR', message: `일괄 이미지 분석 오류: ${err.message}` }]);
@@ -253,6 +260,7 @@ export default function Home() {
       if (nextIndex < drafts.length) {
         setCurrentDraftIndex(nextIndex);
         setErrors([]);
+        setNotices([]);
       } else {
         resetDraft();
       }
@@ -305,6 +313,16 @@ export default function Home() {
         <div className="work-grid">
           <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
             <ErrorSummary errors={errors} />
+            {notices.length > 0 && (
+              <div className="notice">
+                <strong>확인 안내:</strong>
+                <ul style={{ margin: '8px 0 0', paddingLeft: 18 }}>
+                  {notices.map((notice, index) => (
+                    <li key={index}>{notice}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
 
             {!hasDrafts && !isRecognizing && (
               <ImageUploadPanel

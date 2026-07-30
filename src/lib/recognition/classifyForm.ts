@@ -47,7 +47,7 @@ async function classifyByImageContent(filePath: string): Promise<ClassifiedFormT
   try {
     const image = await loadImageAnalysisData(filePath);
     const cagiScore = scoreChoiceLayout(image, cagiTemplate.choiceGroups);
-    const satisfactionScore = scoreChoiceLayout(image, satisfactionTemplate.choiceGroups);
+    const satisfactionScore = scoreChoiceLayout(image, getSatisfactionClassificationGroups());
     const scoreGap = Math.abs(cagiScore - satisfactionScore);
 
     if (scoreGap < 0.05) {
@@ -66,6 +66,17 @@ async function classifyByImageContent(filePath: string): Promise<ClassifiedFormT
   } catch {
     return 'unknown';
   }
+}
+
+function getSatisfactionClassificationGroups(): ChoiceGroup[] {
+  return satisfactionTemplate.choiceGroups.filter((group) => {
+    if (!group.field.startsWith('satisfaction.q')) {
+      return true;
+    }
+
+    const questionNumber = Number(group.field.replace('satisfaction.q', ''));
+    return questionNumber <= 5;
+  });
 }
 
 function scoreChoiceLayout(image: ImageAnalysisData, groups: ChoiceGroup[]): number {
