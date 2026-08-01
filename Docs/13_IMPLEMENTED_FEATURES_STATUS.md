@@ -6,7 +6,7 @@
 
 이 문서는 현재 코드에 실제 구현되어 검증까지 완료된 기능과, 구현은 되었지만 추가 QA가 필요한 기능을 한곳에 정리한다.
 
-상세 로드맵은 `Docs/12_REAL_FEATURE_IMPLEMENTATION_ROADMAP.md`, 최종 인수 기준은 `Docs/09_ACCEPTANCE_CHECKLIST.md`를 따른다.
+상세 로드맵은 `Docs/12_REAL_FEATURE_IMPLEMENTATION_ROADMAP.md`, 최종 인수 기준은 `Docs/09_ACCEPTANCE_CHECKLIST.md`를 따른다. 실제 Vercel 프리뷰 배포본에서 브라우저로 직접 테스트한 피드백(치명적인 세션 유실 문제 포함)은 `Docs/14_PREVIEW_DEPLOYMENT_QA_2026-08-01.md`를 참고한다.
 
 ---
 
