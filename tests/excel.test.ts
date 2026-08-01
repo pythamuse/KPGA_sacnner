@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import fs from 'fs';
 import path from 'path';
-import { initJobWorkspace, loadJobWorkbooks, getJobDir, restoreExtLst } from '../src/lib/excel/templateManager';
-import { writeCagiRow } from '../src/lib/excel/writeCagi';
-import { writeSatisfactionRow } from '../src/lib/excel/writeSatisfaction';
+import { initJobWorkspace, loadJobWorkbooks, getJobDir, restoreExtLst, getTemplateFiles } from '../src/lib/excel/templateManager';
+import { writeCagiRow, writeCpgiRow } from '../src/lib/excel/writeCagi';
+import { writeSatisfactionRow, writeAdultSatisfactionRow } from '../src/lib/excel/writeSatisfaction';
 import { verifyWorkbooks } from '../src/lib/excel/verifyWorkbook';
 import { StudentData } from '../src/lib/validation/types';
 
@@ -93,6 +93,67 @@ describe('엑셀 입출력 및 보존 테스트', () => {
     restoreExtLst(origSat, satisfactionPath);
 
     const result = await verifyWorkbooks(cagiPath, satisfactionPath, students);
+    expect(result.errors).toEqual([]);
+    expect(result.ok).toBe(true);
+  });
+});
+
+describe('성인 CPGI/만족도 엑셀 입출력 테스트', () => {
+  const ADULT_TEST_JOB_ID = 'test-job-excel-adult';
+
+  const sampleAdultStudent: StudentData = {
+    track: 'adult',
+    source: { cagiImageId: 'img_cpgi', satisfactionImageId: 'img_adult_sat' },
+    basic: { age: 30, gender: '남' },
+    cagi: { q01: 0, q02: 1, q03: 1, q04: 0, q05: 3, q06: 0, q07: 1, q08: 0, q09: 3 },
+    satisfaction: { q01: 1, q02: 0, q03: 2, q04: 1, q05: 3, q06: 2, q07: 1, q08: 3, q09: 3, q10: 4 },
+    status: 'confirmed'
+  };
+
+  beforeAll(() => {
+    initJobWorkspace(ADULT_TEST_JOB_ID, 'adult');
+  });
+
+  afterAll(() => {
+    const dir = getJobDir(ADULT_TEST_JOB_ID);
+    if (fs.existsSync(dir)) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('성인 템플릿은 정확한 파일명(양식_성인도박문제선별검사_CPGI.xlsx / 성인예방교육만족도.xlsx)으로 복사된다', () => {
+    const dir = getJobDir(ADULT_TEST_JOB_ID);
+    expect(fs.existsSync(path.join(dir, '양식_성인도박문제선별검사_CPGI.xlsx'))).toBe(true);
+    expect(fs.existsSync(path.join(dir, '성인예방교육만족도.xlsx'))).toBe(true);
+  });
+
+  it('성인 컬럼 레이아웃(A=연령대,B=성별,C~=문항)으로 저장 및 드롭다운 보존 검증을 통과한다', async () => {
+    const { cagiWorkbook, satisfactionWorkbook, cagiPath, satisfactionPath } = await loadJobWorkbooks(ADULT_TEST_JOB_ID, 'adult');
+
+    const cagiSheet = cagiWorkbook.getWorksheet('성인도박문제선별검사')!;
+    const satSheet = satisfactionWorkbook.getWorksheet('성인예방교육만족도')!;
+
+    writeCpgiRow(cagiSheet, 3, sampleAdultStudent);
+    writeAdultSatisfactionRow(satSheet, 3, sampleAdultStudent);
+
+    await cagiWorkbook.xlsx.writeFile(cagiPath);
+    await satisfactionWorkbook.xlsx.writeFile(satisfactionPath);
+
+    const templates = getTemplateFiles('adult');
+    restoreExtLst(templates.cagiPath, cagiPath, '성인도박문제선별검사');
+    restoreExtLst(templates.satisfactionPath, satisfactionPath, '성인예방교육만족도');
+
+    // 학교유형/학년 컬럼이 없으므로 CPGI 01은 C열, 만족도 문항1은 C열에 바로 온다.
+    expect(cagiSheet.getCell('A3').value).toBe(30);
+    expect(cagiSheet.getCell('B3').value).toBe('남');
+    expect(cagiSheet.getCell('C3').value).toBe(0);
+    expect(cagiSheet.getCell('K3').value).toBe(3); // CPGI 09
+
+    expect(satSheet.getCell('A3').value).toBe(30);
+    expect(satSheet.getCell('C3').value).toBe(1); // 문항1
+    expect(satSheet.getCell('L3').value).toBe(4); // 문항10
+
+    const result = await verifyWorkbooks(cagiPath, satisfactionPath, [sampleAdultStudent], 'adult');
     expect(result.errors).toEqual([]);
     expect(result.ok).toBe(true);
   });

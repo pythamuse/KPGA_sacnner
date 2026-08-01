@@ -134,3 +134,79 @@ describe('데이터 검증 테스트', () => {
     expect(result.errors.some(e => e.code === 'INVALID_SAT_SCALE')).toBe(true);
   });
 });
+
+describe('성인 CPGI 트랙 검증 테스트', () => {
+  const validAdultStudent: StudentData = {
+    track: 'adult',
+    source: {
+      cagiImageId: 'img_cpgi_1',
+      satisfactionImageId: 'img_adult_sat_1'
+    },
+    basic: {
+      age: 30,
+      gender: '남'
+      // 성인 트랙은 학교유형·학년 컬럼이 없음
+    },
+    cagi: {
+      q01: 0, q02: 1, q03: 1, q04: 0, q05: 3, q06: 0, q07: 1, q08: 0, q09: 3
+    },
+    satisfaction: {
+      q01: 1, q02: 0, q03: 2, q04: 1, q05: 3, q06: 2, q07: 1, q08: 3, q09: 3, q10: 4
+    },
+    status: 'draft'
+  };
+
+  it('성인 유효 데이터는 통과한다', () => {
+    const result = validateStudent(validAdultStudent);
+    expect(result.ok).toBe(true);
+    expect(result.errors.length).toBe(0);
+  });
+
+  it('연령대(20~70대 코드)가 아니면 실패한다', () => {
+    const invalidAgeBand = {
+      ...validAdultStudent,
+      basic: { ...validAdultStudent.basic, age: 35 } // 정확한 실제나이는 연령대 코드가 아님(자동보정 실패 케이스는 아래에서 별도 확인)
+    };
+    // 35는 30대로 보정되므로 통과해야 정상 - 보정이 안 되는 값으로 실패 케이스를 만든다.
+    const trulyInvalid = {
+      ...validAdultStudent,
+      basic: { ...validAdultStudent.basic, age: 5 }
+    };
+    expect(validateStudent(invalidAgeBand).ok).toBe(true);
+    const result = validateStudent(trulyInvalid);
+    expect(result.ok).toBe(false);
+    expect(result.errors.some(e => e.code === 'INVALID_AGE_BAND')).toBe(true);
+  });
+
+  it('학교유형/학년이 없어도 통과한다 (성인 트랙은 필수 아님)', () => {
+    const result = validateStudent(validAdultStudent);
+    expect(result.errors.some(e => e.code === 'INVALID_SCHOOL_TYPE' || e.code === 'INVALID_GRADE')).toBe(false);
+  });
+
+  it('CPGI 문항이 0~3 범위를 벗어나면 실패한다', () => {
+    const invalidCpgi = {
+      ...validAdultStudent,
+      cagi: { ...validAdultStudent.cagi, q05: 4 }
+    };
+    const result = validateStudent(invalidCpgi);
+    expect(result.ok).toBe(false);
+    expect(result.errors.some(e => e.code === 'INVALID_CAGI_VALUE')).toBe(true);
+  });
+
+  it('성인 만족도는 문항1~10 전부 0~4 범위로 검증된다', () => {
+    // 청소년 규칙(문항1: 1~4)을 적용하면 0은 실패해야 하지만, 성인은 0~4이므로 통과해야 한다.
+    const q01Zero = {
+      ...validAdultStudent,
+      satisfaction: { ...validAdultStudent.satisfaction, q01: 0 }
+    };
+    expect(validateStudent(q01Zero).ok).toBe(true);
+
+    const q01OutOfRange = {
+      ...validAdultStudent,
+      satisfaction: { ...validAdultStudent.satisfaction, q01: 5 }
+    };
+    const result = validateStudent(q01OutOfRange);
+    expect(result.ok).toBe(false);
+    expect(result.errors.some(e => e.code === 'INVALID_SAT_SCALE')).toBe(true);
+  });
+});

@@ -9,7 +9,7 @@ import { POST as recognizePOST } from '../src/app/api/recognize/route';
 import { POST as cleanupPOST } from '../src/app/api/jobs/cleanup/route';
 
 async function createJob() {
-  const response = await jobsPOST();
+  const response = await jobsPOST(new Request('http://localhost/api/jobs', { method: 'POST' }) as any);
   const body = await response.json();
   return body.jobId as string;
 }

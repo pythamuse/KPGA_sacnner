@@ -29,7 +29,7 @@ afterAll(() => {
 
 describe('인식 API 양식 칸 불일치 감지', () => {
   it('CAGI 칸에 만족도 양식 이미지가 업로드되면 FORM_TYPE_MISMATCH를 반환한다', async () => {
-    const jobResponse = await jobsPOST();
+    const jobResponse = await jobsPOST(new Request('http://localhost/api/jobs', { method: 'POST' }) as any);
     const { jobId } = await jobResponse.json();
     const jobDir = getJobDir(jobId);
     createdJobDirs.push(jobDir);

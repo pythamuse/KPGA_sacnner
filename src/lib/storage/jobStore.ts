@@ -1,10 +1,11 @@
 import { StudentData } from '../validation/types';
 import fs from 'fs';
 import path from 'path';
-import { getJobDir, getJobFiles, initJobWorkspace } from '../excel/templateManager';
+import { FormTrack, getJobDir, getJobFiles, initJobWorkspace } from '../excel/templateManager';
 
 export interface JobSession {
   jobId: string;
+  track: FormTrack;
   students: StudentData[];
   createdAt: number;
 }
@@ -39,6 +40,9 @@ function loadJobSession(jobId: string): JobSession | undefined {
     if (!session.jobId || !Array.isArray(session.students) || typeof session.createdAt !== 'number') {
       return undefined;
     }
+    if (session.track !== 'adult') {
+      session.track = 'youth'; // 구버전 session.json 호환
+    }
 
     activeJobs.set(jobId, session);
     return session;
@@ -47,9 +51,10 @@ function loadJobSession(jobId: string): JobSession | undefined {
   }
 }
 
-export function createJobSession(jobId: string): JobSession {
+export function createJobSession(jobId: string, track: FormTrack = 'youth'): JobSession {
   const session: JobSession = {
     jobId,
+    track,
     students: [],
     createdAt: Date.now()
   };
@@ -66,10 +71,15 @@ export function hasJobSession(jobId: string): boolean {
   return Boolean(getJobSession(jobId));
 }
 
-export function ensureJobSession(jobId: string): JobSession | undefined {
+/**
+ * track을 명시하지 않으면(예: 업로드 API처럼 트랙을 모르는 호출부) 기존 세션의
+ * track을 그대로 쓴다. 세션이 아예 없는 복구 상황(예: Vercel 콜드 스타트로
+ * session.json까지 유실된 경우)에만 track 기본값(youth)으로 새로 만든다.
+ */
+export function ensureJobSession(jobId: string, track?: FormTrack): JobSession | undefined {
   const existing = getJobSession(jobId);
   if (existing) {
-    ensureJobWorkspaceFiles(jobId);
+    ensureJobWorkspaceFiles(jobId, existing.track);
     return existing;
   }
 
@@ -77,20 +87,21 @@ export function ensureJobSession(jobId: string): JobSession | undefined {
     return undefined;
   }
 
-  ensureJobWorkspaceFiles(jobId);
-  return createJobSession(jobId);
+  const resolvedTrack = track || 'youth';
+  ensureJobWorkspaceFiles(jobId, resolvedTrack);
+  return createJobSession(jobId, resolvedTrack);
 }
 
-function ensureJobWorkspaceFiles(jobId: string): void {
-  const files = getJobFiles(jobId);
+function ensureJobWorkspaceFiles(jobId: string, track: FormTrack): void {
+  const files = getJobFiles(jobId, track);
   if (!fs.existsSync(files.cagiPath) || !fs.existsSync(files.satisfactionPath)) {
-    initJobWorkspace(jobId);
+    initJobWorkspace(jobId, track);
   }
 }
 
 export function clearJobUploads(jobId: string) {
   if (!hasJobSession(jobId)) {
-    throw new Error(`?묒뾽 ?몄뀡 ${jobId}??李얠쓣 ???놁뒿?덈떎.`);
+    throw new Error(`작업 세션 ${jobId}를 찾을 수 없습니다.`);
   }
 
   const uploadDir = path.join(getJobDir(jobId), 'uploads');
@@ -101,6 +112,7 @@ export function clearJobUploads(jobId: string) {
 
 export function deleteJobWorkspace(jobId: string) {
   activeJobs.delete(jobId);
+  jobLocks.delete(jobId);
 
   const jobDir = getJobDir(jobId);
   if (fs.existsSync(jobDir)) {
@@ -147,4 +159,18 @@ export function removeStudentFromSession(jobId: string, studentIndex: number) {
     activeJobs.set(jobId, session);
     saveJobSession(session);
   }
+}
+
+// jobId별 저장 요청을 직렬화한다. 학생 저장은 "행 번호 계산 -> 엑셀 쓰기 -> 검증 ->
+// 세션 반영"까지 여러 await를 거치는데, 같은 jobId로 두 요청이 겹치면 둘 다 같은
+// targetRow를 계산해 서로의 엑셀 행을 덮어쓸 수 있다(더블클릭, 다중 탭 등).
+// 같은 Node 프로세스 안에서는 이 락으로 직렬화되지만, Vercel처럼 요청이 서로 다른
+// 함수 인스턴스로 분산되는 환경의 동시 저장까지는 막지 못한다.
+const jobLocks = new Map<string, Promise<unknown>>();
+
+export function withJobLock<T>(jobId: string, fn: () => Promise<T>): Promise<T> {
+  const previous = jobLocks.get(jobId) || Promise.resolve();
+  const run = previous.catch(() => undefined).then(fn);
+  jobLocks.set(jobId, run.catch(() => undefined));
+  return run;
 }

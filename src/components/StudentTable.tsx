@@ -1,11 +1,14 @@
 import React from 'react';
-import { StudentData } from '../lib/validation/types';
+import { StudentData, FormTrack } from '../lib/validation/types';
 
 interface StudentTableProps {
   students: StudentData[];
+  track?: FormTrack;
 }
 
-export default function StudentTable({ students }: StudentTableProps) {
+export default function StudentTable({ students, track = 'youth' }: StudentTableProps) {
+  const isAdult = track === 'adult';
+
   return (
     <section className="panel panel-pad animate-fade-in">
       <h2 style={{ fontSize: 20, marginBottom: 14 }}>작성 완료된 학생 데이터 ({students.length}명)</h2>
@@ -25,8 +28,8 @@ export default function StudentTable({ students }: StudentTableProps) {
                 <th style={headCell}>엑셀 행</th>
                 <th style={headCell}>연령대</th>
                 <th style={headCell}>성별</th>
-                <th style={headCell}>학교유형</th>
-                <th style={headCell}>학년</th>
+                {!isAdult && <th style={headCell}>학교유형</th>}
+                {!isAdult && <th style={headCell}>학년</th>}
                 <th style={headCell}>상태</th>
               </tr>
             </thead>
@@ -35,10 +38,10 @@ export default function StudentTable({ students }: StudentTableProps) {
                 <tr key={student.studentIndex || index}>
                   <td style={bodyCell}>{index + 1}</td>
                   <td style={{ ...bodyCell, color: 'var(--brand-primary)', fontWeight: 800 }}>{student.studentIndex}행</td>
-                  <td style={bodyCell}>{student.basic.age}</td>
+                  <td style={bodyCell}>{isAdult ? `${student.basic.age}대` : student.basic.age}</td>
                   <td style={bodyCell}>{student.basic.gender}</td>
-                  <td style={bodyCell}>{student.basic.schoolType}</td>
-                  <td style={bodyCell}>{student.basic.grade}</td>
+                  {!isAdult && <td style={bodyCell}>{student.basic.schoolType}</td>}
+                  {!isAdult && <td style={bodyCell}>{student.basic.grade}</td>}
                   <td style={bodyCell}>
                     <span style={{ color: 'var(--success)', fontWeight: 800 }}>엑셀 반영 완료</span>
                   </td>

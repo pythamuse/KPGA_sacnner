@@ -6,7 +6,7 @@
 
 이 문서는 현재 코드에 실제 구현되어 검증까지 완료된 기능과, 구현은 되었지만 추가 QA가 필요한 기능을 한곳에 정리한다.
 
-상세 로드맵은 `Docs/12_REAL_FEATURE_IMPLEMENTATION_ROADMAP.md`, 최종 인수 기준은 `Docs/09_ACCEPTANCE_CHECKLIST.md`를 따른다.
+상세 로드맵은 `Docs/12_REAL_FEATURE_IMPLEMENTATION_ROADMAP.md`, 최종 인수 기준은 `Docs/09_ACCEPTANCE_CHECKLIST.md`를 따른다. 실제 Vercel 프리뷰 배포본에서 브라우저로 직접 테스트한 피드백(치명적인 세션 유실 문제 포함)은 `Docs/14_PREVIEW_DEPLOYMENT_QA_2026-08-01.md`를 참고한다.
 
 ---
 
@@ -461,3 +461,47 @@ npm.cmd run build
 - 노티스에는 해당 선별검사지 페이지 번호가 표시되어야 한다.
 - CAGI 문항 1~9만 추출되어야 하며 조기개입 서비스 값은 저장되지 않아야 한다.
 - 실제로 만족도조사를 선별검사지 칸에 올린 경우에는 여전히 `FORM_TYPE_MISMATCH`가 발생해야 한다.
+
+---
+
+## 2026-08-01 성인 CPGI 트랙 추가 및 템플릿 선택 버그 수정
+
+### 발견된 버그 수정 (성인 트랙 작업의 전제 조건)
+
+작업 착수 시점에 `templates/cagi/`, `templates/satisfaction/` 각 디렉터리에 성인용 템플릿 파일이 새로 추가되어 청소년 파일과 공존하는 상태였다. 기존 `findTemplateWorkbook()`가 "디렉터리의 첫 `.xlsx` 파일"을 그냥 집는 방식이었는데, Windows `readdirSync` 순서상 성인 파일이 먼저 열거되어 **청소년 작업에 성인 템플릿이 잘못 복사되고 학생 저장이 전부 500 에러로 실패하는 상태**였다(`npm test` 6건 실패로 재현·확인). `getTemplateFiles()`가 트랙별 정확한 파일명으로만 찾도록 고쳐서 해결했다. 관련 인코딩 깨짐(mojibake) 문자열 9곳(`jobStore.ts`, `recognize/route.ts`, `jobs/cleanup/route.ts`, `ImageUploadPanel.tsx`)도 함께 정상 한글로 복구했다.
+
+### 성인 CPGI 트랙 구현
+
+관련 파일:
+
+- `src/lib/validation/types.ts` (`FormTrack`, `StudentData.track`)
+- `src/lib/validation/normalize.ts` (`normalizeAdultAgeBand`)
+- `src/lib/validation/validateStudent.ts` (트랙별 분기)
+- `src/lib/excel/templateManager.ts` (트랙별 템플릿 파일명, 시트명 기반 `restoreExtLst`)
+- `src/lib/excel/writeCagi.ts`의 `writeCpgiRow`, `src/lib/excel/writeSatisfaction.ts`의 `writeAdultSatisfactionRow`
+- `src/lib/excel/verifyWorkbook.ts` (트랙별 레이아웃 검증)
+- `src/lib/recognition/adultDraft.ts` (성인 수동 입력 fallback draft)
+- `src/lib/storage/jobStore.ts` (`JobSession.track`, `withJobLock`)
+- `src/app/api/jobs/route.ts`, `src/app/api/students/route.ts`, `src/app/api/recognize/route.ts`, `src/app/api/download/route.ts`
+- `src/app/page.tsx`, `src/components/RecognitionReview.tsx`, `src/components/StudentTable.tsx`
+
+동작:
+
+- 첫 화면에서 "청소년 (CAGI)" / "성인 (CPGI)" 대상을 선택하면 `POST /api/jobs`에 `track`이 전달되고, 해당 트랙의 템플릿 쌍이 작업 폴더에 복사된다.
+- 성인 트랙은 기본정보가 연령대(20~70대 코드)·성별뿐이며, 학교유형·학년 입력을 아예 표시하지 않는다.
+- CPGI 01~09는 청소년 CAGI와 동일하게 0~3, 성인 만족도 문항1~10은 전 문항 0~4 균일 척도로 검증한다(원본 템플릿의 `x14:dataValidation` sqref를 직접 확인해 도출한 값).
+- `POST /api/recognize`는 성인 트랙에서 ROI 기반 자동 인식 대신 전 항목 low-confidence 수동 입력 draft를 반환한다(실제 성인 양식 촬영 샘플이 없어 ROI 좌표 보정 불가).
+- 저장은 `withJobLock(jobId, ...)`으로 직렬화해, 같은 작업에 대한 동시 저장 요청이 같은 행 번호를 계산해 서로 덮어쓰는 문제를 같은 프로세스 내에서는 막는다(Vercel처럼 여러 함수 인스턴스로 요청이 분산되는 경우까지는 막지 못함).
+
+검증:
+
+- `tests/validation.test.ts`에 성인 검증 테스트 6건 추가
+- `tests/excel.test.ts`에 성인 엑셀 쓰기/검증 테스트 2건 추가
+- `tests/integration.test.ts`에 성인 엔드투엔드 테스트 4건 추가
+- 로컬 브라우저 수동 QA: 성인/청소년 두 트랙 모두 새 작업 생성 → 업로드 → 인식 → 검수(트랙별 필드 확인) → 저장 → 학생 목록 반영 → 실제 저장된 xlsx 셀 값·드롭다운 보존까지 확인 완료
+- `npm test`: 8 files, 42 tests passed / `npm run build`: 통과
+
+제한:
+
+- 성인 양식 실제 촬영 샘플이 없어 ROI 기반 자동 체크마크 인식은 아직 구현되지 않았다(수동 입력만 가능). 실제 샘플 확보 시 `04_OCR_FORM_RECOGNITION_SPEC.md` 절차대로 좌표를 보정해야 한다.
+- `withJobLock`은 단일 Node 프로세스 안에서만 저장 요청을 직렬화한다. Vercel처럼 요청이 여러 함수 인스턴스로 분산되는 환경의 동시 저장 충돌까지는 해결하지 못한다.

@@ -6,7 +6,7 @@ import RecognitionReview from '@/components/RecognitionReview';
 import StudentTable from '@/components/StudentTable';
 import ErrorSummary from '@/components/ErrorSummary';
 import { RecognitionDraft } from '@/lib/recognition/detectCheckmarks';
-import { StudentData, ValidationError } from '@/lib/validation/types';
+import { StudentData, ValidationError, FormTrack } from '@/lib/validation/types';
 
 function UsageModal({ onClose }: { onClose: () => void }) {
   return (
@@ -48,8 +48,9 @@ function UsageModal({ onClose }: { onClose: () => void }) {
   );
 }
 
-function UploadModeSelector({ onStart }: { onStart: (mode: UploadMode) => void }) {
+function UploadModeSelector({ onStart }: { onStart: (mode: UploadMode, track: FormTrack) => void }) {
   const [selectedMode, setSelectedMode] = useState<UploadMode>('sequential');
+  const [selectedTrack, setSelectedTrack] = useState<FormTrack>('youth');
 
   return (
     <section className="section-panel">
@@ -58,8 +59,31 @@ function UploadModeSelector({ onStart }: { onStart: (mode: UploadMode) => void }
       </div>
       <div className="section-panel-body">
         <p style={{ color: 'var(--text-muted)', lineHeight: 1.6, marginBottom: 18 }}>
-          학생 1명은 선별검사지 1장과 만족도조사 1장으로 구성됩니다. 업로드 방식만 선택하면 바로 작업을 시작합니다.
+          학생(참여자) 1명은 선별검사지 1장과 만족도조사 1장으로 구성됩니다. 대상과 업로드 방식을 선택하면 바로 작업을 시작합니다.
         </p>
+        <div style={{ marginBottom: 18 }}>
+          <p style={{ fontSize: 14, fontWeight: 700, marginBottom: 10 }}>대상</p>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 16 }}>
+            <button
+              type="button"
+              className={`work-card ${selectedTrack === 'youth' ? 'selected' : ''}`}
+              onClick={() => setSelectedTrack('youth')}
+            >
+              <strong>청소년 (CAGI)</strong>
+              <span>초·중·고등학교 및 학교외기관 대상 선별검사·만족도조사입니다.</span>
+              <em>연령대·학교유형·학년 입력</em>
+            </button>
+            <button
+              type="button"
+              className={`work-card ${selectedTrack === 'adult' ? 'selected' : ''}`}
+              onClick={() => setSelectedTrack('adult')}
+            >
+              <strong>성인 (CPGI)</strong>
+              <span>성인 대상 선별검사·만족도조사입니다.</span>
+              <em>연령대(20~70대)·성별 입력</em>
+            </button>
+          </div>
+        </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 16 }}>
         <button
           type="button"
@@ -80,8 +104,13 @@ function UploadModeSelector({ onStart }: { onStart: (mode: UploadMode) => void }
           <em>PDF / 다중 이미지</em>
         </button>
       </div>
+      {selectedTrack === 'adult' && (
+        <div className="notice" style={{ marginTop: 16 }}>
+          성인 양식은 아직 자동 체크마크 인식이 준비되지 않아, 검수 화면에서 값을 직접 입력해야 합니다.
+        </div>
+      )}
       <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 18 }}>
-        <button type="button" className="btn-primary" onClick={() => onStart(selectedMode)}>
+        <button type="button" className="btn-primary" onClick={() => onStart(selectedMode, selectedTrack)}>
           선택한 방식으로 시작
         </button>
       </div>
@@ -107,6 +136,7 @@ function BrandHeader() {
 export default function Home() {
   const [jobId, setJobId] = useState<string | null>(null);
   const [uploadMode, setUploadMode] = useState<UploadMode>('sequential');
+  const [track, setTrack] = useState<FormTrack>('youth');
   const [students, setStudents] = useState<StudentData[]>([]);
   const [showUsage, setShowUsage] = useState(false);
 
@@ -131,13 +161,18 @@ export default function Home() {
     setNotices([]);
   };
 
-  const handleStartNewJob = async (selectedMode: UploadMode) => {
+  const handleStartNewJob = async (selectedMode: UploadMode, selectedTrack: FormTrack) => {
     try {
-      const res = await fetch('/api/jobs', { method: 'POST' });
+      const res = await fetch('/api/jobs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ track: selectedTrack }),
+      });
       if (!res.ok) throw new Error('서버 응답 오류');
       const data = await res.json();
       setJobId(data.jobId);
       setUploadMode(selectedMode);
+      setTrack(selectedTrack);
       setStudents([]);
       resetDraft();
       setErrors([]);
@@ -273,6 +308,9 @@ export default function Home() {
 
   const hasDrafts = Boolean(drafts && drafts.length > 0);
   const modeLabel = uploadMode === 'sequential' ? '개별/순차 촬영' : '일괄 스캔 업로드';
+  const trackLabel = track === 'adult' ? '성인 (CPGI)' : '청소년 (CAGI)';
+  const cagiFileLabel = track === 'adult' ? '양식_성인도박문제선별검사_CPGI.xlsx' : '양식_청소년도박문제선별검사_CAGI_3.xlsx';
+  const satisfactionFileLabel = track === 'adult' ? '성인예방교육만족도.xlsx' : '청소년예방교육만족도.xlsx';
   const downloadHref = (type: 'cagi' | 'satisfaction') => (jobId ? `/api/download?jobId=${jobId}&type=${type}` : '#');
   const blockEmptyDownload = (e: React.MouseEvent<HTMLAnchorElement>) => {
     if (!jobId || students.length === 0) {
@@ -299,6 +337,7 @@ export default function Home() {
         </div>
         {jobId && (
           <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+            <span className="status-pill">{trackLabel}</span>
             <span className="status-pill">{modeLabel}</span>
             <button className="btn-secondary" onClick={() => setJobId(null)}>
               돌아가기
@@ -357,6 +396,7 @@ export default function Home() {
               <RecognitionReview
                 draft={drafts[currentDraftIndex]}
                 jobId={jobId}
+                track={track}
                 onChange={handleDraftChange}
                 onSave={handleSaveStudent}
                 onReset={resetDraft}
@@ -368,7 +408,7 @@ export default function Home() {
           </div>
 
           <aside style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
-            <StudentTable students={students} />
+            <StudentTable students={students} track={track} />
 
             <section id="download-files" className="panel panel-pad">
               <p className="section-kicker">Download Files</p>
@@ -383,8 +423,8 @@ export default function Home() {
                   onClick={blockEmptyDownload}
                 >
                   <span className="form-label sky">FORM 01</span>
-                  <strong>양식_청소년도박문제선별검사_CAGI_3.xlsx</strong>
-                  <span>선별검사 데이터(A~M열) 작성본</span>
+                  <strong>{cagiFileLabel}</strong>
+                  <span>선별검사 데이터 작성본</span>
                   <em>다운로드</em>
                 </a>
                 <a
@@ -393,8 +433,8 @@ export default function Home() {
                   onClick={blockEmptyDownload}
                 >
                   <span className="form-label orange">FORM 02</span>
-                  <strong>청소년예방교육만족도.xlsx</strong>
-                  <span>예방만족도 설문 데이터(A~N열) 작성본</span>
+                  <strong>{satisfactionFileLabel}</strong>
+                  <span>예방만족도 설문 데이터 작성본</span>
                   <em>다운로드</em>
                 </a>
               </div>

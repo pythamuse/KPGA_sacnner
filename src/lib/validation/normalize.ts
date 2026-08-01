@@ -44,10 +44,26 @@ export function normalizeGrade(value: string | undefined | null): string {
 export function normalizeAge(value: string | number | undefined | null): number | undefined {
   if (value === undefined || value === null) return undefined;
   if (typeof value === 'number') return value;
-  
+
   const match = value.toString().match(/\d+/);
   if (match) {
     return parseInt(match[0], 10);
   }
   return undefined;
+}
+
+const ADULT_AGE_BANDS = [20, 30, 40, 50, 60, 70];
+
+/**
+ * 성인 CPGI/만족도 템플릿의 연령대는 청소년처럼 만 나이가 아니라
+ * 20/30/40/50/60/70(대) 코드값 중 하나다. "35" 같은 실제 나이가 들어오면
+ * 가장 가까운 낮은 연령대로 보정한다(예: 35 -> 30).
+ */
+export function normalizeAdultAgeBand(value: string | number | undefined | null): number | undefined {
+  const raw = normalizeAge(value);
+  if (raw === undefined) return undefined;
+  if (ADULT_AGE_BANDS.includes(raw)) return raw;
+
+  const band = Math.floor(raw / 10) * 10;
+  return ADULT_AGE_BANDS.includes(band) ? band : undefined;
 }
