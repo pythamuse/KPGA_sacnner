@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { withTimeout } from '@/lib/pdf/withTimeout';
 
 export type UploadMode = 'sequential' | 'batch';
 
@@ -83,7 +84,11 @@ export default function ImageUploadPanel({
 
       canvas.height = viewport.height;
       canvas.width = viewport.width;
-      await page.render({ canvasContext: context, viewport }).promise;
+      await withTimeout(
+        page.render({ canvasContext: context, viewport }).promise,
+        20000,
+        `${pageNumber}페이지 변환이 시간 내에 끝나지 않았습니다. 파일이 손상되었거나 처리하기 어려운 이미지일 수 있습니다. 다른 파일로 다시 시도하거나 이미지로 변환해 업로드해주세요.`,
+      );
 
       const blob = await canvasToBlob(canvas, 'image/jpeg', option.quality);
       canvas.width = 1;
