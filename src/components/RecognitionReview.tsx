@@ -1,9 +1,11 @@
 import React from 'react';
 import { RecognitionDraft } from '../lib/recognition/detectCheckmarks';
+import { FormTrack } from '../lib/validation/types';
 
 interface RecognitionReviewProps {
   draft: RecognitionDraft;
   jobId: string;
+  track?: FormTrack;
   onChange: (updatedDraft: RecognitionDraft) => void;
   onSave: () => void;
   onReset: () => void;
@@ -11,6 +13,8 @@ interface RecognitionReviewProps {
   currentIndex?: number;
   totalCount?: number;
 }
+
+const ADULT_AGE_BANDS = [20, 30, 40, 50, 60, 70];
 
 const confidenceLabel = {
   high: '높음',
@@ -27,6 +31,7 @@ const confidenceRank = {
 export default function RecognitionReview({
   draft,
   jobId,
+  track = 'youth',
   onChange,
   onSave,
   onReset,
@@ -34,6 +39,7 @@ export default function RecognitionReview({
   currentIndex = 1,
   totalCount = 1,
 }: RecognitionReviewProps) {
+  const isAdult = track === 'adult';
   const handleBasicChange = (field: string, val: any) => {
     onChange({
       ...draft,
@@ -289,7 +295,8 @@ export default function RecognitionReview({
   };
 
   const reviewKeys = [
-    'basic.age', 'basic.gender', 'basic.schoolType', 'basic.grade',
+    'basic.age', 'basic.gender',
+    ...(isAdult ? [] : ['basic.schoolType', 'basic.grade']),
     ...Array.from({ length: 9 }).map((_, idx) => `cagi.q${String(idx + 1).padStart(2, '0')}`),
     ...Array.from({ length: 10 }).map((_, idx) => `satisfaction.q${String(idx + 1).padStart(2, '0')}`),
   ];
@@ -343,11 +350,20 @@ export default function RecognitionReview({
           {fieldShell(
             '연령대',
             'basic.age',
-            <input
-              type="number"
-              value={draft.basic.age || ''}
-              onChange={(e) => handleBasicChange('age', e.target.value ? parseInt(e.target.value, 10) : '')}
-            />,
+            isAdult ? (
+              <select value={draft.basic.age || ''} onChange={(e) => handleBasicChange('age', e.target.value ? parseInt(e.target.value, 10) : '')}>
+                <option value="">선택 안 함</option>
+                {ADULT_AGE_BANDS.map((band) => (
+                  <option key={band} value={band}>{band}대</option>
+                ))}
+              </select>
+            ) : (
+              <input
+                type="number"
+                value={draft.basic.age || ''}
+                onChange={(e) => handleBasicChange('age', e.target.value ? parseInt(e.target.value, 10) : '')}
+              />
+            ),
           )}
           {fieldShell(
             '성별',
@@ -358,7 +374,7 @@ export default function RecognitionReview({
               <option value="여">여</option>
             </select>,
           )}
-          {fieldShell(
+          {!isAdult && fieldShell(
             '학교유형',
             'basic.schoolType',
             <select value={draft.basic.schoolType || ''} onChange={(e) => handleBasicChange('schoolType', e.target.value)}>
@@ -369,7 +385,7 @@ export default function RecognitionReview({
               <option value="학교외기관">학교외기관</option>
             </select>,
           )}
-          {fieldShell(
+          {!isAdult && fieldShell(
             '학년',
             'basic.grade',
             <select value={draft.basic.grade || ''} onChange={(e) => handleBasicChange('grade', e.target.value)}>
@@ -387,7 +403,7 @@ export default function RecognitionReview({
       </div>
 
       <div>
-        <h3 style={{ fontSize: 18, marginBottom: 14 }}>도박문제 선별검사 CAGI</h3>
+        <h3 style={{ fontSize: 18, marginBottom: 14 }}>도박문제 선별검사 {isAdult ? 'CPGI' : 'CAGI'}</h3>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 12 }}>
           {Array.from({ length: 9 }).map((_, idx) => {
             const num = String(idx + 1).padStart(2, '0');
@@ -397,15 +413,26 @@ export default function RecognitionReview({
             return (
               <div key={key} style={getFieldCardStyle(`cagi.q${num}`)}>
                 <label style={{ display: 'block', fontSize: 13, fontWeight: 700, marginBottom: 7 }}>
-                  CAGI {num}
+                  {isAdult ? 'CPGI' : 'CAGI'} {num}
                   {renderConfidenceBadge(`cagi.q${num}`)}
                 </label>
                 <select value={val !== undefined ? val : ''} onChange={(e) => handleCagiChange(key, parseInt(e.target.value, 10))}>
                   <option value="">선택</option>
-                  <option value="0">0 없다</option>
-                  <option value="1">1 가끔 있다</option>
-                  <option value="2">2 자주 있다</option>
-                  <option value="3">3 거의 항상 있다</option>
+                  {isAdult ? (
+                    <>
+                      <option value="0">0</option>
+                      <option value="1">1</option>
+                      <option value="2">2</option>
+                      <option value="3">3</option>
+                    </>
+                  ) : (
+                    <>
+                      <option value="0">0 없다</option>
+                      <option value="1">1 가끔 있다</option>
+                      <option value="2">2 자주 있다</option>
+                      <option value="3">3 거의 항상 있다</option>
+                    </>
+                  )}
                 </select>
                 {renderCandidateSummary(`cagi.q${num}`)}
                 {renderFieldCropPreview(`cagi.q${num}`)}
@@ -418,68 +445,97 @@ export default function RecognitionReview({
       <div>
         <h3 style={{ fontSize: 18, marginBottom: 14 }}>예방교육 만족도조사</h3>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 12 }}>
-          <div style={getFieldCardStyle('satisfaction.q01')}>
-            <label style={{ display: 'block', fontSize: 13, fontWeight: 700, marginBottom: 7 }}>
-              문항1 교육 참여 횟수
-              {renderConfidenceBadge('satisfaction.q01')}
-            </label>
-            <select value={draft.satisfaction.q01 !== undefined ? draft.satisfaction.q01 : ''} onChange={(e) => handleSatisfactionChange('q01', parseInt(e.target.value, 10))}>
-              <option value="">선택</option>
-              <option value="1">1 없음</option>
-              <option value="2">2 1회</option>
-              <option value="3">3 2회</option>
-              <option value="4">4 3회 이상</option>
-            </select>
-            {renderCandidateSummary('satisfaction.q01')}
-            {renderFieldCropPreview('satisfaction.q01')}
-          </div>
+          {isAdult ? (
+            Array.from({ length: 10 }).map((_, idx) => {
+              const num = idx + 1;
+              const key = num === 10 ? 'q10' : `q0${num}`;
+              const val = draft.satisfaction[key];
 
-          {Array.from({ length: 5 }).map((_, idx) => {
-            const num = idx + 2;
-            const key = `q0${num}`;
-            const val = draft.satisfaction[key];
-
-            return (
-              <div key={key} style={getFieldCardStyle(`satisfaction.q0${num}`)}>
+              return (
+                <div key={key} style={getFieldCardStyle(`satisfaction.${key}`)}>
+                  <label style={{ display: 'block', fontSize: 13, fontWeight: 700, marginBottom: 7 }}>
+                    문항{num}
+                    {renderConfidenceBadge(`satisfaction.${key}`)}
+                  </label>
+                  <select value={val !== undefined ? val : ''} onChange={(e) => handleSatisfactionChange(key, parseInt(e.target.value, 10))}>
+                    <option value="">선택</option>
+                    <option value="0">0</option>
+                    <option value="1">1</option>
+                    <option value="2">2</option>
+                    <option value="3">3</option>
+                    <option value="4">4</option>
+                  </select>
+                  {renderCandidateSummary(`satisfaction.${key}`)}
+                  {renderFieldCropPreview(`satisfaction.${key}`)}
+                </div>
+              );
+            })
+          ) : (
+            <>
+              <div style={getFieldCardStyle('satisfaction.q01')}>
                 <label style={{ display: 'block', fontSize: 13, fontWeight: 700, marginBottom: 7 }}>
-                  문항{num} 예/아니오
-                  {renderConfidenceBadge(`satisfaction.q0${num}`)}
+                  문항1 교육 참여 횟수
+                  {renderConfidenceBadge('satisfaction.q01')}
                 </label>
-                <select value={val !== undefined ? val : ''} onChange={(e) => handleSatisfactionChange(key, parseInt(e.target.value, 10))}>
+                <select value={draft.satisfaction.q01 !== undefined ? draft.satisfaction.q01 : ''} onChange={(e) => handleSatisfactionChange('q01', parseInt(e.target.value, 10))}>
                   <option value="">선택</option>
-                  <option value="0">0 아니오</option>
-                  <option value="1">1 예</option>
+                  <option value="1">1 없음</option>
+                  <option value="2">2 1회</option>
+                  <option value="3">3 2회</option>
+                  <option value="4">4 3회 이상</option>
                 </select>
-                {renderCandidateSummary(`satisfaction.q0${num}`)}
-                {renderFieldCropPreview(`satisfaction.q0${num}`)}
+                {renderCandidateSummary('satisfaction.q01')}
+                {renderFieldCropPreview('satisfaction.q01')}
               </div>
-            );
-          })}
 
-          {Array.from({ length: 4 }).map((_, idx) => {
-            const num = idx + 7;
-            const key = num === 10 ? 'q10' : `q0${num}`;
-            const val = draft.satisfaction[key];
+              {Array.from({ length: 5 }).map((_, idx) => {
+                const num = idx + 2;
+                const key = `q0${num}`;
+                const val = draft.satisfaction[key];
 
-            return (
-              <div key={key} style={getFieldCardStyle(`satisfaction.${key}`)}>
-                <label style={{ display: 'block', fontSize: 13, fontWeight: 700, marginBottom: 7 }}>
-                  문항{num} 만족도
-                  {renderConfidenceBadge(`satisfaction.${key}`)}
-                </label>
-                <select value={val !== undefined ? val : ''} onChange={(e) => handleSatisfactionChange(key, parseInt(e.target.value, 10))}>
-                  <option value="">선택</option>
-                  <option value="0">0 매우 그렇지 않다</option>
-                  <option value="1">1 그렇지 않다</option>
-                  <option value="2">2 보통이다</option>
-                  <option value="3">3 그렇다</option>
-                  <option value="4">4 매우 그렇다</option>
-                </select>
-                {renderCandidateSummary(`satisfaction.${key}`)}
-                {renderFieldCropPreview(`satisfaction.${key}`)}
-              </div>
-            );
-          })}
+                return (
+                  <div key={key} style={getFieldCardStyle(`satisfaction.q0${num}`)}>
+                    <label style={{ display: 'block', fontSize: 13, fontWeight: 700, marginBottom: 7 }}>
+                      문항{num} 예/아니오
+                      {renderConfidenceBadge(`satisfaction.q0${num}`)}
+                    </label>
+                    <select value={val !== undefined ? val : ''} onChange={(e) => handleSatisfactionChange(key, parseInt(e.target.value, 10))}>
+                      <option value="">선택</option>
+                      <option value="0">0 아니오</option>
+                      <option value="1">1 예</option>
+                    </select>
+                    {renderCandidateSummary(`satisfaction.q0${num}`)}
+                    {renderFieldCropPreview(`satisfaction.q0${num}`)}
+                  </div>
+                );
+              })}
+
+              {Array.from({ length: 4 }).map((_, idx) => {
+                const num = idx + 7;
+                const key = num === 10 ? 'q10' : `q0${num}`;
+                const val = draft.satisfaction[key];
+
+                return (
+                  <div key={key} style={getFieldCardStyle(`satisfaction.${key}`)}>
+                    <label style={{ display: 'block', fontSize: 13, fontWeight: 700, marginBottom: 7 }}>
+                      문항{num} 만족도
+                      {renderConfidenceBadge(`satisfaction.${key}`)}
+                    </label>
+                    <select value={val !== undefined ? val : ''} onChange={(e) => handleSatisfactionChange(key, parseInt(e.target.value, 10))}>
+                      <option value="">선택</option>
+                      <option value="0">0 매우 그렇지 않다</option>
+                      <option value="1">1 그렇지 않다</option>
+                      <option value="2">2 보통이다</option>
+                      <option value="3">3 그렇다</option>
+                      <option value="4">4 매우 그렇다</option>
+                    </select>
+                    {renderCandidateSummary(`satisfaction.${key}`)}
+                    {renderFieldCropPreview(`satisfaction.${key}`)}
+                  </div>
+                );
+              })}
+            </>
+          )}
         </div>
       </div>
 

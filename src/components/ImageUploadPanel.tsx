@@ -370,7 +370,7 @@ export default function ImageUploadPanel({
 
   const handleResetBatch = async () => {
     setIsBatchProcessing(true);
-    setBatchStatusMessage('?낅줈???뚯씪???뺣━?섍퀬 ?덉뒿?덈떎.');
+    setBatchStatusMessage('업로드된 파일을 정리하고 있습니다.');
 
     try {
       const res = await fetch('/api/jobs/cleanup', {
@@ -381,7 +381,7 @@ export default function ImageUploadPanel({
 
       if (!res.ok) {
         const errData = await res.json();
-        throw new Error(errData.error || '?뚯씪 ?뺣━ ?ㅽ뙣');
+        throw new Error(errData.error || '파일 정리 실패');
       }
 
       setCagiCount(0);
@@ -390,7 +390,7 @@ export default function ImageUploadPanel({
       setSatFile(null);
       setCameraError('');
     } catch (err: any) {
-      alert(`?낅줈??珥덇린??以??ㅻ쪟媛 諛쒖깮?덉뒿?덈떎: ${err.message}`);
+      alert(`업로드 초기화 중 오류가 발생했습니다: ${err.message}`);
     } finally {
       setIsBatchProcessing(false);
       setBatchStatusMessage('');

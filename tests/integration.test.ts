@@ -24,7 +24,7 @@ describe('엔드투엔드 API 통합 테스트 (일괄/스캔 대응)', () => {
   });
 
   it('1. POST /api/jobs — 작업 세션 및 템플릿 준비 성공', async () => {
-    const response = await jobsPOST();
+    const response = await jobsPOST(new Request('http://localhost/api/jobs', { method: 'POST' }) as any);
     expect(response.status).toBe(200);
     
     const body = await response.json();
@@ -40,7 +40,7 @@ describe('엔드투엔드 API 통합 테스트 (일괄/스캔 대응)', () => {
   });
 
   it('1-1. POST /api/upload — 순차 업로드 재촬영 시 같은 타입 이전 파일 제거', async () => {
-    const jobResponse = await jobsPOST();
+    const jobResponse = await jobsPOST(new Request('http://localhost/api/jobs', { method: 'POST' }) as any);
     const { jobId: replacementJobId } = await jobResponse.json();
     const replacementJobDir = getJobDir(replacementJobId);
 
@@ -191,5 +191,101 @@ describe('엔드투엔드 API 통합 테스트 (일괄/스캔 대응)', () => {
     // 세션의 학생 수가 늘어나지 않았는지 확인
     const session = getJobSession(jobId);
     expect(session?.students.length).toBe(1);
+  });
+});
+
+describe('성인 CPGI 트랙 엔드투엔드 API 통합 테스트', () => {
+  let adultJobId = '';
+
+  afterAll(() => {
+    if (adultJobId) {
+      const dir = getJobDir(adultJobId);
+      if (fs.existsSync(dir)) {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it('1. POST /api/jobs { track: "adult" } — 성인 템플릿 쌍으로 작업 세션 생성', async () => {
+    const req = new Request('http://localhost/api/jobs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ track: 'adult' }),
+    });
+    const response = await jobsPOST(req as any);
+    expect(response.status).toBe(200);
+
+    const body = await response.json();
+    expect(body.track).toBe('adult');
+    adultJobId = body.jobId;
+
+    const dir = getJobDir(adultJobId);
+    expect(fs.existsSync(path.join(dir, '양식_성인도박문제선별검사_CPGI.xlsx'))).toBe(true);
+    expect(fs.existsSync(path.join(dir, '성인예방교육만족도.xlsx'))).toBe(true);
+  });
+
+  it('2. POST /api/recognize — 성인 트랙은 자동 인식 대신 빈 수동 입력 드래프트를 반환한다', async () => {
+    const dir = getJobDir(adultJobId);
+    const uploadDir = path.join(dir, 'uploads');
+    fs.mkdirSync(uploadDir, { recursive: true });
+
+    const png1x1 = Buffer.from([
+      0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,
+      0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+      0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00,
+      0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x60, 0x60, 0x60, 0x60,
+      0x00, 0x00, 0x00, 0x05, 0x00, 0x01, 0xA5, 0xF7, 0xDF, 0x7D, 0x00, 0x00,
+      0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82
+    ]);
+    fs.writeFileSync(path.join(uploadDir, 'cagi_adult_001.png'), png1x1);
+    fs.writeFileSync(path.join(uploadDir, 'satisfaction_adult_001.png'), png1x1);
+
+    const req = new Request('http://localhost/api/recognize', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jobId: adultJobId })
+    });
+    const response = await recognizePOST(req);
+    expect(response.status).toBe(200);
+
+    const body = await response.json();
+    expect(body.studentDrafts.length).toBe(1);
+    expect(body.studentDrafts[0].basic.age).toBeUndefined();
+    expect(body.studentDrafts[0].confidence['basic.gender']).toBe('low');
+  });
+
+  it('3. POST /api/students — 성인 데이터가 A=연령대,B=성별,C~=문항 레이아웃으로 저장된다', async () => {
+    const req = new Request('http://localhost/api/recognize', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jobId: adultJobId })
+    });
+    const recognizeResponse = await recognizePOST(req);
+    const { studentDrafts } = await recognizeResponse.json();
+
+    const adultStudent = {
+      ...studentDrafts[0],
+      basic: { age: 40, gender: '여' },
+      cagi: { q01: 0, q02: 0, q03: 1, q04: 0, q05: 0, q06: 2, q07: 0, q08: 0, q09: 1 },
+      satisfaction: { q01: 2, q02: 1, q03: 3, q04: 2, q05: 4, q06: 1, q07: 0, q08: 3, q09: 2, q10: 4 },
+    };
+
+    const saveReq = new Request('http://localhost/api/students', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jobId: adultJobId, student: adultStudent })
+    });
+    const response = await studentsPOST(saveReq);
+    expect(response.status).toBe(200);
+
+    const body = await response.json();
+    expect(body.ok).toBe(true);
+    expect(body.row).toBe(3);
+  });
+
+  it('4. GET /api/download — 성인 트랙도 정상 다운로드된다', async () => {
+    const req = new Request(`http://localhost/api/download?jobId=${adultJobId}&type=cagi`);
+    const response = await downloadGET(req);
+    expect(response.status).toBe(200);
   });
 });

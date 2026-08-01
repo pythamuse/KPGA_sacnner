@@ -23,7 +23,7 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: '저장된 학생 데이터가 없습니다. 학생 데이터를 먼저 저장해주세요.' }, { status: 400 });
     }
 
-    const files = getJobFiles(jobId);
+    const files = getJobFiles(jobId, session.track);
     const filePath = type === 'cagi' ? files.cagiPath : files.satisfactionPath;
 
     if (!fs.existsSync(filePath)) {

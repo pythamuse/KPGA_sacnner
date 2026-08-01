@@ -176,3 +176,37 @@ function writeSatisfactionRow(sheet, row, student) {
 도박예방교육_CAGI_2026-07-09_○○중학교.xlsx
 도박예방교육_만족도_2026-07-09_○○중학교.xlsx
 ```
+
+---
+
+## 11. 성인 CPGI 트랙 지원 (2026-08-01 추가)
+
+### 11.1 원본 템플릿 추가
+
+서버는 트랙별로 다음 4개 원본 템플릿을 보관한다.
+
+1. `templates/cagi/양식_청소년도박문제선별검사_CAGI_3.xlsx` (청소년)
+2. `templates/cagi/양식_성인도박문제선별검사_CPGI.xlsx` (성인)
+3. `templates/satisfaction/청소년예방교육만족도.xlsx` (청소년)
+4. `templates/satisfaction/성인예방교육만족도.xlsx` (성인)
+
+**주의(중요, 사고 이력 있음):** `templates/cagi/`와 `templates/satisfaction/` 디렉터리에 각각 청소년·성인 파일이 함께 들어있다. `getTemplateFiles(track)`는 반드시 트랙별 **정확한 파일명**으로 찾아야 하며, "디렉터리의 첫 `.xlsx` 파일을 그냥 집는" 방식은 절대 쓰지 않는다. 과거 이 방식(`fs.readdirSync().find(...)`) 때문에 성인 템플릿이 먼저 열거되어 청소년 작업에 성인 파일이 잘못 복사되고 저장이 전부 500 에러로 실패한 사고가 있었다. 새 템플릿 파일을 추가할 때도 이 규칙을 반드시 지킨다.
+
+### 11.2 트랙별 시트명 및 컬럼
+
+| 트랙 | CAGI/CPGI 시트명 | 만족도 시트명 | 기본정보 컬럼 | 문항 컬럼 |
+|---|---|---|---|---|
+| 청소년 | 청소년도박문제선별검사 | 청소년예방교육만족도 | A~D (연령·성별·학교유형·학년) | CAGI E~M, 만족도 E~N |
+| 성인 | 성인도박문제선별검사 | 성인예방교육만족도 | A~B (연령대·성별만) | CPGI C~K, 만족도 C~L |
+
+상세 값 매핑은 `01_DATA_MAPPING.md` 8절, 검증 규칙은 `02_VALIDATION_SPEC.md` 8절을 따른다.
+
+### 11.3 트랙 전달 경로
+
+- `POST /api/jobs` 요청 바디에 `{ track: 'youth' | 'adult' }`를 담아 보낸다. 생략 시 `youth`.
+- 작업 세션(`JobSession.track`)에 트랙을 저장하고, 이후 업로드·인식·저장·다운로드 API는 모두 세션의 track을 신뢰의 기준으로 삼는다(클라이언트가 매 요청마다 track을 다시 보낼 필요 없음).
+- `restoreExtLst()`와 `verifyWorkbooks()`는 시트명을 인자로 받아 `workbook.xml`/`workbook.xml.rels`를 따라가 실제 시트 XML 파일을 찾는다. 기존에는 `xl/worksheets/sheet1.xml`을 하드코딩했는데, 이는 우연히 4개 템플릿 모두 입력 시트가 rId1인 경우에만 맞는 가정이었다. 새 템플릿을 받을 때는 반드시 `xl/workbook.xml`을 열어 입력 시트의 `r:id`가 실제로 몇 번 시트 XML에 연결되는지 다시 확인한다.
+
+### 11.4 성인 양식 인식(OCR/ROI) 제한
+
+성인 CPGI·만족도 양식은 아직 실제 촬영 샘플이 없어 좌표 기반 체크마크 인식(ROI)을 보정하지 못했다. `POST /api/recognize`는 세션 track이 `adult`이면 청소년용 ROI 인식 파이프라인을 타지 않고, 업로드 칸(파일명 prefix) 기준 장수만 맞춘 뒤 전 항목을 `low` confidence로 비운 수동 입력 draft를 반환한다(`src/lib/recognition/adultDraft.ts`). 실제 성인 양식 촬영 샘플이 확보되면 `04_OCR_FORM_RECOGNITION_SPEC.md`에 정의된 절차대로 ROI 좌표를 새로 정의해야 한다.

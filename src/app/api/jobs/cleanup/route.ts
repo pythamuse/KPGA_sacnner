@@ -8,7 +8,7 @@ export async function POST(req: NextRequest) {
     const scope = (body.scope as string | undefined) || 'uploads';
 
     if (!jobId && scope !== 'expired') {
-      return NextResponse.json({ error: '?꾩닔 ?뚮씪誘명꽣(jobId)媛 ?꾨씫?섏뿀?듬땲??' }, { status: 400 });
+      return NextResponse.json({ error: '필수 파라미터(jobId)가 누락되었습니다.' }, { status: 400 });
     }
 
     if (scope === 'expired') {
@@ -17,7 +17,7 @@ export async function POST(req: NextRequest) {
     }
 
     if (!jobId || !hasJobSession(jobId)) {
-      return NextResponse.json({ error: '?묒뾽 ?몄뀡??議댁옱?섏? ?딆뒿?덈떎.' }, { status: 404 });
+      return NextResponse.json({ error: '작업 세션이 존재하지 않습니다.' }, { status: 404 });
     }
 
     if (scope === 'job') {
@@ -26,14 +26,14 @@ export async function POST(req: NextRequest) {
     }
 
     if (scope !== 'uploads') {
-      return NextResponse.json({ error: '?뚯슜?섏? ?딅뒗 cleanup scope?낅땲??' }, { status: 400 });
+      return NextResponse.json({ error: '지원하지 않는 cleanup scope입니다.' }, { status: 400 });
     }
 
     clearJobUploads(jobId);
     return NextResponse.json({ ok: true });
   } catch (err: any) {
     return NextResponse.json(
-      { error: `?묒뾽 ?뚯씪 ?뺣━ ?ㅽ뙣: ${err.message}` },
+      { error: `작업 파일 정리 실패: ${err.message}` },
       { status: 500 }
     );
   }

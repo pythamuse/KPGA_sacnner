@@ -37,8 +37,12 @@ export interface StudentSource {
   satisfactionImageId?: string;
 }
 
+export type FormTrack = 'youth' | 'adult';
+
 export interface StudentData {
   studentIndex?: number;
+  // 미지정 시 'youth'로 취급한다 (기존 청소년 전용 데이터와의 하위 호환).
+  track?: FormTrack;
   source: StudentSource;
   basic: StudentBasic;
   cagi: StudentCagi;

@@ -1,19 +1,62 @@
 import ExcelJS from 'exceljs';
 import AdmZip from 'adm-zip';
 import { StudentData } from '../validation/types';
-import { validateStudent } from '../validation/validateStudent';
+import { FormTrack } from './templateManager';
 
 export interface VerifyResult {
   ok: boolean;
   errors: string[];
 }
 
+interface TrackLayout {
+  sheetName: string;
+  age: string;
+  gender: string;
+  schoolType?: string;
+  grade?: string;
+  questionColumns: string[];
+  questionLabel: string;
+}
+
+const CAGI_LAYOUTS: Record<FormTrack, TrackLayout> = {
+  youth: {
+    sheetName: '청소년도박문제선별검사',
+    age: 'A', gender: 'B', schoolType: 'C', grade: 'D',
+    questionColumns: ['E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M'],
+    questionLabel: 'CAGI',
+  },
+  adult: {
+    sheetName: '성인도박문제선별검사',
+    age: 'A', gender: 'B',
+    questionColumns: ['C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K'],
+    questionLabel: 'CPGI',
+  },
+};
+
+const SATISFACTION_LAYOUTS: Record<FormTrack, TrackLayout> = {
+  youth: {
+    sheetName: '청소년예방교육만족도',
+    age: 'A', gender: 'B', schoolType: 'C', grade: 'D',
+    questionColumns: ['E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N'],
+    questionLabel: '만족도',
+  },
+  adult: {
+    sheetName: '성인예방교육만족도',
+    age: 'A', gender: 'B',
+    questionColumns: ['C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L'],
+    questionLabel: '만족도',
+  },
+};
+
 export async function verifyWorkbooks(
   cagiPath: string,
   satisfactionPath: string,
-  expectedStudents: StudentData[]
+  expectedStudents: StudentData[],
+  track: FormTrack = 'youth'
 ): Promise<VerifyResult> {
   const errors: string[] = [];
+  const cagiLayout = CAGI_LAYOUTS[track];
+  const satLayout = SATISFACTION_LAYOUTS[track];
 
   try {
     const cagiWorkbook = new ExcelJS.Workbook();
@@ -23,14 +66,14 @@ export async function verifyWorkbooks(
     await satWorkbook.xlsx.readFile(satisfactionPath);
 
     // 1. 시트 존재 확인
-    const cagiSheet = cagiWorkbook.getWorksheet('청소년도박문제선별검사');
+    const cagiSheet = cagiWorkbook.getWorksheet(cagiLayout.sheetName);
     if (!cagiSheet) {
-      errors.push('CAGI 엑셀 파일에 "청소년도박문제선별검사" 시트가 존재하지 않습니다.');
+      errors.push(`CAGI 엑셀 파일에 "${cagiLayout.sheetName}" 시트가 존재하지 않습니다.`);
     }
 
-    const satSheet = satWorkbook.getWorksheet('청소년예방교육만족도');
+    const satSheet = satWorkbook.getWorksheet(satLayout.sheetName);
     if (!satSheet) {
-      errors.push('만족도 엑셀 파일에 "청소년예방교육만족도" 시트가 존재하지 않습니다.');
+      errors.push(`만족도 엑셀 파일에 "${satLayout.sheetName}" 시트가 존재하지 않습니다.`);
     }
 
     // 코드 시트 존재 확인
@@ -54,99 +97,28 @@ export async function verifyWorkbooks(
       const student = expectedStudents[i];
       const row = 3 + i;
 
-      // CAGI 값 읽기
-      const cagiAge = cagiSheetNonNull.getCell(`A${row}`).value;
-      const cagiGender = cagiSheetNonNull.getCell(`B${row}`).value;
-      const cagiSchool = cagiSheetNonNull.getCell(`C${row}`).value;
-      const cagiGrade = cagiSheetNonNull.getCell(`D${row}`).value;
+      checkBasicInfo(cagiSheetNonNull, cagiLayout, row, student, 'CAGI', errors);
+      checkQuestions(cagiSheetNonNull, cagiLayout, row, student.cagi, errors);
 
-      const cagiQ01 = cagiSheetNonNull.getCell(`E${row}`).value;
-      const cagiQ02 = cagiSheetNonNull.getCell(`F${row}`).value;
-      const cagiQ03 = cagiSheetNonNull.getCell(`G${row}`).value;
-      const cagiQ04 = cagiSheetNonNull.getCell(`H${row}`).value;
-      const cagiQ05 = cagiSheetNonNull.getCell(`I${row}`).value;
-      const cagiQ06 = cagiSheetNonNull.getCell(`J${row}`).value;
-      const cagiQ07 = cagiSheetNonNull.getCell(`K${row}`).value;
-      const cagiQ08 = cagiSheetNonNull.getCell(`L${row}`).value;
-      const cagiQ09 = cagiSheetNonNull.getCell(`M${row}`).value;
-
-      // 만족도 값 읽기
-      const satAge = satSheetNonNull.getCell(`A${row}`).value;
-      const satGender = satSheetNonNull.getCell(`B${row}`).value;
-      const satSchool = satSheetNonNull.getCell(`C${row}`).value;
-      const satGrade = satSheetNonNull.getCell(`D${row}`).value;
-
-      const satQ01 = satSheetNonNull.getCell(`E${row}`).value;
-      const satQ02 = satSheetNonNull.getCell(`F${row}`).value;
-      const satQ03 = satSheetNonNull.getCell(`G${row}`).value;
-      const satQ04 = satSheetNonNull.getCell(`H${row}`).value;
-      const satQ05 = satSheetNonNull.getCell(`I${row}`).value;
-      const satQ06 = satSheetNonNull.getCell(`J${row}`).value;
-      const satQ07 = satSheetNonNull.getCell(`K${row}`).value;
-      const satQ08 = satSheetNonNull.getCell(`L${row}`).value;
-      const satQ09 = satSheetNonNull.getCell(`M${row}`).value;
-      const satQ10 = satSheetNonNull.getCell(`N${row}`).value;
-
-      // 값 일치 검사
-      if (Number(cagiAge) !== Number(student.basic.age)) errors.push(`행 ${row}: CAGI 나이 불일치. 기대값 ${student.basic.age}, 실제값 ${cagiAge}`);
-      if (String(cagiGender) !== String(student.basic.gender)) errors.push(`행 ${row}: CAGI 성별 불일치. 기대값 ${student.basic.gender}, 실제값 ${cagiGender}`);
-      if (String(cagiSchool) !== String(student.basic.schoolType)) errors.push(`행 ${row}: CAGI 학교유형 불일치. 기대값 ${student.basic.schoolType}, 실제값 ${cagiSchool}`);
-      if (String(cagiGrade) !== String(student.basic.grade)) errors.push(`행 ${row}: CAGI 학년 불일치. 기대값 ${student.basic.grade}, 실제값 ${cagiGrade}`);
-
-      if (Number(cagiQ01) !== Number(student.cagi.q01)) errors.push(`행 ${row}: CAGI q01 불일치. 기대값 ${student.cagi.q01}, 실제값 ${cagiQ01}`);
-      if (Number(cagiQ02) !== Number(student.cagi.q02)) errors.push(`행 ${row}: CAGI q02 불일치. 기대값 ${student.cagi.q02}, 실제값 ${cagiQ02}`);
-      if (Number(cagiQ03) !== Number(student.cagi.q03)) errors.push(`행 ${row}: CAGI q03 불일치. 기대값 ${student.cagi.q03}, 실제값 ${cagiQ03}`);
-      if (Number(cagiQ04) !== Number(student.cagi.q04)) errors.push(`행 ${row}: CAGI q04 불일치. 기대값 ${student.cagi.q04}, 실제값 ${cagiQ04}`);
-      if (Number(cagiQ05) !== Number(student.cagi.q05)) errors.push(`행 ${row}: CAGI q05 불일치. 기대값 ${student.cagi.q05}, 실제값 ${cagiQ05}`);
-      if (Number(cagiQ06) !== Number(student.cagi.q06)) errors.push(`행 ${row}: CAGI q06 불일치. 기대값 ${student.cagi.q06}, 실제값 ${cagiQ06}`);
-      if (Number(cagiQ07) !== Number(student.cagi.q07)) errors.push(`행 ${row}: CAGI q07 불일치. 기대값 ${student.cagi.q07}, 실제값 ${cagiQ07}`);
-      if (Number(cagiQ08) !== Number(student.cagi.q08)) errors.push(`행 ${row}: CAGI q08 불일치. 기대값 ${student.cagi.q08}, 실제값 ${cagiQ08}`);
-      if (Number(cagiQ09) !== Number(student.cagi.q09)) errors.push(`행 ${row}: CAGI q09 불일치. 기대값 ${student.cagi.q09}, 실제값 ${cagiQ09}`);
-
-      if (Number(satAge) !== Number(student.basic.age)) errors.push(`행 ${row}: 만족도 나이 불일치. 기대값 ${student.basic.age}, 실제값 ${satAge}`);
-      if (String(satGender) !== String(student.basic.gender)) errors.push(`행 ${row}: 만족도 성별 불일치. 기대값 ${student.basic.gender}, 실제값 ${satGender}`);
-      if (String(satSchool) !== String(student.basic.schoolType)) errors.push(`행 ${row}: 만족도 학교유형 불일치. 기대값 ${student.basic.schoolType}, 실제값 ${satSchool}`);
-      if (String(satGrade) !== String(student.basic.grade)) errors.push(`행 ${row}: 만족도 학년 불일치. 기대값 ${student.basic.grade}, 실제값 ${satGrade}`);
-
-      if (Number(satQ01) !== Number(student.satisfaction.q01)) errors.push(`행 ${row}: 만족도 q01 불일치. 기대값 ${student.satisfaction.q01}, 실제값 ${satQ01}`);
-      if (Number(satQ02) !== Number(student.satisfaction.q02)) errors.push(`행 ${row}: 만족도 q02 불일치. 기대값 ${student.satisfaction.q02}, 실제값 ${satQ02}`);
-      if (Number(satQ03) !== Number(student.satisfaction.q03)) errors.push(`행 ${row}: 만족도 q03 불일치. 기대값 ${student.satisfaction.q03}, 실제값 ${satQ03}`);
-      if (Number(satQ04) !== Number(student.satisfaction.q04)) errors.push(`행 ${row}: 만족도 q04 불일치. 기대값 ${student.satisfaction.q04}, 실제값 ${satQ04}`);
-      if (Number(satQ05) !== Number(student.satisfaction.q05)) errors.push(`행 ${row}: 만족도 q05 불일치. 기대값 ${student.satisfaction.q05}, 실제값 ${satQ05}`);
-      if (Number(satQ06) !== Number(student.satisfaction.q06)) errors.push(`행 ${row}: 만족도 q06 불일치. 기대값 ${student.satisfaction.q06}, 실제값 ${satQ06}`);
-      if (Number(satQ07) !== Number(student.satisfaction.q07)) errors.push(`행 ${row}: 만족도 q07 불일치. 기대값 ${student.satisfaction.q07}, 실제값 ${satQ07}`);
-      if (Number(satQ08) !== Number(student.satisfaction.q08)) errors.push(`행 ${row}: 만족도 q08 불일치. 기대값 ${student.satisfaction.q08}, 실제값 ${satQ08}`);
-      if (Number(satQ09) !== Number(student.satisfaction.q09)) errors.push(`행 ${row}: 만족도 q09 불일치. 기대값 ${student.satisfaction.q09}, 실제값 ${satQ09}`);
-      if (Number(satQ10) !== Number(student.satisfaction.q10)) errors.push(`행 ${row}: 만족도 q10 불일치. 기대값 ${student.satisfaction.q10}, 실제값 ${satQ10}`);
+      checkBasicInfo(satSheetNonNull, satLayout, row, student, '만족도', errors);
+      checkQuestions(satSheetNonNull, satLayout, row, student.satisfaction, errors);
 
       // 드롭다운 보존 검증 (XML 수준에서 x14:dataValidations 검사)
       // ExcelJS는 x14 유효성 검사를 날려버리기 때문에 저장 후 복원 처리가 완료되었는지 검사한다.
-      const checkDropdowns = (filePath: string, label: string) => {
-        try {
-          const zip = new AdmZip(filePath);
-          const xml = zip.readAsText('xl/worksheets/sheet1.xml');
-          if (!xml.includes('x14:dataValidations')) {
-            errors.push(`${label} 엑셀 파일에 데이터 유효성 검사(드롭다운, x14:dataValidations)가 유실되었습니다.`);
-          }
-        } catch (err: any) {
-          errors.push(`${label} 엑셀 파일 압축 해제 검증 중 오류: ${err.message}`);
-        }
-      };
-      
       if (i === 0) { // 파일당 1번만 검사하면 됨
-        checkDropdowns(cagiPath, 'CAGI');
-        checkDropdowns(satisfactionPath, '만족도');
+        checkDropdowns(cagiPath, 'CAGI', cagiLayout.sheetName, errors);
+        checkDropdowns(satisfactionPath, '만족도', satLayout.sheetName, errors);
       }
     }
 
     // 다음 행이 비어있는지 확인
     const nextRow = 3 + expectedCount;
-    const cagiNextValue = cagiSheetNonNull.getCell(`A${nextRow}`).value;
+    const cagiNextValue = cagiSheetNonNull.getCell(`${cagiLayout.age}${nextRow}`).value;
     if (cagiNextValue !== null && cagiNextValue !== undefined && cagiNextValue !== '') {
       errors.push(`행 ${nextRow}: CAGI 파일에 기대되지 않은 데이터가 존재합니다.`);
     }
 
-    const satNextValue = satSheetNonNull.getCell(`A${nextRow}`).value;
+    const satNextValue = satSheetNonNull.getCell(`${satLayout.age}${nextRow}`).value;
     if (satNextValue !== null && satNextValue !== undefined && satNextValue !== '') {
       errors.push(`행 ${nextRow}: 만족도 파일에 기대되지 않은 데이터가 존재합니다.`);
     }
@@ -159,4 +131,84 @@ export async function verifyWorkbooks(
     ok: errors.length === 0,
     errors
   };
+}
+
+function checkBasicInfo(
+  sheet: ExcelJS.Worksheet,
+  layout: TrackLayout,
+  row: number,
+  student: StudentData,
+  label: string,
+  errors: string[]
+) {
+  const age = sheet.getCell(`${layout.age}${row}`).value;
+  const gender = sheet.getCell(`${layout.gender}${row}`).value;
+
+  if (Number(age) !== Number(student.basic.age)) errors.push(`행 ${row}: ${label} 나이 불일치. 기대값 ${student.basic.age}, 실제값 ${age}`);
+  if (String(gender) !== String(student.basic.gender)) errors.push(`행 ${row}: ${label} 성별 불일치. 기대값 ${student.basic.gender}, 실제값 ${gender}`);
+
+  if (layout.schoolType) {
+    const schoolType = sheet.getCell(`${layout.schoolType}${row}`).value;
+    if (String(schoolType) !== String(student.basic.schoolType)) errors.push(`행 ${row}: ${label} 학교유형 불일치. 기대값 ${student.basic.schoolType}, 실제값 ${schoolType}`);
+  }
+
+  if (layout.grade) {
+    const grade = sheet.getCell(`${layout.grade}${row}`).value;
+    if (String(grade) !== String(student.basic.grade)) errors.push(`행 ${row}: ${label} 학년 불일치. 기대값 ${student.basic.grade}, 실제값 ${grade}`);
+  }
+}
+
+function checkQuestions(
+  sheet: ExcelJS.Worksheet,
+  layout: TrackLayout,
+  row: number,
+  answers: Record<string, number | undefined>,
+  errors: string[]
+) {
+  layout.questionColumns.forEach((col, idx) => {
+    const key = `q${String(idx + 1).padStart(2, '0')}`;
+    const actual = sheet.getCell(`${col}${row}`).value;
+    const expected = answers[key];
+    if (Number(actual) !== Number(expected)) {
+      errors.push(`행 ${row}: ${layout.questionLabel} ${key} 불일치. 기대값 ${expected}, 실제값 ${actual}`);
+    }
+  });
+}
+
+function checkDropdowns(filePath: string, label: string, sheetName: string, errors: string[]) {
+  try {
+    const zip = new AdmZip(filePath);
+    const sheetXmlPath = resolveWorksheetXmlPath(zip, sheetName);
+    const xml = zip.readAsText(sheetXmlPath);
+    if (!xml.includes('x14:dataValidations')) {
+      errors.push(`${label} 엑셀 파일에 데이터 유효성 검사(드롭다운, x14:dataValidations)가 유실되었습니다.`);
+    }
+  } catch (err: any) {
+    errors.push(`${label} 엑셀 파일 압축 해제 검증 중 오류: ${err.message}`);
+  }
+}
+
+function resolveWorksheetXmlPath(zip: AdmZip, sheetName: string): string {
+  const workbookXml = zip.readAsText('xl/workbook.xml');
+  const sheetTagMatch = workbookXml.match(
+    new RegExp(`<sheet [^>]*name="${escapeRegExp(sheetName)}"[^>]*/>`)
+  );
+  if (!sheetTagMatch) {
+    return 'xl/worksheets/sheet1.xml';
+  }
+
+  const rIdMatch = sheetTagMatch[0].match(/r:id="([^"]+)"/);
+  if (!rIdMatch) {
+    return 'xl/worksheets/sheet1.xml';
+  }
+
+  const relsXml = zip.readAsText('xl/_rels/workbook.xml.rels');
+  const relTagMatch = relsXml.match(new RegExp(`<Relationship [^>]*Id="${rIdMatch[1]}"[^>]*/>`));
+  const targetMatch = relTagMatch?.[0].match(/Target="([^"]+)"/);
+
+  return targetMatch ? `xl/${targetMatch[1]}` : 'xl/worksheets/sheet1.xml';
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

@@ -5,8 +5,9 @@ import { getJobDir } from '../../../lib/excel/templateManager';
 import { classifyForm } from '../../../lib/recognition/classifyForm';
 import { recognizeStudentForms } from '../../../lib/recognition/detectCheckmarks';
 import { matchBatch } from '../../../lib/recognition/batchMatcher';
-import { hasJobSession } from '../../../lib/storage/jobStore';
+import { getJobSession } from '../../../lib/storage/jobStore';
 import { hasCagiEarlyInterventionMarks } from '../../../lib/recognition/cagiEarlyIntervention';
+import { createEmptyAdultDraft } from '../../../lib/recognition/adultDraft';
 
 export async function POST(req: NextRequest) {
   try {
@@ -16,8 +17,9 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: '필수 파라미터(jobId)가 누락되었습니다.' }, { status: 400 });
     }
 
-    if (!hasJobSession(jobId)) {
-      return NextResponse.json({ error: '?묒뾽 ?몄뀡??議댁옱?섏? ?딆뒿?덈떎. ???묒뾽???앹꽦?댁＜?몄슂.' }, { status: 404 });
+    const session = getJobSession(jobId);
+    if (!session) {
+      return NextResponse.json({ error: '작업 세션이 존재하지 않습니다. 새 작업을 생성해주세요.' }, { status: 404 });
     }
 
     const jobDir = getJobDir(jobId);
@@ -35,6 +37,10 @@ export async function POST(req: NextRequest) {
 
     if (allFiles.length === 0) {
       return NextResponse.json({ error: '인식할 이미지 파일이 없습니다.' }, { status: 400 });
+    }
+
+    if (session.track === 'adult') {
+      return handleAdultRecognize(jobId, uploadDir, allFiles);
     }
 
     // 2. 각 파일을 병렬로 분류 수행
@@ -196,6 +202,70 @@ function getUploadedFormType(filename: string): 'cagi' | 'satisfaction' | undefi
     return 'satisfaction';
   }
   return undefined;
+}
+
+/**
+ * 성인 CPGI/만족도 양식은 아직 실제 촬영 샘플로 ROI 좌표를 보정하지 못했다.
+ * 내용 기반 양식 판별과 체크마크 인식은 건너뛰고, 업로드 칸(파일명 prefix)
+ * 기준으로만 장수를 맞춘 뒤 전 항목을 수동 입력 대상으로 비워 전달한다.
+ */
+async function handleAdultRecognize(jobId: string, uploadDir: string, allFiles: string[]) {
+  const cagiPaths: string[] = [];
+  const satisfactionPaths: string[] = [];
+
+  allFiles.forEach((filename) => {
+    const uploadedAs = getUploadedFormType(filename);
+    const filePath = path.join(uploadDir, filename);
+    if (uploadedAs === 'cagi') {
+      cagiPaths.push(filePath);
+    } else if (uploadedAs === 'satisfaction') {
+      satisfactionPaths.push(filePath);
+    }
+  });
+
+  const cagiCount = cagiPaths.length;
+  const satisfactionCount = satisfactionPaths.length;
+
+  if (cagiCount !== satisfactionCount) {
+    return NextResponse.json({
+      error: `업로드된 파일의 장수가 일치하지 않습니다. (선별검사지: ${cagiCount}장, 만족도조사: ${satisfactionCount}장). 누락된 사진이 없는지 확인해주세요.`,
+      code: 'COUNT_MISMATCH',
+      cagiCount,
+      satisfactionCount
+    }, { status: 400 });
+  }
+
+  if (cagiCount === 0) {
+    return NextResponse.json({
+      error: '인식된 유효한 양식 파일이 없습니다. 올바른 선별검사지 및 만족도 조사지 사진을 업로드했는지 확인해주세요.',
+      code: 'EMPTY_FORMS'
+    }, { status: 400 });
+  }
+
+  let matchedPairs;
+  try {
+    matchedPairs = matchBatch(cagiPaths, satisfactionPaths);
+  } catch (err: any) {
+    return NextResponse.json({
+      error: `파일 정렬 및 매칭 중 오류가 발생했습니다: ${err.message}`,
+      code: 'MATCH_ERROR'
+    }, { status: 400 });
+  }
+
+  const studentDrafts = matchedPairs.map((pair) => ({
+    ...createEmptyAdultDraft(),
+    source: {
+      cagiImageId: path.basename(pair.cagiPath).split('.')[0],
+      satisfactionImageId: path.basename(pair.satisfactionPath).split('.')[0],
+    },
+  }));
+
+  return NextResponse.json({
+    studentDrafts,
+    warnings: [
+      '성인 양식은 자동 체크마크 인식이 아직 준비되지 않았습니다. 검수 화면에서 값을 직접 입력해주세요.'
+    ],
+  });
 }
 
 function buildFormTypeMismatchMessage(
