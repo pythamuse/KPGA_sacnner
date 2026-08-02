@@ -1,44 +1,41 @@
 import { NextRequest, NextResponse } from 'next/server';
-import fs from 'fs';
-import path from 'path';
-import { getJobFiles } from '../../../lib/excel/templateManager';
-import { getJobSession } from '../../../lib/storage/jobStore';
+import { generateWorkbookPair } from '../../../lib/excel/generateWorkbookPair';
+import { StudentData } from '../../../lib/validation/types';
 
-export async function GET(req: NextRequest) {
+export async function POST(req: NextRequest) {
   try {
-    const { searchParams } = new URL(req.url);
-    const jobId = searchParams.get('jobId');
-    const type = searchParams.get('type'); // 'cagi' 또는 'satisfaction'
+    const { type, students: rawStudents } = await req.json();
 
-    if (!jobId || !type || !['cagi', 'satisfaction'].includes(type)) {
+    if (!type || !['cagi', 'satisfaction'].includes(type)) {
       return NextResponse.json({ error: '올바르지 않은 파라미터입니다.' }, { status: 400 });
     }
 
-    const session = getJobSession(jobId);
-    if (!session) {
-      return NextResponse.json({ error: '유효하지 않은 작업 세션입니다.' }, { status: 404 });
-    }
+    const students: StudentData[] = Array.isArray(rawStudents) ? rawStudents : [];
 
-    if (session.students.length === 0) {
+    if (students.length === 0) {
       return NextResponse.json({ error: '저장된 학생 데이터가 없습니다. 학생 데이터를 먼저 저장해주세요.' }, { status: 400 });
     }
 
-    const files = getJobFiles(jobId);
-    const filePath = type === 'cagi' ? files.cagiPath : files.satisfactionPath;
+    // 이전 요청이 만든 작업 파일에 의존하지 않고, 원본 템플릿에서 학생 목록 전체를 다시 써서
+    // 매번 새로 생성한다 (Vercel 서버리스 인스턴스 간 로컬 파일 미공유 문제 회피).
+    const { cagiBuffer, satisfactionBuffer, verifyResult } = await generateWorkbookPair(students);
 
-    if (!fs.existsSync(filePath)) {
-      return NextResponse.json({ error: '작업 파일을 찾을 수 없습니다.' }, { status: 404 });
+    if (!verifyResult.ok) {
+      return NextResponse.json({
+        error: '엑셀 생성 후 무결성 검증 실패',
+        errors: verifyResult.errors.map(msg => ({ code: 'INTEGRITY_ERROR', message: msg }))
+      }, { status: 500 });
     }
 
-    const fileBuffer = fs.readFileSync(filePath);
+    const fileBuffer = type === 'cagi' ? cagiBuffer : satisfactionBuffer;
     const dateStr = new Date().toISOString().split('T')[0];
-    const filename = type === 'cagi' 
-      ? `도박예방교육_CAGI_${dateStr}.xlsx` 
+    const filename = type === 'cagi'
+      ? `도박예방교육_CAGI_${dateStr}.xlsx`
       : `도박예방교육_만족도_${dateStr}.xlsx`;
 
     const encodedFilename = encodeURIComponent(filename);
 
-    return new NextResponse(fileBuffer, {
+    return new NextResponse(new Uint8Array(fileBuffer), {
       headers: {
         'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         'Content-Disposition': `attachment; filename*=UTF-8''${encodedFilename}`

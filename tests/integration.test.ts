@@ -2,16 +2,16 @@ import { describe, it, expect, afterAll } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import { getJobDir } from '../src/lib/excel/templateManager';
-import { getJobSession } from '../src/lib/storage/jobStore';
 import { POST as jobsPOST } from '../src/app/api/jobs/route';
 import { POST as uploadPOST } from '../src/app/api/upload/route';
 import { POST as recognizePOST } from '../src/app/api/recognize/route';
 import { POST as studentsPOST } from '../src/app/api/students/route';
-import { GET as downloadGET } from '../src/app/api/download/route';
+import { POST as downloadPOST } from '../src/app/api/download/route';
 
 describe('엔드투엔드 API 통합 테스트 (일괄/스캔 대응)', () => {
   let jobId = '';
   let recognizedDraft: any = null;
+  const confirmedStudents: any[] = [];
 
   afterAll(() => {
     // 임시 작업 폴더 정리
@@ -116,6 +116,10 @@ describe('엔드투엔드 API 통합 테스트 (일괄/스캔 대응)', () => {
     expect(body.studentDrafts.length).toBe(1);
 
     recognizedDraft = body.studentDrafts[0];
+    expect(recognizedDraft.source.cagiImageDataUrl).toMatch(/^data:image\/jpeg;base64,/);
+    expect(recognizedDraft.source.satisfactionImageDataUrl).toMatch(/^data:image\/jpeg;base64,/);
+    expect(recognizedDraft.source.cropDataUrls).toBeDefined();
+    expect(Object.keys(recognizedDraft.source.cropDataUrls).length).toBeGreaterThan(0);
     
     // 예시 데이터가 정확하게 식별되었는지 검증
     expect(recognizedDraft.basic.age).toBe(14);
@@ -127,12 +131,14 @@ describe('엔드투엔드 API 통합 테스트 (일괄/스캔 대응)', () => {
   it('3. POST /api/students — 학생 데이터 유효성 검사 및 정밀 엑셀 쓰기', async () => {
     expect(recognizedDraft).not.toBeNull();
 
+    // 클라이언트가 확정된 학생 전체 목록(새로 저장할 학생 포함)을 보낸다 -
+    // 서버는 이전 요청이 만든 작업 파일에 의존하지 않고 매번 새로 만든다.
     const req = new Request(`http://localhost/api/students`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         jobId,
-        student: recognizedDraft
+        students: [...confirmedStudents, recognizedDraft]
       })
     });
 
@@ -143,25 +149,30 @@ describe('엔드투엔드 API 통합 테스트 (일괄/스캔 대응)', () => {
     expect(body.ok).toBe(true);
     expect(body.row).toBe(3); // 첫 학생은 3행이어야 함
     expect(body.student.status).toBe('confirmed');
+    expect(body.student.basic.gender).toBe('여'); // 정규화 여부 확인
 
-    // 메모리 세션에 학생 추가 완료되었는지 확인
-    const session = getJobSession(jobId);
-    expect(session).toBeDefined();
-    expect(session?.students.length).toBe(1);
-    expect(session?.students[0].basic.gender).toBe('여'); // 정규화 여부 확인
+    confirmedStudents.push(body.student);
   });
 
-  it('4. GET /api/download — 파일별 정상 다운로드 여부 및 파일명 포맷 검증', async () => {
+  it('4. POST /api/download — 파일별 정상 다운로드 여부 및 파일명 포맷 검증', async () => {
     // CAGI 다운로드 요청
-    const reqCagi = new Request(`http://localhost/api/download?jobId=${jobId}&type=cagi`);
-    const resCagi = await downloadGET(reqCagi);
+    const reqCagi = new Request(`http://localhost/api/download`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'cagi', students: confirmedStudents })
+    });
+    const resCagi = await downloadPOST(reqCagi);
     expect(resCagi.status).toBe(200);
     expect(resCagi.headers.get('Content-Type')).toBe('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     expect(decodeURIComponent(resCagi.headers.get('Content-Disposition') || '')).toContain('도박예방교육_CAGI_');
 
     // 만족도 다운로드 요청
-    const reqSat = new Request(`http://localhost/api/download?jobId=${jobId}&type=satisfaction`);
-    const resSat = await downloadGET(reqSat);
+    const reqSat = new Request(`http://localhost/api/download`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'satisfaction', students: confirmedStudents })
+    });
+    const resSat = await downloadPOST(reqSat);
     expect(resSat.status).toBe(200);
     expect(resSat.headers.get('Content-Type')).toBe('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     expect(decodeURIComponent(resSat.headers.get('Content-Disposition') || '')).toContain('도박예방교육_만족도_');
@@ -178,7 +189,7 @@ describe('엔드투엔드 API 통합 테스트 (일괄/스캔 대응)', () => {
     const req = new Request(`http://localhost/api/students`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ jobId, student: invalidStudent })
+      body: JSON.stringify({ jobId, students: [...confirmedStudents, invalidStudent] })
     });
 
     const response = await studentsPOST(req);
@@ -188,8 +199,7 @@ describe('엔드투엔드 API 통합 테스트 (일괄/스캔 대응)', () => {
     expect(body.error).toContain('데이터 검증에 실패했습니다.');
     expect(body.errors.some((e: any) => e.code === 'INVALID_GENDER')).toBe(true);
 
-    // 세션의 학생 수가 늘어나지 않았는지 확인
-    const session = getJobSession(jobId);
-    expect(session?.students.length).toBe(1);
+    // 확정된 학생 수가 늘어나지 않았는지 확인 (실패했으므로 목록에 추가하지 않음)
+    expect(confirmedStudents.length).toBe(1);
   });
 });

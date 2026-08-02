@@ -239,7 +239,7 @@ export default function Home() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           jobId,
-          student: currentDraft,
+          students: [...students, currentDraft],
         }),
       });
 
@@ -273,11 +273,44 @@ export default function Home() {
 
   const hasDrafts = Boolean(drafts && drafts.length > 0);
   const modeLabel = uploadMode === 'sequential' ? '개별/순차 촬영' : '일괄 스캔 업로드';
-  const downloadHref = (type: 'cagi' | 'satisfaction') => (jobId ? `/api/download?jobId=${jobId}&type=${type}` : '#');
-  const blockEmptyDownload = (e: React.MouseEvent<HTMLAnchorElement>) => {
+  const [isDownloading, setIsDownloading] = useState<'cagi' | 'satisfaction' | null>(null);
+
+  const handleDownload = async (type: 'cagi' | 'satisfaction') => {
     if (!jobId || students.length === 0) {
-      e.preventDefault();
       alert('저장된 학생 데이터가 없습니다.');
+      return;
+    }
+
+    setIsDownloading(type);
+    try {
+      const res = await fetch('/api/download', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type, students }),
+      });
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || '다운로드에 실패했습니다.');
+      }
+
+      const disposition = res.headers.get('Content-Disposition') || '';
+      const filenameMatch = disposition.match(/filename\*=UTF-8''([^;]+)/);
+      const filename = filenameMatch ? decodeURIComponent(filenameMatch[1]) : `${type}.xlsx`;
+
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } catch (err: any) {
+      alert(`다운로드 실패: ${err.message}`);
+    } finally {
+      setIsDownloading(null);
     }
   };
 
@@ -377,26 +410,28 @@ export default function Home() {
                 검수 완료된 학생만 두 엑셀 파일의 같은 행 번호에 저장됩니다.
               </p>
               <div className="download-grid">
-                <a
-                  href={downloadHref('cagi')}
+                <button
+                  type="button"
                   className={`download-card ${students.length === 0 ? 'disabled' : ''}`}
-                  onClick={blockEmptyDownload}
+                  onClick={() => handleDownload('cagi')}
+                  disabled={isDownloading === 'cagi'}
                 >
                   <span className="form-label sky">FORM 01</span>
                   <strong>양식_청소년도박문제선별검사_CAGI_3.xlsx</strong>
                   <span>선별검사 데이터(A~M열) 작성본</span>
-                  <em>다운로드</em>
-                </a>
-                <a
-                  href={downloadHref('satisfaction')}
+                  <em>{isDownloading === 'cagi' ? '다운로드 중' : '다운로드'}</em>
+                </button>
+                <button
+                  type="button"
                   className={`download-card ${students.length === 0 ? 'disabled' : ''}`}
-                  onClick={blockEmptyDownload}
+                  onClick={() => handleDownload('satisfaction')}
+                  disabled={isDownloading === 'satisfaction'}
                 >
                   <span className="form-label orange">FORM 02</span>
                   <strong>청소년예방교육만족도.xlsx</strong>
                   <span>예방만족도 설문 데이터(A~N열) 작성본</span>
-                  <em>다운로드</em>
-                </a>
+                  <em>{isDownloading === 'satisfaction' ? '다운로드 중' : '다운로드'}</em>
+                </button>
               </div>
             </section>
           </aside>

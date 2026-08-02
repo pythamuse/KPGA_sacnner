@@ -1,4 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { withTimeout } from '@/lib/pdf/withTimeout';
+import { loadOpenCv } from '@/lib/documentScanner/loadOpenCv';
+import { detectDocumentQuad, warpToRectangle } from '@/lib/documentScanner/perspectiveCorrect';
+import { cagiTemplate, satisfactionTemplate } from '@/lib/recognition/roiTemplates';
 
 export type UploadMode = 'sequential' | 'batch';
 
@@ -13,6 +17,7 @@ interface ImageUploadPanelProps {
 type UploadKind = 'cagi' | 'satisfaction';
 
 const MAX_UPLOAD_IMAGE_BYTES = 3.8 * 1024 * 1024;
+const PERSPECTIVE_CORRECTION_SCALE = 3;
 const PDF_RENDER_OPTIONS = [
   { scale: 1.5, quality: 0.86 },
   { scale: 1.25, quality: 0.82 },
@@ -39,6 +44,7 @@ export default function ImageUploadPanel({
   const [satFile, setSatFile] = useState<{ name: string; preview: string } | null>(null);
   const [isCagiUploading, setIsCagiUploading] = useState(false);
   const [isSatUploading, setIsSatUploading] = useState(false);
+  const [isCapturing, setIsCapturing] = useState(false);
 
   const [cagiCount, setCagiCount] = useState<number>(0);
   const [satCount, setSatCount] = useState<number>(0);
@@ -51,6 +57,11 @@ export default function ImageUploadPanel({
     step: UploadKind;
     completed: UploadKind[];
   }>({ active: false, step: 'cagi', completed: [] });
+  const [correctionPreview, setCorrectionPreview] = useState<{
+    canvas: HTMLCanvasElement;
+    step: UploadKind;
+    previewSrc: string;
+  } | null>(null);
 
   const cagiInputRef = useRef<HTMLInputElement>(null);
   const satInputRef = useRef<HTMLInputElement>(null);
@@ -59,8 +70,8 @@ export default function ImageUploadPanel({
   const cameraStreamRef = useRef<MediaStream | null>(null);
 
   useEffect(() => {
-    onUploadProgressChange?.(isBatchProcessing || isCagiUploading || isSatUploading || isCameraStarting);
-  }, [isBatchProcessing, isCagiUploading, isSatUploading, isCameraStarting, onUploadProgressChange]);
+    onUploadProgressChange?.(isBatchProcessing || isCagiUploading || isSatUploading || isCameraStarting || isCapturing);
+  }, [isBatchProcessing, isCagiUploading, isSatUploading, isCameraStarting, isCapturing, onUploadProgressChange]);
 
   useEffect(() => {
     if (cameraFlow.active && cameraVideoRef.current && cameraStreamRef.current) {
@@ -83,7 +94,11 @@ export default function ImageUploadPanel({
 
       canvas.height = viewport.height;
       canvas.width = viewport.width;
-      await page.render({ canvasContext: context, viewport }).promise;
+      await withTimeout(
+        page.render({ canvasContext: context, viewport }).promise,
+        20000,
+        `${pageNumber}페이지 변환이 시간 내에 끝나지 않았습니다. 파일이 손상되었거나 처리하기 어려운 이미지일 수 있습니다. 다른 파일로 다시 시도하거나 이미지로 변환해 업로드해주세요.`,
+      );
 
       const blob = await canvasToBlob(canvas, 'image/jpeg', option.quality);
       canvas.width = 1;
@@ -109,7 +124,7 @@ export default function ImageUploadPanel({
       throw new Error('PDF 변환 라이브러리가 로드되지 않았습니다. 페이지를 새로고침한 뒤 다시 시도해주세요.');
     }
 
-    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.worker.min.js';
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/6.1.200/pdf.worker.min.mjs';
 
     const arrayBuffer = await file.arrayBuffer();
     const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
@@ -260,6 +275,7 @@ export default function ImageUploadPanel({
 
   const startCameraFlow = async () => {
     setCameraError('');
+    setCorrectionPreview(null);
 
     if (!navigator.mediaDevices?.getUserMedia) {
       setCameraError('이 브라우저는 웹 카메라 촬영을 지원하지 않습니다. 파일 업로드를 이용해주세요.');
@@ -304,6 +320,7 @@ export default function ImageUploadPanel({
 
       cameraStreamRef.current = stream;
       setCameraFlow({ active: true, step: 'cagi', completed: [] });
+      void loadOpenCv().catch(() => undefined);
     } catch (err: any) {
       if (err?.name === 'NotAllowedError') {
         setCameraError('카메라 권한이 거부되었습니다. 브라우저 권한을 허용한 뒤 다시 시도해주세요.');
@@ -320,41 +337,8 @@ export default function ImageUploadPanel({
     }
   };
 
-  const captureCurrentFrame = async () => {
-    const video = cameraVideoRef.current;
-    const canvas = cameraCanvasRef.current;
-    if (!video || !canvas || !cameraStreamRef.current) {
-      setCameraError('카메라 화면을 찾을 수 없습니다. 다시 촬영을 시작해주세요.');
-      return;
-    }
-
-    const width = video.videoWidth || 1280;
-    const height = video.videoHeight || 960;
-    canvas.width = width;
-    canvas.height = height;
-
-    const context = canvas.getContext('2d');
-    if (!context) {
-      setCameraError('촬영 이미지를 만들 수 없습니다. 브라우저를 다시 시도해주세요.');
-      return;
-    }
-
-    context.drawImage(video, 0, 0, width, height);
-
-    const blob = await new Promise<Blob | null>((resolve) => {
-      canvas.toBlob(resolve, 'image/jpeg', 0.92);
-    });
-
-    if (!blob) {
-      setCameraError('촬영 이미지를 저장할 수 없습니다. 다시 시도해주세요.');
-      return;
-    }
-
-    const file = new File([blob], `${cameraFlow.step}_${Date.now()}.jpg`, { type: 'image/jpeg' });
-    const uploaded = await uploadSequentialFile(file, cameraFlow.step);
-    if (!uploaded) return;
-
-    if (cameraFlow.step === 'cagi') {
+  const advanceCameraFlowAfterUpload = (step: UploadKind) => {
+    if (step === 'cagi') {
       setCameraFlow({ active: true, step: 'satisfaction', completed: ['cagi'] });
     } else {
       stopCameraSession();
@@ -362,10 +346,112 @@ export default function ImageUploadPanel({
     }
   };
 
+  const uploadCapturedCanvas = async (canvas: HTMLCanvasElement, step: UploadKind): Promise<boolean> => {
+    const blob = await new Promise<Blob | null>((resolve) => {
+      canvas.toBlob(resolve, 'image/jpeg', 0.92);
+    });
+
+    if (!blob) {
+      setCameraError('촬영 이미지를 저장할 수 없습니다. 다시 시도해주세요.');
+      return false;
+    }
+
+    const file = new File([blob], `${step}_${Date.now()}.jpg`, { type: 'image/jpeg' });
+    const uploaded = await uploadSequentialFile(file, step);
+    if (!uploaded) return false;
+
+    advanceCameraFlowAfterUpload(step);
+    return true;
+  };
+
+  const confirmCorrectionPreview = async () => {
+    if (!correctionPreview) return;
+
+    const uploaded = await uploadCapturedCanvas(correctionPreview.canvas, correctionPreview.step);
+    if (uploaded) {
+      setCorrectionPreview(null);
+    }
+  };
+
+  const retakeCorrectionPreview = () => {
+    setCorrectionPreview(null);
+    setCameraError('');
+  };
+
+  const captureCurrentFrame = async () => {
+    if (isCapturing || isCagiUploading || isSatUploading) return;
+
+    const video = cameraVideoRef.current;
+    const canvas = cameraCanvasRef.current;
+    if (!video || !canvas || !cameraStreamRef.current) {
+      setCameraError('카메라 화면을 찾을 수 없습니다. 다시 촬영을 시작해주세요.');
+      return;
+    }
+
+    setIsCapturing(true);
+    try {
+      const width = video.videoWidth || 1280;
+      const height = video.videoHeight || 960;
+      canvas.width = width;
+      canvas.height = height;
+
+      const context = canvas.getContext('2d');
+      if (!context) {
+        setCameraError('촬영 이미지를 만들 수 없습니다. 브라우저를 다시 시도해주세요.');
+        return;
+      }
+
+      context.drawImage(video, 0, 0, width, height);
+
+      try {
+        const cv = await withTimeout(loadOpenCv(), 5000, 'OpenCV.js load timed out.');
+        const quad = detectDocumentQuad(cv, canvas);
+
+        if (quad) {
+          const template = cameraFlow.step === 'cagi' ? cagiTemplate : satisfactionTemplate;
+          const correctedCanvas = warpToRectangle(
+            cv,
+            canvas,
+            quad,
+            template.baseSize.width * PERSPECTIVE_CORRECTION_SCALE,
+            template.baseSize.height * PERSPECTIVE_CORRECTION_SCALE,
+          );
+
+          setCorrectionPreview({
+            canvas: correctedCanvas,
+            step: cameraFlow.step,
+            previewSrc: correctedCanvas.toDataURL('image/jpeg', 0.88),
+          });
+          return;
+        }
+      } catch {
+        // Perspective correction is an opportunistic camera-only enhancement.
+      }
+
+      const blob = await new Promise<Blob | null>((resolve) => {
+        canvas.toBlob(resolve, 'image/jpeg', 0.92);
+      });
+
+      if (!blob) {
+        setCameraError('촬영 이미지를 저장할 수 없습니다. 다시 시도해주세요.');
+        return;
+      }
+
+      const file = new File([blob], `${cameraFlow.step}_${Date.now()}.jpg`, { type: 'image/jpeg' });
+      const uploaded = await uploadSequentialFile(file, cameraFlow.step);
+      if (!uploaded) return;
+
+      advanceCameraFlowAfterUpload(cameraFlow.step);
+    } finally {
+      setIsCapturing(false);
+    }
+  };
+
   const cancelCameraFlow = () => {
     stopCameraSession();
     setCameraFlow({ active: false, step: 'cagi', completed: [] });
     setCameraError('');
+    setCorrectionPreview(null);
   };
 
   const handleResetBatch = async () => {
@@ -506,7 +592,24 @@ export default function ImageUploadPanel({
               <span className="status-pill">{cameraFlow.step === 'cagi' ? '1 / 2' : '2 / 2'}</span>
             </div>
 
-            <div className="camera-live-layout">
+            {correctionPreview && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+                <img
+                  src={correctionPreview.previewSrc}
+                  alt="보정된 촬영 미리보기"
+                  style={{
+                    width: '100%',
+                    maxHeight: 520,
+                    objectFit: 'contain',
+                    background: '#111827',
+                    border: '1px solid var(--border-subtle)',
+                    borderRadius: 8,
+                  }}
+                />
+              </div>
+            )}
+
+            <div className="camera-live-layout" style={correctionPreview ? { display: 'none' } : undefined}>
               <div className="camera-live-frame">
                 <video
                   ref={cameraVideoRef}
@@ -528,17 +631,47 @@ export default function ImageUploadPanel({
               </ul>
             </div>
 
-            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
-              <button className="btn-secondary" type="button" onClick={cancelCameraFlow}>
+            {correctionPreview && (
+              <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+                <button
+                  className="btn-secondary"
+                  type="button"
+                  onClick={retakeCorrectionPreview}
+                  disabled={isCagiUploading || isSatUploading}
+                >
+                  다시 촬영
+                </button>
+                <button
+                  className="btn-primary capture-action-button"
+                  type="button"
+                  onClick={confirmCorrectionPreview}
+                  disabled={isCagiUploading || isSatUploading}
+                >
+                  {isCagiUploading || isSatUploading ? '업로드 중' : '이대로 사용'}
+                </button>
+              </div>
+            )}
+
+            <div style={{ display: correctionPreview ? 'none' : 'flex', gap: 10, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+              <button
+                className="btn-secondary"
+                type="button"
+                onClick={cancelCameraFlow}
+                disabled={isCapturing || isCagiUploading || isSatUploading}
+              >
                 촬영 취소
               </button>
               <button
                 className="btn-primary capture-action-button"
                 type="button"
                 onClick={captureCurrentFrame}
-                disabled={isCagiUploading || isSatUploading}
+                disabled={isCapturing || isCagiUploading || isSatUploading}
               >
-                {isCagiUploading || isSatUploading ? '업로드 중' : `${cameraStepLabel}하기`}
+                {isCagiUploading || isSatUploading
+                  ? '업로드 중'
+                  : isCapturing
+                    ? '처리 중'
+                    : `${cameraStepLabel}하기`}
               </button>
             </div>
           </div>

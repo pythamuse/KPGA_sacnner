@@ -46,6 +46,10 @@ function classifyByFilename(lowerName: string): ClassifiedFormType {
 async function classifyByImageContent(filePath: string): Promise<ClassifiedFormType> {
   try {
     const image = await loadImageAnalysisData(filePath);
+    if (!image.contentBoundsConfident) {
+      return 'unknown';
+    }
+
     const cagiScore = scoreChoiceLayout(image, cagiTemplate.choiceGroups);
     const satisfactionScore = scoreChoiceLayout(image, getSatisfactionClassificationGroups());
     const scoreGap = Math.abs(cagiScore - satisfactionScore);

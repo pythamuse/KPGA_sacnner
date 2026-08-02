@@ -14,7 +14,15 @@ export default function RootLayout({
   return (
     <html lang="ko">
       <head>
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.min.js" defer></script>
+        <script
+          type="module"
+          dangerouslySetInnerHTML={{
+            __html: `
+import * as pdfjsLib from 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/6.1.200/pdf.min.mjs';
+window.pdfjsLib = pdfjsLib;
+            `,
+          }}
+        />
       </head>
       <body>
         <main style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
