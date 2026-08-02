@@ -18,7 +18,7 @@ export async function POST(req: NextRequest) {
     }
 
     if (!hasJobSession(jobId)) {
-      return NextResponse.json({ error: '?묒뾽 ?몄뀡??議댁옱?섏? ?딆뒿?덈떎. ???묒뾽???앹꽦?댁＜?몄슂.' }, { status: 404 });
+      return NextResponse.json({ error: '작업 세션이 존재하지 않습니다. 새 작업을 생성해주세요.' }, { status: 404 });
     }
 
     const jobDir = getJobDir(jobId);
