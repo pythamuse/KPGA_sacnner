@@ -76,6 +76,9 @@ export default function ImageUploadPanel({
   useEffect(() => {
     if (cameraFlow.active && cameraVideoRef.current && cameraStreamRef.current) {
       cameraVideoRef.current.srcObject = cameraStreamRef.current;
+      cameraVideoRef.current.play().catch((err) => {
+        console.warn('camera video play() failed', err);
+      });
     }
   }, [cameraFlow.active]);
 
@@ -388,6 +391,11 @@ export default function ImageUploadPanel({
       return;
     }
 
+    if (video.readyState < 2 || video.videoWidth === 0 || video.videoHeight === 0) {
+      setCameraError('카메라 화면이 아직 준비되지 않았습니다. 잠시 후 다시 시도해주세요.');
+      return;
+    }
+
     setIsCapturing(true);
     try {
       const width = video.videoWidth || 1280;
@@ -442,6 +450,8 @@ export default function ImageUploadPanel({
       if (!uploaded) return;
 
       advanceCameraFlowAfterUpload(cameraFlow.step);
+    } catch (err: any) {
+      setCameraError(`촬영 중 오류가 발생했습니다. 다시 시도해주세요. (${err?.message || '알 수 없는 오류'})`);
     } finally {
       setIsCapturing(false);
     }
