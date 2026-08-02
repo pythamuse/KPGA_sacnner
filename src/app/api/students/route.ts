@@ -1,101 +1,59 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { validateStudent } from '../../../lib/validation/validateStudent';
-import { 
-  normalizeGender, 
-  normalizeSchoolType, 
-  normalizeGrade, 
-  normalizeAge 
+import {
+  normalizeGender,
+  normalizeSchoolType,
+  normalizeGrade,
+  normalizeAge
 } from '../../../lib/validation/normalize';
-import { getJobSession, addStudentToSession } from '../../../lib/storage/jobStore';
-import { 
-  loadJobWorkbooks, 
-  restoreExtLst, 
-  backupJobFiles, 
-  rollbackJobFiles, 
-  commitJobFiles,
-  getTemplateFiles,
-} from '../../../lib/excel/templateManager';
-import { writeCagiRow } from '../../../lib/excel/writeCagi';
-import { writeSatisfactionRow } from '../../../lib/excel/writeSatisfaction';
-import { verifyWorkbooks } from '../../../lib/excel/verifyWorkbook';
+import { generateWorkbookPair } from '../../../lib/excel/generateWorkbookPair';
+import { StudentData } from '../../../lib/validation/types';
 
 export async function POST(req: NextRequest) {
-  let jobId = '';
   try {
-    const { jobId: reqJobId, student } = await req.json();
-    jobId = reqJobId;
+    const { jobId, students: rawStudents } = await req.json();
 
-    if (!jobId || !student) {
+    if (!jobId || !Array.isArray(rawStudents) || rawStudents.length === 0) {
       return NextResponse.json({ error: '필수 파라미터가 누락되었습니다.' }, { status: 400 });
     }
 
-    const session = getJobSession(jobId);
-    if (!session) {
-      return NextResponse.json({ error: '유효하지 않은 작업 세션입니다.' }, { status: 404 });
-    }
+    const students: StudentData[] = rawStudents;
+    const newIndex = students.length - 1;
+    const newStudent = students[newIndex];
 
-    // 1. 학생 데이터 유효성 검증
-    const validation = validateStudent(student);
+    // 1. 새로 저장하려는 학생 데이터 유효성 검증
+    const validation = validateStudent(newStudent);
     if (!validation.ok) {
-      return NextResponse.json({ 
-        error: '데이터 검증에 실패했습니다.', 
-        errors: validation.errors 
+      return NextResponse.json({
+        error: '데이터 검증에 실패했습니다.',
+        errors: validation.errors
       }, { status: 400 });
     }
 
-    // 정규화된 값을 student 객체에 명시적으로 반영
-    student.basic.gender = normalizeGender(student.basic.gender);
-    student.basic.schoolType = normalizeSchoolType(student.basic.schoolType);
-    student.basic.grade = normalizeGrade(student.basic.grade);
-    student.basic.age = normalizeAge(student.basic.age);
+    // 정규화된 값을 명시적으로 반영
+    newStudent.basic.gender = normalizeGender(newStudent.basic.gender);
+    newStudent.basic.schoolType = normalizeSchoolType(newStudent.basic.schoolType);
+    newStudent.basic.grade = normalizeGrade(newStudent.basic.grade);
+    newStudent.basic.age = normalizeAge(newStudent.basic.age);
 
-    // 2. 트랜잭션 백업
-    backupJobFiles(jobId);
-
-    // 3. 엑셀 데이터 쓰기
-    const { cagiWorkbook, satisfactionWorkbook, cagiPath, satisfactionPath } = await loadJobWorkbooks(jobId);
-    const cagiSheet = cagiWorkbook.getWorksheet('청소년도박문제선별검사')!;
-    const satSheet = satisfactionWorkbook.getWorksheet('청소년예방교육만족도')!;
-
-    // 행 번호 결정 (3행부터 시작)
-    const targetRow = 3 + session.students.length;
-
-    // 데이터 쓰기
-    writeCagiRow(cagiSheet, targetRow, student);
-    writeSatisfactionRow(satSheet, targetRow, student);
-
-    // 파일 저장
-    await cagiWorkbook.xlsx.writeFile(cagiPath);
-    await satisfactionWorkbook.xlsx.writeFile(satisfactionPath);
-
-    // 드롭다운 유효성 검사 복원
-    const templates = getTemplateFiles();
-    restoreExtLst(templates.cagiPath, cagiPath);
-    restoreExtLst(templates.satisfactionPath, satisfactionPath);
-
-    // 4. 저장 후 재읽기 자체 검증
-    const updatedStudents = [...session.students, student];
-    const verifyResult = await verifyWorkbooks(cagiPath, satisfactionPath, updatedStudents);
-
-    if (!verifyResult.ok) {
-      // 자가 검증 실패 시 롤백
-      rollbackJobFiles(jobId);
-      return NextResponse.json({ 
-        error: '엑셀 저장 후 무결성 검증 실패 (롤백됨)', 
-        errors: verifyResult.errors.map(msg => ({ code: 'INTEGRITY_ERROR', message: msg }))
-      }, { status: 500 });
-    }
-
-    // 5. 성공 시 커밋 및 세션 저장
-    commitJobFiles(jobId);
-    
-    // 학생 상태를 confirmed로 변경하여 저장
-    const savedStudent = {
-      ...student,
+    const targetRow = 3 + newIndex;
+    const savedStudent: StudentData = {
+      ...newStudent,
       studentIndex: targetRow,
       status: 'confirmed'
     };
-    addStudentToSession(jobId, savedStudent);
+    students[newIndex] = savedStudent;
+
+    // 2. 원본 템플릿에서 학생 목록 전체를 다시 써서 엑셀 2개를 새로 만든다
+    //    (이전 요청이 만든 작업 파일이 이 서버리스 인스턴스에 없어도 항상 동작한다)
+    const { verifyResult } = await generateWorkbookPair(students);
+
+    if (!verifyResult.ok) {
+      return NextResponse.json({
+        error: '엑셀 생성 후 무결성 검증 실패',
+        errors: verifyResult.errors.map(msg => ({ code: 'INTEGRITY_ERROR', message: msg }))
+      }, { status: 500 });
+    }
 
     return NextResponse.json({
       ok: true,
@@ -104,9 +62,6 @@ export async function POST(req: NextRequest) {
     });
 
   } catch (err: any) {
-    if (jobId) {
-      rollbackJobFiles(jobId);
-    }
     return NextResponse.json(
       { error: `학생 저장 처리 실패: ${err.message}` },
       { status: 500 }
