@@ -6,6 +6,7 @@ export interface ImageAnalysisData {
   height: number;
   pixels: Buffer;
   contentBounds?: PixelBounds;
+  contentBoundsConfident: boolean;
 }
 
 export interface PixelBounds {
@@ -38,11 +39,14 @@ export async function loadImageAnalysisData(filePath: string): Promise<ImageAnal
   }
 
   const pixels = await image.raw().toBuffer();
+  const frameBounds = detectFrameBounds({ width, height, pixels });
+
   return {
     width,
     height,
     pixels,
-    contentBounds: detectContentBounds({ width, height, pixels }),
+    contentBounds: frameBounds || detectDarkPixelBounds({ width, height, pixels }),
+    contentBoundsConfident: frameBounds !== null,
   };
 }
 
@@ -86,6 +90,10 @@ export function detectContentBounds(image: Pick<ImageAnalysisData, 'width' | 'he
     return frameBounds;
   }
 
+  return detectDarkPixelBounds(image);
+}
+
+function detectDarkPixelBounds(image: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>): PixelBounds {
   const darkThreshold = 220;
   const minX = Math.floor(image.width * 0.02);
   const maxX = Math.ceil(image.width * 0.98);
