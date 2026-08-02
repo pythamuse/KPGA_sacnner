@@ -44,6 +44,7 @@ export default function ImageUploadPanel({
   const [satFile, setSatFile] = useState<{ name: string; preview: string } | null>(null);
   const [isCagiUploading, setIsCagiUploading] = useState(false);
   const [isSatUploading, setIsSatUploading] = useState(false);
+  const [isCapturing, setIsCapturing] = useState(false);
 
   const [cagiCount, setCagiCount] = useState<number>(0);
   const [satCount, setSatCount] = useState<number>(0);
@@ -69,8 +70,8 @@ export default function ImageUploadPanel({
   const cameraStreamRef = useRef<MediaStream | null>(null);
 
   useEffect(() => {
-    onUploadProgressChange?.(isBatchProcessing || isCagiUploading || isSatUploading || isCameraStarting);
-  }, [isBatchProcessing, isCagiUploading, isSatUploading, isCameraStarting, onUploadProgressChange]);
+    onUploadProgressChange?.(isBatchProcessing || isCagiUploading || isSatUploading || isCameraStarting || isCapturing);
+  }, [isBatchProcessing, isCagiUploading, isSatUploading, isCameraStarting, isCapturing, onUploadProgressChange]);
 
   useEffect(() => {
     if (cameraFlow.active && cameraVideoRef.current && cameraStreamRef.current) {
@@ -378,6 +379,8 @@ export default function ImageUploadPanel({
   };
 
   const captureCurrentFrame = async () => {
+    if (isCapturing || isCagiUploading || isSatUploading) return;
+
     const video = cameraVideoRef.current;
     const canvas = cameraCanvasRef.current;
     if (!video || !canvas || !cameraStreamRef.current) {
@@ -385,58 +388,63 @@ export default function ImageUploadPanel({
       return;
     }
 
-    const width = video.videoWidth || 1280;
-    const height = video.videoHeight || 960;
-    canvas.width = width;
-    canvas.height = height;
-
-    const context = canvas.getContext('2d');
-    if (!context) {
-      setCameraError('촬영 이미지를 만들 수 없습니다. 브라우저를 다시 시도해주세요.');
-      return;
-    }
-
-    context.drawImage(video, 0, 0, width, height);
-
+    setIsCapturing(true);
     try {
-      const cv = await withTimeout(loadOpenCv(), 5000, 'OpenCV.js load timed out.');
-      const quad = detectDocumentQuad(cv, canvas);
+      const width = video.videoWidth || 1280;
+      const height = video.videoHeight || 960;
+      canvas.width = width;
+      canvas.height = height;
 
-      if (quad) {
-        const template = cameraFlow.step === 'cagi' ? cagiTemplate : satisfactionTemplate;
-        const correctedCanvas = warpToRectangle(
-          cv,
-          canvas,
-          quad,
-          template.baseSize.width * PERSPECTIVE_CORRECTION_SCALE,
-          template.baseSize.height * PERSPECTIVE_CORRECTION_SCALE,
-        );
-
-        setCorrectionPreview({
-          canvas: correctedCanvas,
-          step: cameraFlow.step,
-          previewSrc: correctedCanvas.toDataURL('image/jpeg', 0.88),
-        });
+      const context = canvas.getContext('2d');
+      if (!context) {
+        setCameraError('촬영 이미지를 만들 수 없습니다. 브라우저를 다시 시도해주세요.');
         return;
       }
-    } catch {
-      // Perspective correction is an opportunistic camera-only enhancement.
+
+      context.drawImage(video, 0, 0, width, height);
+
+      try {
+        const cv = await withTimeout(loadOpenCv(), 5000, 'OpenCV.js load timed out.');
+        const quad = detectDocumentQuad(cv, canvas);
+
+        if (quad) {
+          const template = cameraFlow.step === 'cagi' ? cagiTemplate : satisfactionTemplate;
+          const correctedCanvas = warpToRectangle(
+            cv,
+            canvas,
+            quad,
+            template.baseSize.width * PERSPECTIVE_CORRECTION_SCALE,
+            template.baseSize.height * PERSPECTIVE_CORRECTION_SCALE,
+          );
+
+          setCorrectionPreview({
+            canvas: correctedCanvas,
+            step: cameraFlow.step,
+            previewSrc: correctedCanvas.toDataURL('image/jpeg', 0.88),
+          });
+          return;
+        }
+      } catch {
+        // Perspective correction is an opportunistic camera-only enhancement.
+      }
+
+      const blob = await new Promise<Blob | null>((resolve) => {
+        canvas.toBlob(resolve, 'image/jpeg', 0.92);
+      });
+
+      if (!blob) {
+        setCameraError('촬영 이미지를 저장할 수 없습니다. 다시 시도해주세요.');
+        return;
+      }
+
+      const file = new File([blob], `${cameraFlow.step}_${Date.now()}.jpg`, { type: 'image/jpeg' });
+      const uploaded = await uploadSequentialFile(file, cameraFlow.step);
+      if (!uploaded) return;
+
+      advanceCameraFlowAfterUpload(cameraFlow.step);
+    } finally {
+      setIsCapturing(false);
     }
-
-    const blob = await new Promise<Blob | null>((resolve) => {
-      canvas.toBlob(resolve, 'image/jpeg', 0.92);
-    });
-
-    if (!blob) {
-      setCameraError('촬영 이미지를 저장할 수 없습니다. 다시 시도해주세요.');
-      return;
-    }
-
-    const file = new File([blob], `${cameraFlow.step}_${Date.now()}.jpg`, { type: 'image/jpeg' });
-    const uploaded = await uploadSequentialFile(file, cameraFlow.step);
-    if (!uploaded) return;
-
-    advanceCameraFlowAfterUpload(cameraFlow.step);
   };
 
   const cancelCameraFlow = () => {
@@ -645,16 +653,25 @@ export default function ImageUploadPanel({
             )}
 
             <div style={{ display: correctionPreview ? 'none' : 'flex', gap: 10, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
-              <button className="btn-secondary" type="button" onClick={cancelCameraFlow}>
+              <button
+                className="btn-secondary"
+                type="button"
+                onClick={cancelCameraFlow}
+                disabled={isCapturing || isCagiUploading || isSatUploading}
+              >
                 촬영 취소
               </button>
               <button
                 className="btn-primary capture-action-button"
                 type="button"
                 onClick={captureCurrentFrame}
-                disabled={isCagiUploading || isSatUploading}
+                disabled={isCapturing || isCagiUploading || isSatUploading}
               >
-                {isCagiUploading || isSatUploading ? '업로드 중' : `${cameraStepLabel}하기`}
+                {isCagiUploading || isSatUploading
+                  ? '업로드 중'
+                  : isCapturing
+                    ? '처리 중'
+                    : `${cameraStepLabel}하기`}
               </button>
             </div>
           </div>
