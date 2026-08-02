@@ -159,18 +159,16 @@ export default function RecognitionReview({
 
   const imageUrl = (imageId?: string) => {
     if (!imageId) return '';
-    return `/api/uploads/image?jobId=${encodeURIComponent(jobId)}&imageId=${encodeURIComponent(imageId)}`;
+    if (imageId === draft.source?.satisfactionImageId) {
+      return draft.source?.satisfactionImageDataUrl || '';
+    }
+    return draft.source?.cagiImageDataUrl || '';
   };
 
   const cropUrl = (key: string, debug = false) => {
-    const imageId = key.startsWith('satisfaction.')
-      ? draft.source?.satisfactionImageId
-      : draft.source?.cagiImageId;
-
-    if (!imageId) return '';
-
-    const debugParam = debug ? '&debug=1' : '';
-    return `/api/uploads/crop?jobId=${encodeURIComponent(jobId)}&imageId=${encodeURIComponent(imageId)}&field=${encodeURIComponent(key)}${debugParam}`;
+    return debug
+      ? draft.source?.cropDebugDataUrls?.[key] || ''
+      : draft.source?.cropDataUrls?.[key] || '';
   };
 
   const renderFieldCropPreview = (key: string) => {

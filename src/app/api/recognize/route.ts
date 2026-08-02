@@ -7,6 +7,7 @@ import { recognizeStudentForms } from '../../../lib/recognition/detectCheckmarks
 import { matchBatch } from '../../../lib/recognition/batchMatcher';
 import { hasJobSession } from '../../../lib/storage/jobStore';
 import { hasCagiEarlyInterventionMarks } from '../../../lib/recognition/cagiEarlyIntervention';
+import { buildSourcePreview } from '../../../lib/recognition/buildSourcePreview';
 
 export async function POST(req: NextRequest) {
   try {
@@ -137,13 +138,18 @@ export async function POST(req: NextRequest) {
       // 개별 드래프트 객체에 이미지 정보 주입
       const cagiImageId = path.basename(pair.cagiPath).split('.')[0];
       const satisfactionImageId = path.basename(pair.satisfactionPath).split('.')[0];
+      const preview = await buildSourcePreview(pair.cagiPath, pair.satisfactionPath);
       
       studentDrafts.push({
         ...draft,
         // UI에서 저장 시 식별용으로 이미지 ID들을 source에 엮음
         source: {
           cagiImageId,
-          satisfactionImageId
+          satisfactionImageId,
+          cagiImageDataUrl: preview.cagiImageDataUrl,
+          satisfactionImageDataUrl: preview.satisfactionImageDataUrl,
+          cropDataUrls: preview.cropDataUrls,
+          cropDebugDataUrls: preview.cropDebugDataUrls
         }
       });
     }

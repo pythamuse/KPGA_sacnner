@@ -5,6 +5,10 @@ export interface RecognitionDraft {
   source?: {
     cagiImageId?: string;
     satisfactionImageId?: string;
+    cagiImageDataUrl?: string;
+    satisfactionImageDataUrl?: string;
+    cropDataUrls?: { [field: string]: string };
+    cropDebugDataUrls?: { [field: string]: string };
   };
   basic: {
     age?: number;

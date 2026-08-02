@@ -116,6 +116,10 @@ describe('엔드투엔드 API 통합 테스트 (일괄/스캔 대응)', () => {
     expect(body.studentDrafts.length).toBe(1);
 
     recognizedDraft = body.studentDrafts[0];
+    expect(recognizedDraft.source.cagiImageDataUrl).toMatch(/^data:image\/jpeg;base64,/);
+    expect(recognizedDraft.source.satisfactionImageDataUrl).toMatch(/^data:image\/jpeg;base64,/);
+    expect(recognizedDraft.source.cropDataUrls).toBeDefined();
+    expect(Object.keys(recognizedDraft.source.cropDataUrls).length).toBeGreaterThan(0);
     
     // 예시 데이터가 정확하게 식별되었는지 검증
     expect(recognizedDraft.basic.age).toBe(14);
