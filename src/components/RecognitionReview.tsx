@@ -171,6 +171,23 @@ export default function RecognitionReview({
       : draft.source?.cropDataUrls?.[key] || '';
   };
 
+  const openDataUrlInNewTab = async (event: React.MouseEvent, dataUrl: string) => {
+    event.preventDefault();
+    try {
+      const response = await fetch(dataUrl);
+      const blob = await response.blob();
+      const blobUrl = URL.createObjectURL(blob);
+      const newTab = window.open(blobUrl, '_blank', 'noopener,noreferrer');
+      if (newTab) {
+        newTab.addEventListener('load', () => URL.revokeObjectURL(blobUrl));
+      }
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+    } catch {
+      // If conversion fails for any reason, do nothing rather than crash -- the inline
+      // <img> preview already shows the image, this is only the "open larger" affordance.
+    }
+  };
+
   const renderFieldCropPreview = (key: string) => {
     if (getConfidenceLevel(key) === 'high') return null;
     if (!draft.candidates?.[key]?.length && key !== 'basic.age') return null;
@@ -185,6 +202,7 @@ export default function RecognitionReview({
           href={url}
           target="_blank"
           rel="noreferrer"
+          onClick={(e) => openDataUrlInNewTab(e, url)}
           style={{
             display: 'block',
             border: '1px solid var(--border-medium)',
@@ -211,6 +229,7 @@ export default function RecognitionReview({
             href={debugUrl}
             target="_blank"
             rel="noreferrer"
+            onClick={(e) => openDataUrlInNewTab(e, debugUrl)}
             style={{
               color: 'var(--brand-primary-active)',
               fontSize: 12,
@@ -248,6 +267,7 @@ export default function RecognitionReview({
               href={item.url}
               target="_blank"
               rel="noreferrer"
+              onClick={(e) => openDataUrlInNewTab(e, item.url)}
               style={{
                 display: 'flex',
                 flexDirection: 'column',
