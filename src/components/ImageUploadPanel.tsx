@@ -23,6 +23,12 @@ const PDF_RENDER_OPTIONS = [
   { scale: 1.25, quality: 0.82 },
   { scale: 1.0, quality: 0.78 },
 ];
+const IMAGE_SHRINK_OPTIONS = [
+  { scale: 1.0, quality: 0.86 },
+  { scale: 0.85, quality: 0.82 },
+  { scale: 0.7, quality: 0.78 },
+  { scale: 0.55, quality: 0.74 },
+];
 
 const canvasToBlob = (canvas: HTMLCanvasElement, mimeType: string, quality: number): Promise<Blob> => (
   new Promise((resolve, reject) => {
@@ -32,6 +38,86 @@ const canvasToBlob = (canvas: HTMLCanvasElement, mimeType: string, quality: numb
     }, mimeType, quality);
   })
 );
+
+const toJpegFilename = (filename: string): string => {
+  const basename = filename.replace(/\.[^/.]+$/, '');
+  return `${basename || 'upload'}.jpg`;
+};
+
+const loadImageFile = async (file: File): Promise<ImageBitmap | HTMLImageElement> => {
+  if ('createImageBitmap' in window) {
+    return await createImageBitmap(file);
+  }
+
+  return await new Promise((resolve, reject) => {
+    const objectUrl = URL.createObjectURL(file);
+    const image = new Image();
+
+    image.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      resolve(image);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error('이미지 파일을 읽을 수 없습니다.'));
+    };
+    image.src = objectUrl;
+  });
+};
+
+const getImageDimensions = (image: ImageBitmap | HTMLImageElement) => {
+  if (image instanceof HTMLImageElement) {
+    return { width: image.naturalWidth, height: image.naturalHeight };
+  }
+
+  return { width: image.width, height: image.height };
+};
+
+const shrinkImageFileIfNeeded = async (file: File, maxBytes: number): Promise<File> => {
+  if (file.size <= maxBytes) {
+    return file;
+  }
+
+  const image = await loadImageFile(file);
+  const { width, height } = getImageDimensions(image);
+  let fallbackBlob: Blob | null = null;
+
+  try {
+    for (const option of IMAGE_SHRINK_OPTIONS) {
+      const canvas = document.createElement('canvas');
+      const targetWidth = Math.max(1, Math.round(width * option.scale));
+      const targetHeight = Math.max(1, Math.round(height * option.scale));
+      const context = canvas.getContext('2d');
+
+      if (!context) {
+        throw new Error('브라우저에서 이미지를 그릴 수 없습니다.');
+      }
+
+      canvas.width = targetWidth;
+      canvas.height = targetHeight;
+      context.drawImage(image, 0, 0, targetWidth, targetHeight);
+
+      const blob = await canvasToBlob(canvas, 'image/jpeg', option.quality);
+      canvas.width = 1;
+      canvas.height = 1;
+
+      fallbackBlob = blob;
+      if (blob.size <= maxBytes) {
+        return new File([blob], toJpegFilename(file.name), { type: 'image/jpeg' });
+      }
+    }
+
+    if (!fallbackBlob) {
+      return file;
+    }
+
+    return new File([fallbackBlob], toJpegFilename(file.name), { type: 'image/jpeg' });
+  } finally {
+    if ('close' in image) {
+      image.close();
+    }
+  }
+};
 
 export default function ImageUploadPanel({
   mode,
@@ -159,8 +245,9 @@ export default function ImageUploadPanel({
   }, []);
 
   const uploadSingleFile = async (file: File, type: UploadKind, replaceExisting = false): Promise<any> => {
+    const uploadFile = await shrinkImageFileIfNeeded(file, MAX_UPLOAD_IMAGE_BYTES);
     const formData = new FormData();
-    formData.append('file', file);
+    formData.append('file', uploadFile);
     formData.append('jobId', jobId);
     formData.append('type', type);
     formData.append('replaceExisting', replaceExisting ? 'true' : 'false');
@@ -174,7 +261,7 @@ export default function ImageUploadPanel({
       let errorMessage = '업로드에 실패했습니다.';
 
       if (res.status === 413) {
-        errorMessage = '업로드 파일 용량이 너무 큽니다. PDF를 더 낮은 해상도로 변환한 뒤 다시 시도해주세요.';
+        errorMessage = '업로드 파일 용량이 너무 큽니다. 더 작은 용량의 이미지로 다시 시도해주세요.';
       } else {
         const errText = await res.text();
         try {
