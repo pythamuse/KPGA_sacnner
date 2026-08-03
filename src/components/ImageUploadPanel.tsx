@@ -147,6 +147,7 @@ export default function ImageUploadPanel({
     canvas: HTMLCanvasElement;
     step: UploadKind;
     previewSrc: string;
+    source: 'camera' | 'file';
   } | null>(null);
 
   const cagiInputRef = useRef<HTMLInputElement>(null);
@@ -311,6 +312,59 @@ export default function ImageUploadPanel({
     }
   };
 
+  const processSelectedFile = async (file: File, type: UploadKind): Promise<void> => {
+    setCameraError('');
+    setCorrectionPreview(null);
+
+    try {
+      const image = await loadImageFile(file);
+
+      try {
+        const { width, height } = getImageDimensions(image);
+        const canvas = document.createElement('canvas');
+        const context = canvas.getContext('2d');
+
+        if (!context) {
+          throw new Error('브라우저에서 이미지를 그릴 수 없습니다.');
+        }
+
+        canvas.width = width;
+        canvas.height = height;
+        context.drawImage(image, 0, 0, width, height);
+
+        const cv = await withTimeout(loadOpenCv(), 5000, 'OpenCV.js load timed out.');
+        const quad = detectDocumentQuad(cv, canvas);
+
+        if (quad) {
+          const template = type === 'cagi' ? cagiTemplate : satisfactionTemplate;
+          const correctedCanvas = warpToRectangle(
+            cv,
+            canvas,
+            quad,
+            template.baseSize.width * PERSPECTIVE_CORRECTION_SCALE,
+            template.baseSize.height * PERSPECTIVE_CORRECTION_SCALE,
+          );
+
+          setCorrectionPreview({
+            canvas: correctedCanvas,
+            step: type,
+            previewSrc: correctedCanvas.toDataURL('image/jpeg', 0.88),
+            source: 'file',
+          });
+          return;
+        }
+      } finally {
+        if ('close' in image) {
+          image.close();
+        }
+      }
+    } catch {
+      // Perspective correction is opportunistic; upload the original file unchanged on any correction failure.
+    }
+
+    await uploadSequentialFile(file, type);
+  };
+
   const handleBatchFileChange = async (e: React.ChangeEvent<HTMLInputElement>, type: UploadKind) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
@@ -354,13 +408,12 @@ export default function ImageUploadPanel({
     }
   };
 
-  const handleSequentialFileChange = async (e: React.ChangeEvent<HTMLInputElement>, type: UploadKind): Promise<boolean> => {
+  const handleSequentialFileChange = async (e: React.ChangeEvent<HTMLInputElement>, type: UploadKind): Promise<void> => {
     const file = e.target.files?.[0];
-    if (!file) return false;
+    if (!file) return;
 
-    const uploaded = await uploadSequentialFile(file, type);
+    await processSelectedFile(file, type);
     if (e.target) e.target.value = '';
-    return uploaded;
   };
 
   const startCameraFlow = async () => {
@@ -454,10 +507,27 @@ export default function ImageUploadPanel({
     return true;
   };
 
+  const uploadCorrectedFileCanvas = async (canvas: HTMLCanvasElement, type: UploadKind): Promise<boolean> => {
+    const blob = await new Promise<Blob | null>((resolve) => {
+      canvas.toBlob(resolve, 'image/jpeg', 0.92);
+    });
+
+    if (!blob) {
+      setCameraError('보정된 이미지를 저장할 수 없습니다. 다시 선택해주세요.');
+      return false;
+    }
+
+    const file = new File([blob], `${type}_${Date.now()}.jpg`, { type: 'image/jpeg' });
+    return await uploadSequentialFile(file, type);
+  };
+
   const confirmCorrectionPreview = async () => {
     if (!correctionPreview) return;
 
-    const uploaded = await uploadCapturedCanvas(correctionPreview.canvas, correctionPreview.step);
+    const uploaded = correctionPreview.source === 'camera'
+      ? await uploadCapturedCanvas(correctionPreview.canvas, correctionPreview.step)
+      : await uploadCorrectedFileCanvas(correctionPreview.canvas, correctionPreview.step);
+
     if (uploaded) {
       setCorrectionPreview(null);
     }
@@ -516,6 +586,7 @@ export default function ImageUploadPanel({
             canvas: correctedCanvas,
             step: cameraFlow.step,
             previewSrc: correctedCanvas.toDataURL('image/jpeg', 0.88),
+            source: 'camera',
           });
           return;
         }
@@ -585,6 +656,8 @@ export default function ImageUploadPanel({
   const cameraStepDescription = cameraFlow.step === 'cagi'
     ? '종이 전체가 화면 안에 들어오도록 맞춘 뒤 선별검사지 앞면을 촬영해주세요.'
     : '같은 학생의 만족도조사 뒷면을 촬영해주세요. 문항1~10 응답 영역이 잘 보이게 맞춰주세요.';
+  const cameraCorrectionPreview = correctionPreview?.source === 'camera' ? correctionPreview : null;
+  const fileCorrectionPreview = correctionPreview?.source === 'file' ? correctionPreview : null;
 
   const renderUploadBox = ({
     type,
@@ -689,10 +762,10 @@ export default function ImageUploadPanel({
               <span className="status-pill">{cameraFlow.step === 'cagi' ? '1 / 2' : '2 / 2'}</span>
             </div>
 
-            {correctionPreview && (
+            {cameraCorrectionPreview && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
                 <img
-                  src={correctionPreview.previewSrc}
+                  src={cameraCorrectionPreview.previewSrc}
                   alt="보정된 촬영 미리보기"
                   style={{
                     width: '100%',
@@ -706,7 +779,7 @@ export default function ImageUploadPanel({
               </div>
             )}
 
-            <div className="camera-live-layout" style={correctionPreview ? { display: 'none' } : undefined}>
+            <div className="camera-live-layout" style={cameraCorrectionPreview ? { display: 'none' } : undefined}>
               <div className="camera-live-frame">
                 <video
                   ref={cameraVideoRef}
@@ -728,7 +801,7 @@ export default function ImageUploadPanel({
               </ul>
             </div>
 
-            {correctionPreview && (
+            {cameraCorrectionPreview && (
               <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
                 <button
                   className="btn-secondary"
@@ -749,7 +822,7 @@ export default function ImageUploadPanel({
               </div>
             )}
 
-            <div style={{ display: correctionPreview ? 'none' : 'flex', gap: 10, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+            <div style={{ display: cameraCorrectionPreview ? 'none' : 'flex', gap: 10, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
               <button
                 className="btn-secondary"
                 type="button"
@@ -786,6 +859,40 @@ export default function ImageUploadPanel({
                 {isCameraStarting ? '준비중' : '촬영하기'}
               </button>
             </div>
+            {fileCorrectionPreview && (
+              <div className="panel panel-pad" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+                <img
+                  src={fileCorrectionPreview.previewSrc}
+                  alt="보정된 업로드 미리보기"
+                  style={{
+                    width: '100%',
+                    maxHeight: 520,
+                    objectFit: 'contain',
+                    background: '#111827',
+                    border: '1px solid var(--border-subtle)',
+                    borderRadius: 8,
+                  }}
+                />
+                <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+                  <button
+                    className="btn-secondary"
+                    type="button"
+                    onClick={retakeCorrectionPreview}
+                    disabled={isCagiUploading || isSatUploading}
+                  >
+                    다시 선택
+                  </button>
+                  <button
+                    className="btn-primary capture-action-button"
+                    type="button"
+                    onClick={confirmCorrectionPreview}
+                    disabled={isCagiUploading || isSatUploading}
+                  >
+                    {isCagiUploading || isSatUploading ? '업로드 중' : '이대로 사용'}
+                  </button>
+                </div>
+              </div>
+            )}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 16 }}>
               {renderUploadBox({
                 type: 'cagi',
