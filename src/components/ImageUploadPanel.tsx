@@ -24,7 +24,7 @@ const PERSPECTIVE_CORRECTION_TIMEOUT_MS = 9000;
 // via worker.terminate(). Local verification confirmed the main thread stays fully responsive
 // throughout, even when the worker itself is slow/unresponsive -- unlike the previous
 // withTimeout-only approach, which could not protect against a genuine main-thread block.
-// See Docs/29-32.
+// See Task/MOBILE_CAPTURE_PERSPECTIVE_CORRECTION.md.
 const PERSPECTIVE_CORRECTION_ENABLED = true;
 const PDF_RENDER_OPTIONS = [
   { scale: 1.5, quality: 0.86 },

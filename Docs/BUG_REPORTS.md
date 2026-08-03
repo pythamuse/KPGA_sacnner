@@ -1,0 +1,71 @@
+# BUG_REPORTS — 버그 색인
+
+각 항목은 원인과 대응만 짧게 기록한다. 조사 과정·테스트 결과·후속 피드백 등 전체 맥락은 연결된 Task 문서를 참고할 것. 새 버그는 이 표에 한 줄 추가 + 아래 상세(3~6줄 이내)로 기록한다. 문서 작성 규칙은 [README.md](../README.md) 참고.
+
+| # | 제목 | 상태 | 관련 Task |
+|---|---|---|---|
+| 1 | PDF 일괄 스캔 중 특정 페이지에서 영구 멈춤(JBIG2) | 부분 해결 | [PDF_BATCH_RENDER_HANG](../Task/PDF_BATCH_RENDER_HANG.md) |
+| 2 | Vercel 인스턴스 간 `/tmp` 미공유로 저장/다운로드/이미지 미리보기 404 | 해결 | [STATELESS_ARCHITECTURE_MIGRATION](../Task/STATELESS_ARCHITECTURE_MIGRATION.md) |
+| 3 | `data:` URI를 새 탭(top frame)으로 열 때 브라우저 차단 | 해결(재확인 필요) | [STATELESS_ARCHITECTURE_MIGRATION](../Task/STATELESS_ARCHITECTURE_MIGRATION.md) |
+| 4 | 성인 트랙 "연령대" crop 미리보기가 청소년 ROI 좌표 사용 | 미해결 | [STATELESS_ARCHITECTURE_MIGRATION](../Task/STATELESS_ARCHITECTURE_MIGRATION.md) |
+| 5 | 휴대폰 촬영 사진이 실제와 다른 양식으로 오판정 | 해결(실사용자 재현 파일로는 미검증) | [MOBILE_PHOTO_MISCLASSIFICATION_FIX](../Task/MOBILE_PHOTO_MISCLASSIFICATION_FIX.md) |
+| 6 | 카메라 미리보기 검은 화면 및 촬영 버튼 무반응 | 해결(실기기 확인) | [CAMERA_UPLOAD_ROBUSTNESS_FIXES](../Task/CAMERA_UPLOAD_ROBUSTNESS_FIXES.md) |
+| 7 | 카메라/파일 업로드 경로에 용량 초과(413) 방어 누락 | 구현됨(검증 기록 없음) | [CAMERA_UPLOAD_ROBUSTNESS_FIXES](../Task/CAMERA_UPLOAD_ROBUSTNESS_FIXES.md) |
+| 8 | ROI 좌표 기반 문항 인식이 실제 사진에서 엉뚱한 행을 읽음 | 부분 해결(재검증 필요) | [MOBILE_CAPTURE_PERSPECTIVE_CORRECTION](../Task/MOBILE_CAPTURE_PERSPECTIVE_CORRECTION.md), [RECOGNITION_ACCURACY_DYNAMIC_ROW_DETECTION](../Task/RECOGNITION_ACCURACY_DYNAMIC_ROW_DETECTION.md) |
+| 9 | 파일 업로드 원근보정 도입 후 웹페이지 전체 프리징 | 해결(근본 메커니즘은 미규명) | [MOBILE_CAPTURE_PERSPECTIVE_CORRECTION](../Task/MOBILE_CAPTURE_PERSPECTIVE_CORRECTION.md) |
+
+---
+
+## 1. PDF 일괄 스캔 중 특정 페이지에서 영구 멈춤(JBIG2)
+
+**원인**: pdf.js의 순수 JS JBIG2 디코더가 특정 스캐너 인코딩 방식의 이미지에서 `page.render()`를 무한 대기시킴.
+**대응**: pdf.js를 3.4.120 → 6.1.200(ESM)으로 업그레이드해 대부분의 페이지는 해결됐으나, JBIG2 인코딩 페이지는 여전히 재현됨. 페이지별 타임아웃(`withTimeout.ts`)으로 증상만 완화 중.
+**상태**: 부분 해결 — 근본 해결은 서버 사이드 렌더링(poppler/mupdf/pdfium) 전환 후속 과제로 남음.
+
+## 2. Vercel 인스턴스 간 `/tmp` 미공유로 저장/다운로드/이미지 미리보기 404
+
+**원인**: 작업 세션·업로드 이미지·엑셀 사본을 인스턴스 로컬 `/tmp`에만 저장 — 요청이 다른 서버리스 인스턴스로 라우팅되면 파일이 없어 404.
+**대응**: 클라이언트가 매 저장/다운로드 요청마다 확정 학생 전체 목록을 함께 전송하고, 서버는 매번 번들 템플릿에서 새로 생성하는 무상태 설계로 전환. 이미지 미리보기도 `/api/recognize` 응답에 data URI로 직접 포함.
+**상태**: 해결.
+
+## 3. `data:` URI를 새 탭(top frame)으로 열 때 브라우저 차단
+
+**원인**: 무상태 전환으로 검수 화면 이미지가 `data:` URI가 되었는데, "새 탭에서 크게 보기" 링크가 여전히 `<a href={dataUri} target="_blank">` 형태 — 브라우저가 피싱 방지를 위해 data URI의 top-frame 탐색을 스펙상 차단.
+**대응**: 클릭 시 data URI를 Blob으로 변환해 `URL.createObjectURL()`로 만든 Blob URL로 새 탭을 염.
+**상태**: 해결로 기록되어 있으나 별도 검증 기록이 없음 — 재확인 권장.
+
+## 4. 성인 트랙 "연령대" crop 미리보기가 청소년 ROI 좌표 사용
+
+**원인**: crop API가 트랙 구분 없이 청소년 전용 좌표(`cagiTemplate`)에서만 영역을 찾음. 성인 트랙엔 별도 ROI가 없어 엉뚱한 영역을 200 OK로 잘라 보여줌.
+**대응**: 미착수.
+**상태**: 미해결 — 성인 ROI 좌표가 정의되기 전까지는 `track === 'adult'`일 때 `basic.age` crop 미리보기 자체를 숨기는 처리 필요.
+
+## 5. 휴대폰 촬영 사진이 실제와 다른 양식으로 오판정
+
+**원인**: 카메라 사진의 원근왜곡으로 종이 테두리 검출(`detectFrameBounds`)이 실패하면, 내용 기반 양식판정이 신뢰할 수 없는 좌표로 점수를 매겨 파일명 힌트(사용자가 선택한 업로드 칸)를 잘못 뒤집음.
+**대응**: 테두리 검출 실패(`contentBoundsConfident === false`) 시 내용 기반 판정을 건너뛰고 파일명 힌트를 그대로 신뢰하도록 변경.
+**상태**: 해결(코드 검증 완료). 실제 문제를 일으켰던 원본 사진 파일이 보존되지 않아 그 파일로는 재검증 못함.
+
+## 6. 카메라 미리보기 검은 화면 및 촬영 버튼 무반응
+
+**원인**: `<video>`의 `srcObject`를 명령형으로 대입 후 `video.play()`를 호출하지 않아 일부 브라우저에서 영상이 재생되지 않음. 이 상태에서 캡처 시 발생하는 예외도 처리되지 않아 버튼이 무반응처럼 보임.
+**대응**: `play()` 명시적 호출 + reject 처리, 캡처 전 `readyState`/`videoWidth` 체크, `captureCurrentFrame`에 `catch` 절 추가.
+**상태**: 해결(2026-08-02 실기기 재테스트로 확인).
+
+## 7. 카메라/파일 업로드 경로에 용량 초과(413) 방어 누락
+
+**원인**: 업로드 용량 축소 로직이 PDF 변환 경로에만 있고, 카메라 촬영·파일 직접 선택 업로드 경로에는 없어 대용량 사진에서 Vercel 요청 본문 제한(413)에 걸림.
+**대응**: 공용 업로드 지점(`uploadSingleFile`)에 공통 용량 축소 헬퍼 적용, 에러 메시지에서 PDF 전제 문구 제거.
+**상태**: 구현됨 — 별도 테스트/검증 기록이 없어 재확인 필요.
+
+## 8. ROI 좌표 기반 문항 인식이 실제 사진에서 엉뚱한 행을 읽음
+
+**원인**: 페이지 경계(`detectContentBounds`/`detectFrameBounds`) 추정이 실제 촬영/스캔 사진에서 크게 틀리면, `roiTemplates.ts`의 모든 고정 비율 좌표가 통째로 밀려 완전히 다른 행/섹션을 읽음(실제 ROI 디버그 스크린샷으로 확인 — 예: CAGI 문항 4가 문항 8-9 라벨 위치를 읽음).
+**대응**: (1) 원근 보정을 파일 선택 업로드 경로까지 확장, (2) 보완책으로 이미지에서 실제 가로 분리선을 감지해 문항 행 위치를 동적으로 재계산하는 서버 사이드 검출 도입.
+**상태**: 부분 해결 — 두 대응 모두 안전성은 확인됐으나 실제 정확도 개선 폭은 실사용 이미지로 재검증 필요.
+
+## 9. 파일 업로드 원근보정 도입 후 웹페이지 전체 프리징
+
+**원인**: 메인 스레드에서 실행된 OpenCV 보정 파이프라인이 실제 앱 이벤트 핸들러 컨텍스트 안에서 설명되지 않은 이유로 완전한 동기적 블로킹을 일으킴(격리된 브라우저 탭에서는 재현 안 됨, `Promise.race` 기반 타임아웃으로도 방어 불가능한 진짜 메인 스레드 블록).
+**대응**: 보정 파이프라인 전체를 Web Worker로 격리하고, 타임아웃 시 실제 `worker.terminate()`로 강제 종료 가능하도록 재구현.
+**상태**: 해결(메인 스레드 응답성은 heartbeat 테스트로 실증). 격리 탭과 실제 앱 컨텍스트 사이 차이의 정확한 메커니즘 자체는 끝내 규명하지 못함.

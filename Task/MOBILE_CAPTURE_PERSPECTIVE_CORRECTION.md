@@ -1,0 +1,86 @@
+# 모바일 촬영 원근 보정 (설계 → 구현 → 파일 업로드 확장 → 프리징 사고 → Worker 격리)
+
+> 이 문서는 기존 `Docs/21_MOBILE_CAPTURE_PERSPECTIVE_CORRECTION_DESIGN.md`,
+> `Docs/22_MOBILE_CAPTURE_PERSPECTIVE_CORRECTION_RESULTS.md`,
+> `Docs/27_ROI_MISALIGNMENT_CONFIRMED_ROOT_CAUSE_AND_FIX.md`,
+> `Docs/28_FILE_UPLOAD_CORRECTION_FREEZE_FIX.md`,
+> `Docs/29_PERSPECTIVE_CORRECTION_HANG_EMERGENCY_DISABLE.md`,
+> `Docs/30_PERSPECTIVE_CORRECTION_HANG_INVESTIGATION.md`,
+> `Docs/31_PERSPECTIVE_CORRECTION_WEB_WORKER_DESIGN.md`,
+> `Docs/32_PERSPECTIVE_CORRECTION_WORKER_VERIFICATION_AND_ENABLE.md`를 통합한 문서입니다.
+> 하나의 기능(카메라/파일 촬영 이미지의 원근 보정)이 설계부터 배포 후 발견된 심각한 회귀(웹페이지
+> 프리징)까지 거친 전체 과정을 시간 순으로 기록합니다.
+
+## 배경 (문제 재정의)
+
+인식/양식판정 파이프라인(`classifyForm`, `recognizeStudentForms`)은 텍스트를 읽지 않는다. CAGI/만족도 각 양식마다 체크박스 위치를 **정규화 좌표(0~1 비율)**로 하드코딩해두고, 감지한 종이 경계(`contentBounds`) 안에서 그 좌표의 어두운 픽셀 비율만 측정한다. 이 방식은 스캐너·PDF처럼 원근 왜곡이 없고 종이가 프레임 전체를 채우는 이미지에서만 신뢰할 수 있다.
+
+"개별/순차 촬영" 모드의 카메라 캡처는 화면의 점선 가이드가 순수 시각적 안내일 뿐 실제로는 비디오 프레임 전체(배경 포함)를 그대로 캡처하고, 사람이 손으로 든 카메라로는 원근 왜곡 없이 정확히 촬영하는 것이 현실적으로 불가능하다. 좌표 기반 인식 자체는 그대로 두더라도, 입력 이미지를 촬영 시점에 왜곡 보정된 정면 이미지로 만들어주지 않는 한 근본적으로 불안정하다는 결론.
+
+## 작업 내용
+
+### 1. 설계: 검토한 방식
+
+- **A. 자체 구현 엣지/코너 검출 + 투영 변환**: OpenCV가 이미 잘 풀어놓은 문제를 처음부터 다시 구현하는 것과 같음. 비권장.
+- **B. OpenCV.js(WASM)로 클라이언트에서 보정 — 촬영 직후 (채택)**: 문서 스캐너 앱들이 공통으로 쓰는 검증된 고전 CV 파이프라인. 촬영 직후 보정 결과를 사용자에게 보여주고 확인/재촬영을 받을 수 있어 UX 안전장치가 자연스러움. Vercel 서버리스에 새 네이티브 의존성을 추가하지 않음.
+- **C. OpenCV.js로 서버(API 라우트)에서 보정**: 카메라·파일 업로드 두 경로를 동일하게 처리 가능하지만, Vercel 서버리스 Node 런타임에서 WASM 구동 검증이 필요하고 사용자가 결과를 확인/재촬영할 기회가 없음. 1차 범위 제외.
+- **D. ML 기반 문서 감지**: 문제 규모에 비해 과함. 비권장.
+
+채택안: **B(클라이언트, 촬영 직후 OpenCV.js 보정 + 확인 단계)**. 실패 시(사각형 미검출 등) 항상 원본 프레임 업로드로 폴백 — 새 기능이 실패해도 기존 대비 기능 저하가 없도록. 1차 범위는 **카메라 캡처 흐름만**(`captureCurrentFrame`), 파일 선택 업로드 경로는 후속 과제로 명시.
+
+### 2. 1차 구현: 카메라 캡처 경로
+
+- `src/lib/documentScanner/loadOpenCv.ts`(신규): opencv.js(`https://docs.opencv.org/4.9.0/opencv.js`, 약 10.2MB)를 카메라 촬영 흐름 시작 시에만 동적 `<script>` 삽입으로 지연 로드.
+- `src/lib/documentScanner/perspectiveCorrect.ts`(신규): `detectDocumentQuad`(그레이스케일→블러→Canny→윤곽선 검출→최대 사각형 컨투어 근사, 전체 면적 20% 미만은 노이즈로 제외), `orderQuadPoints`(4점 정렬, opencv 비의존 순수 함수), `warpToRectangle`. 모든 `cv.Mat`/`cv.MatVector`를 `try/finally`로 명시적 `.delete()` 처리.
+- `src/components/ImageUploadPanel.tsx`: `captureCurrentFrame`이 원본 프레임을 캔버스에 그린 뒤 `withTimeout` 5초 제한으로 보정 시도. 성공 시 확인/재촬영 미리보기, 실패/타임아웃 시 원본 그대로 업로드.
+- `tests/perspective-correct.test.ts`(신규): `orderQuadPoints` 순수 로직 단위 테스트 3건.
+- 검증: `npm test` 10 files 37 tests 통과, `npm run build` 통과(opencv.js가 정적 번들에 미포함, 실제 지연 로드 확인). 로컬 dev 서버에서 카메라 권한 요청까지 정상 진행 확인(샌드박스 브라우저는 실카메라 없어 그 이후 미검증).
+- **추가 수정 (같은 라운드)**: 실기기 테스트에서 "촬영하기" 버튼이 무반응처럼 보인다는 제보 → 원인은 opencv.js 10.2MB 로드 중(최대 5초, 모바일 회선에선 더 김) 버튼에 아무 피드백이 없었던 것. `isCapturing` 상태를 추가해 버튼을 누른 즉시 비활성화 + "처리 중" 라벨 표시. `npm test`(37/37), `npm run build` 통과.
+
+### 3. ROI 오정렬 근본 원인 확인 (2026-08-03, 실제 ROI 디버그 스크린샷 근거)
+
+사용자가 제공한 실제 ROI-확인 스크린샷(문항별로 잘라낸 크롭 이미지)으로 확인: CAGI 문항 4의 크롭이 문항 8-9 라벨 텍스트 위치에 걸려 있었고, CAGI 문항 7-9는 개인정보 동의 섹션(페이지 하단) 근처에 걸려 있었다 — 즉 "신호가 약해서" 오답이 나는 게 아니라 **애초에 완전히 다른 행/섹션을 읽고 있었다.**
+
+원인: `markDensity.ts`의 `detectContentBounds`/`detectFrameBounds` 페이지 경계 추정이 실제(특히 파일 선택으로 올린, 보정되지 않은) 사진에서 크게 틀릴 수 있고, 이 경우 `roiTemplates.ts`의 모든 고정 비율 좌표가 통째로 밀린다.
+
+이 시점에 대응 방향 두 가지가 병행 결정됨:
+1. (즉시) 원근 보정을 **파일 선택 업로드 경로**에도 확장 적용 — 이 절에서 다룸.
+2. (보완, 더 근본적) 동적 표 행(row) 검출 도입 — [[RECOGNITION_ACCURACY_DYNAMIC_ROW_DETECTION]]에서 별도로 다룸.
+
+### 4. 파일 선택 업로드 경로로 확장
+
+카메라 캡처와 동일한 OpenCV 보정 파이프라인을 `processSelectedFile`(파일 선택 업로드)에도 적용. Codex에 위임해 구현.
+
+### 5. 프리징 사고 발생 (배포 직후)
+
+사용자 제보: "선별검사지 업로드 후 웹페이지가 프리징되며 모든 동작이 멈추는 오류가 있음. 개발자모드 창도 안켜져서 오류내역 확인 불가."
+
+**1차 진단(오진)**: 이미지 크기 문제로 추정, 감지용 캔버스를 `MAX_DETECTION_DIMENSION = 1600`으로 다운스케일하는 수정을 배포. → **실패로 판명**: 1200×900의 훨씬 작은 합성 이미지로도 격리된 새 브라우저 탭에서 완전히 동일하게 프리징 재현됨. 크기가 원인이 아니었음이 직접 재현 테스트로 확인됨.
+
+**긴급 조치**: `PERSPECTIVE_CORRECTION_ENABLED = false`로 기능 전체를 즉시 비활성화(원인 규명 전 사용자 피해 차단 우선). 이 시점에서 사용자가 "롤백 이후에 같은 문제가 남아있음"이라고 재보고 — 이는 실제로는 새로운 프리징이 아니라, 원래부터 있던 ROI 오정렬(3절 참고) 문제였음을 확인해 사용자에게 구분 설명.
+
+**2차 진단(정확)**: 격리된 상태에서 opencv.js 개별 연산(`cv.imread`, `cvtColor`, `GaussianBlur`, `Canny`, `findContours`, 컨투어 순회, `getPerspectiveTransform`, `warpPerspective`, `imshow`)을 하나씩 타이밍 측정하면 전부 빠름(합계 약 200ms). 그런데 실제 앱의 이벤트 핸들러 컨텍스트 안에서 실행하면 `loadOpenCv()` 단계에서 17초 이상 멈추고, 탭이 `javascript_exec` 호출에도 전혀 응답하지 않는 완전한 메인 스레드 블록이 발생함을 확인. **격리 탭과 실제 앱 컨텍스트 사이의 이 차이가 왜 발생하는지 정확한 메커니즘은 끝내 규명하지 못했다** — 미해결 미스터리로 남음.
+
+핵심 인사이트: `withTimeout<T>`(Promise.race 기반)는 **진짜 동기적 메인 스레드 블록을 막을 수 없다** — 타임아웃의 `setTimeout` 콜백 자체가 메인 스레드가 자유로워질 때까지 실행되지 않기 때문. 이것이 Web Worker 격리가 필요했던 이유.
+
+### 6. Web Worker 격리 설계 및 구현
+
+- `src/lib/documentScanner/perspectiveCorrect.worker.ts`(신규): Worker 컨텍스트에서 OpenCV 파이프라인 실행. `loadOpenCvInWorker()`(`importScripts()` 기반), `detectDocumentQuadFromMat`(기존 알고리즘을 Mat 입력 받도록 이식), `warpToBlob`(`OffscreenCanvas` + 수동 `putImageData`, `cv.imshow` 대신), `onmessage` 핸들러는 어떤 실패든 항상 `ok:false` 응답을 보내 메인 스레드 프로미스가 절대 무한 대기하지 않도록 함.
+- `src/lib/documentScanner/perspectiveCorrectClient.ts`(신규): `getWorker()`(지연 싱글턴, 생성 시 단일 `message`+`error` 리스너 연결), `correctImageInWorker(...)`(`ImageData` 추출 → `postMessage` + `crypto.randomUUID()` requestId → `setTimeout` 경쟁), `terminateWorker()`(실제 `.terminate()` 호출 + 캐시 초기화 + 해당 워커의 모든 진행 중 요청을 `null`로 즉시 해소 — 절대 매달린 프로미스를 남기지 않음).
+- `ImageUploadPanel.tsx`: `PERSPECTIVE_CORRECTION_TIMEOUT_MS = 9000`, 업로드/캡처 양쪽 경로 모두 `correctImageInWorker` 호출로 교체. `correctionPreview`가 `canvas` 대신 `{blob, step, previewSrc, source}` 형태로 변경(Blob URL 방식이라 `useEffect` cleanup에서 `URL.revokeObjectURL` 명시적 호출 필요).
+- 검증(안전성만): heartbeat 카운터(`setInterval`)와 `document.title` 마커로 메인 스레드가 워커 작업 도중에도 계속 응답하는지 실증 확인 — 확인됨. 워커 자체가 성공적으로 문서 사각형을 찾아 보정에 성공하는지는 로컬 테스트에서 매번 타임아웃 후 폴백만 관찰되어 **미확인**.
+- 안전성이 실증되었고 비활성화 상태보다 기능적으로 같거나 나은 것이 확실하므로 `PERSPECTIVE_CORRECTION_ENABLED = true`로 재활성화.
+
+## 테스트 결과
+
+- 카메라 캡처 1차 구현: `npm test` 10 files 37 tests, `npm run build` 통과. 실기기 재테스트(2026-08-02)로 카메라 미리보기·촬영 버튼 정상 동작 확인(단, 이건 [[CAMERA_UPLOAD_ROBUSTNESS_FIXES]]의 검은 화면 버그 수정과 함께 검증된 것).
+- 프리징 원인 오진 반증: 1200×900 합성 이미지로 새 탭에서 재현 성공 → 크기 기반 진단이 틀렸음을 직접 실증.
+- Worker 격리 후: heartbeat/`javascript_exec` 응답성 테스트로 메인 스레드 비차단을 실증 확인. `npm test`/`npm run build`는 각 구현 라운드마다 통과 확인(정확한 파일별 수치는 원본 문서에 개별 기록 없음).
+- 로컬 dev 서버 콘솔 로그가 단일 사용자 액션에 대해 정확히 2번씩 출력되는 현상 관찰(React/Next dev 모드 이중 호출 추정) — 근본 원인 미조사, "로컬 dev 서버 타이밍이 프로덕션을 완벽히 대표하지 않을 수 있다"는 점만 기록하고 넘어감.
+
+## 다음 작업을 위한 피드백
+
+- **미해결**: 왜 격리된 탭에서는 opencv.js 로드+연산이 빠른데 실제 앱 컨텍스트에서는 완전히 멈추는지, 정확한 메커니즘이 규명되지 않았다. Worker 격리로 증상은 우회했지만 근본 원인은 여전히 불명.
+- **미확인**: Worker 격리 이후 실제로 문서 사각형 검출·보정이 성공하는 사례가 있는지, 아니면 항상 타임아웃 후 원본 폴백으로만 동작하는지 — 실사용 환경 재테스트 필요.
+- **파일 선택 업로드 경로 확장**이 프리징을 유발했던 것처럼, 앞으로 이 보정 파이프라인에 손댈 때는 반드시 Worker 경계 안에서만 수정하고, 메인 스레드에 새 OpenCV 호출을 절대 추가하지 말 것 — 이번 세션 두 번째 "새 기능이 방어적이지 않아 발생한 심각한 사고" 사례.
+- ROI 오정렬의 더 근본적인 보완책(동적 표 행 검출)은 별도 진행 중 — [[RECOGNITION_ACCURACY_DYNAMIC_ROW_DETECTION]] 참고.
