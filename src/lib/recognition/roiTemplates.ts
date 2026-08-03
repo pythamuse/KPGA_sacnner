@@ -40,8 +40,8 @@ const rect = (x: number, y: number, width: number, height: number): NormalizedRe
 });
 
 const cagiOptionXs = [0.746, 0.809, 0.876, 0.951];
-const cagiQuestionYs = [0.36, 0.383, 0.405, 0.427, 0.449, 0.471, 0.493];
-const cagiLateQuestionYs = [0.548, 0.57];
+export const cagiQuestionYs = [0.36, 0.383, 0.405, 0.427, 0.449, 0.471, 0.493];
+export const cagiLateQuestionYs = [0.548, 0.57];
 const schoolTypeCandidates = [
   { value: 'elementary', rect: rect(0.335, 0.177, 0.025, 0.02) },
   { value: 'middle', rect: rect(0.512, 0.177, 0.025, 0.02) },
@@ -59,8 +59,8 @@ const gradeCandidates = [
 const satisfactionFrequencyXs = [0.668, 0.748, 0.827, 0.908];
 const satisfactionBinaryXs = [0.815, 0.903];
 const satisfactionScaleXs = [0.595, 0.686, 0.777, 0.866, 0.945];
-const satisfactionBinaryYs = [0.462, 0.507, 0.552, 0.596, 0.641];
-const satisfactionScaleYs = [0.723, 0.765, 0.806, 0.848];
+export const satisfactionBinaryYs = [0.462, 0.507, 0.552, 0.596, 0.641];
+export const satisfactionScaleYs = [0.723, 0.765, 0.806, 0.848];
 
 const makeChoiceGroup = (
   field: string,

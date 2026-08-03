@@ -1,5 +1,6 @@
 import { analyzeChoiceGroup, loadImageAnalysisData } from './markDensity';
 import { getTemplate } from './roiTemplates';
+import { buildCagiRowOverrides, buildSatisfactionRowOverrides } from './tableRowDetection';
 
 export interface RecognitionDraft {
   source?: {
@@ -94,9 +95,10 @@ export async function recognizeStudentForms(
   try {
     const cagiImage = await loadImageAnalysisData(cagiPath);
     const cagiTemplate = getTemplate('cagi');
+    const cagiRowOverrides = buildCagiRowOverrides(cagiImage);
 
     for (const group of cagiTemplate.choiceGroups) {
-      const result = analyzeChoiceGroup(cagiImage, group);
+      const result = analyzeChoiceGroup(cagiImage, group, cagiRowOverrides[group.field]);
       draft.confidence[result.field] = result.confidence;
       draft.candidates![result.field] = mapRecognizedCandidates(result.field, result.candidates);
 
@@ -120,9 +122,10 @@ export async function recognizeStudentForms(
   try {
     const satisfactionImage = await loadImageAnalysisData(satisfactionPath);
     const satisfactionTemplate = getTemplate('satisfaction');
+    const satisfactionRowOverrides = buildSatisfactionRowOverrides(satisfactionImage);
 
     for (const group of satisfactionTemplate.choiceGroups) {
-      const result = analyzeChoiceGroup(satisfactionImage, group);
+      const result = analyzeChoiceGroup(satisfactionImage, group, satisfactionRowOverrides[group.field]);
       draft.confidence[result.field] = result.confidence;
       draft.candidates![result.field] = result.candidates;
 

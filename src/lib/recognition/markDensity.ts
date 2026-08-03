@@ -54,6 +54,7 @@ export function calculateDarkPixelDensity(
   image: ImageAnalysisData,
   normalizedRect: NormalizedRect,
   darkThreshold = 150,
+  yOverride?: { top: number; bottom: number },
 ): number {
   const bounds = image.contentBounds || {
     left: 0,
@@ -64,9 +65,17 @@ export function calculateDarkPixelDensity(
   const baseWidth = bounds.right - bounds.left;
   const baseHeight = bounds.bottom - bounds.top;
   const left = clamp(Math.floor(bounds.left + normalizedRect.x * baseWidth), 0, image.width - 1);
-  const top = clamp(Math.floor(bounds.top + normalizedRect.y * baseHeight), 0, image.height - 1);
+  const top = clamp(
+    Math.floor(yOverride ? yOverride.top : bounds.top + normalizedRect.y * baseHeight),
+    0,
+    image.height - 1,
+  );
   const right = clamp(Math.ceil(bounds.left + (normalizedRect.x + normalizedRect.width) * baseWidth), left + 1, image.width);
-  const bottom = clamp(Math.ceil(bounds.top + (normalizedRect.y + normalizedRect.height) * baseHeight), top + 1, image.height);
+  const bottom = clamp(
+    Math.ceil(yOverride ? yOverride.bottom : bounds.top + (normalizedRect.y + normalizedRect.height) * baseHeight),
+    top + 1,
+    image.height,
+  );
 
   let darkPixels = 0;
   let totalPixels = 0;
@@ -199,11 +208,15 @@ function detectFrameBounds(image: Pick<ImageAnalysisData, 'width' | 'height' | '
   };
 }
 
-export function analyzeChoiceGroup(image: ImageAnalysisData, group: ChoiceGroup): ChoiceGroupResult {
+export function analyzeChoiceGroup(
+  image: ImageAnalysisData,
+  group: ChoiceGroup,
+  yOverride?: { top: number; bottom: number },
+): ChoiceGroupResult {
   const candidates = group.candidates
     .map((candidate) => ({
       value: candidate.value,
-      score: roundScore(calculateDarkPixelDensity(image, candidate.rect)),
+      score: roundScore(calculateDarkPixelDensity(image, candidate.rect, 150, yOverride)),
     }))
     .sort((a, b) => b.score - a.score);
 
