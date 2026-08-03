@@ -19,11 +19,13 @@ const MAX_UPLOAD_IMAGE_BYTES = 3.8 * 1024 * 1024;
 const PERSPECTIVE_CORRECTION_SCALE = 3;
 const MAX_DETECTION_DIMENSION = 1600;
 const PERSPECTIVE_CORRECTION_TIMEOUT_MS = 9000;
-// Temporarily disabled: detectDocumentQuad/warpToRectangle has been observed to hang the
-// entire page (unrecoverable, even devtools become unresponsive) regardless of image size.
-// See Docs/29_PERSPECTIVE_CORRECTION_HANG_EMERGENCY_DISABLE.md. Re-enable only after the
-// actual hang is root-caused and fixed.
-const PERSPECTIVE_CORRECTION_ENABLED = false;
+// Re-enabled: OpenCV work now runs in a dedicated Worker (see perspectiveCorrectClient.ts /
+// perspectiveCorrect.worker.ts) instead of the main thread, with a real, enforceable timeout
+// via worker.terminate(). Local verification confirmed the main thread stays fully responsive
+// throughout, even when the worker itself is slow/unresponsive -- unlike the previous
+// withTimeout-only approach, which could not protect against a genuine main-thread block.
+// See Docs/29-32.
+const PERSPECTIVE_CORRECTION_ENABLED = true;
 const PDF_RENDER_OPTIONS = [
   { scale: 1.5, quality: 0.86 },
   { scale: 1.25, quality: 0.82 },
