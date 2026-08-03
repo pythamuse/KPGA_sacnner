@@ -19,6 +19,11 @@ type UploadKind = 'cagi' | 'satisfaction';
 const MAX_UPLOAD_IMAGE_BYTES = 3.8 * 1024 * 1024;
 const PERSPECTIVE_CORRECTION_SCALE = 3;
 const MAX_DETECTION_DIMENSION = 1600;
+// Temporarily disabled: detectDocumentQuad/warpToRectangle has been observed to hang the
+// entire page (unrecoverable, even devtools become unresponsive) regardless of image size.
+// See Docs/29_PERSPECTIVE_CORRECTION_HANG_EMERGENCY_DISABLE.md. Re-enable only after the
+// actual hang is root-caused and fixed.
+const PERSPECTIVE_CORRECTION_ENABLED = false;
 const PDF_RENDER_OPTIONS = [
   { scale: 1.5, quality: 0.86 },
   { scale: 1.25, quality: 0.82 },
@@ -337,26 +342,28 @@ export default function ImageUploadPanel({
         canvas.height = height;
         context.drawImage(image, 0, 0, width, height);
 
-        const cv = await withTimeout(loadOpenCv(), 5000, 'OpenCV.js load timed out.');
-        const quad = detectDocumentQuad(cv, canvas);
+        if (PERSPECTIVE_CORRECTION_ENABLED) {
+          const cv = await withTimeout(loadOpenCv(), 5000, 'OpenCV.js load timed out.');
+          const quad = detectDocumentQuad(cv, canvas);
 
-        if (quad) {
-          const template = type === 'cagi' ? cagiTemplate : satisfactionTemplate;
-          const correctedCanvas = warpToRectangle(
-            cv,
-            canvas,
-            quad,
-            template.baseSize.width * PERSPECTIVE_CORRECTION_SCALE,
-            template.baseSize.height * PERSPECTIVE_CORRECTION_SCALE,
-          );
+          if (quad) {
+            const template = type === 'cagi' ? cagiTemplate : satisfactionTemplate;
+            const correctedCanvas = warpToRectangle(
+              cv,
+              canvas,
+              quad,
+              template.baseSize.width * PERSPECTIVE_CORRECTION_SCALE,
+              template.baseSize.height * PERSPECTIVE_CORRECTION_SCALE,
+            );
 
-          setCorrectionPreview({
-            canvas: correctedCanvas,
-            step: type,
-            previewSrc: correctedCanvas.toDataURL('image/jpeg', 0.88),
-            source: 'file',
-          });
-          return;
+            setCorrectionPreview({
+              canvas: correctedCanvas,
+              step: type,
+              previewSrc: correctedCanvas.toDataURL('image/jpeg', 0.88),
+              source: 'file',
+            });
+            return;
+          }
         }
       } finally {
         if ('close' in image) {
@@ -574,26 +581,28 @@ export default function ImageUploadPanel({
       context.drawImage(video, 0, 0, width, height);
 
       try {
-        const cv = await withTimeout(loadOpenCv(), 5000, 'OpenCV.js load timed out.');
-        const quad = detectDocumentQuad(cv, canvas);
+        if (PERSPECTIVE_CORRECTION_ENABLED) {
+          const cv = await withTimeout(loadOpenCv(), 5000, 'OpenCV.js load timed out.');
+          const quad = detectDocumentQuad(cv, canvas);
 
-        if (quad) {
-          const template = cameraFlow.step === 'cagi' ? cagiTemplate : satisfactionTemplate;
-          const correctedCanvas = warpToRectangle(
-            cv,
-            canvas,
-            quad,
-            template.baseSize.width * PERSPECTIVE_CORRECTION_SCALE,
-            template.baseSize.height * PERSPECTIVE_CORRECTION_SCALE,
-          );
+          if (quad) {
+            const template = cameraFlow.step === 'cagi' ? cagiTemplate : satisfactionTemplate;
+            const correctedCanvas = warpToRectangle(
+              cv,
+              canvas,
+              quad,
+              template.baseSize.width * PERSPECTIVE_CORRECTION_SCALE,
+              template.baseSize.height * PERSPECTIVE_CORRECTION_SCALE,
+            );
 
-          setCorrectionPreview({
-            canvas: correctedCanvas,
-            step: cameraFlow.step,
-            previewSrc: correctedCanvas.toDataURL('image/jpeg', 0.88),
-            source: 'camera',
-          });
-          return;
+            setCorrectionPreview({
+              canvas: correctedCanvas,
+              step: cameraFlow.step,
+              previewSrc: correctedCanvas.toDataURL('image/jpeg', 0.88),
+              source: 'camera',
+            });
+            return;
+          }
         }
       } catch {
         // Perspective correction is an opportunistic camera-only enhancement.
