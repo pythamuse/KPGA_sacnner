@@ -302,6 +302,8 @@ OCR 및 체크마크 인식 결과는 반드시 사용자 확인 화면을 거�
 
 MVP에서는 회원가입 없이 단일 사용자용으로 구현할 수 있으나, 배포 환경에서는 최소한 세션 단위 격리가 필요하다.
 
+관련 Task: 이미지 임시 저장/세션 격리의 실제 구현과 Vercel 환경에서 겪은 문제는 [Task/STATELESS_ARCHITECTURE_MIGRATION.md](../Task/STATELESS_ARCHITECTURE_MIGRATION.md) 참고. 이 절의 "외부로 이미지를 보내지 않는다"는 전제는 [Task/RECOGNITION_ACCURACY_DYNAMIC_ROW_DETECTION.md](../Task/RECOGNITION_ACCURACY_DYNAMIC_ROW_DETECTION.md)(사이클 1)에서 비전 API 도입을 검토할 때 실제 정책 판단 기준으로 쓰였다.
+
 ---
 
 ## 11. 수용 기준

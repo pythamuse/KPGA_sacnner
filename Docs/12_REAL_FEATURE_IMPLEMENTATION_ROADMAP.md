@@ -534,3 +534,15 @@ npm.cmd run build
 - 나이 입력칸 아래 crop preview가 CAGI 원본의 나이 영역을 보여주는지 확인한다.
 - 학교유형/학년 crop preview와 후보 점수 chip이 실제 체크 위치와 맞는지 확인한다.
 - 값 수정 후 저장, 검증, 엑셀 반영 흐름이 기존처럼 이어지는지 확인한다.
+
+---
+
+## 관련 Task 문서
+
+이 로드맵에서 "남은 작업"으로 잡아둔 영역들은 이후 실제 작업으로 이어졌다. 각 영역의 실제 조사·구현·검증 히스토리는 아래 Task 문서에 있다(이 로드맵 자체는 우선순위/구현 계획만 남기고 갱신하지 않는다):
+
+- **4.1 카메라 세션** → [Task/MOBILE_CAPTURE_PERSPECTIVE_CORRECTION.md](../Task/MOBILE_CAPTURE_PERSPECTIVE_CORRECTION.md), [Task/CAMERA_UPLOAD_ROBUSTNESS_FIXES.md](../Task/CAMERA_UPLOAD_ROBUSTNESS_FIXES.md)
+- **4.3 OCR/Form Recognition MVP** → [Task/RECOGNITION_ACCURACY_DYNAMIC_ROW_DETECTION.md](../Task/RECOGNITION_ACCURACY_DYNAMIC_ROW_DETECTION.md)
+- **4.4 이미지 내용 기반 양식 판별** → [Task/MOBILE_PHOTO_MISCLASSIFICATION_FIX.md](../Task/MOBILE_PHOTO_MISCLASSIFICATION_FIX.md)
+- **4.6 PDF 처리 안정화** → [Task/PDF_BATCH_RENDER_HANG.md](../Task/PDF_BATCH_RENDER_HANG.md)
+- Vercel 서버리스 인스턴스 간 상태 공유 문제(이 문서에는 명시적으로 없던 이슈) → [Task/STATELESS_ARCHITECTURE_MIGRATION.md](../Task/STATELESS_ARCHITECTURE_MIGRATION.md)

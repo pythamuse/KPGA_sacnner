@@ -461,3 +461,19 @@ npm.cmd run build
 - 노티스에는 해당 선별검사지 페이지 번호가 표시되어야 한다.
 - CAGI 문항 1~9만 추출되어야 하며 조기개입 서비스 값은 저장되지 않아야 한다.
 - 실제로 만족도조사를 선별검사지 칸에 올린 경우에는 여전히 `FORM_TYPE_MISMATCH`가 발생해야 한다.
+
+---
+
+## 관련 Task 문서
+
+이 문서에 기록된 시점(2026-07-30) 이후 각 기능 영역에서 실제로 발생한 문제와 후속 작업은 아래 Task 문서에 이어져 있다. 이 문서는 "지금 무엇이 구현되어 있는가"만 유지하고, 그 이후의 조사·수정 히스토리는 옮기지 않는다:
+
+| 기능 영역 | 관련 Task |
+|---|---|
+| PDF 업로드/렌더링 | [Task/PDF_BATCH_RENDER_HANG.md](../Task/PDF_BATCH_RENDER_HANG.md) |
+| 작업 세션/저장/다운로드(Vercel 배포) | [Task/STATELESS_ARCHITECTURE_MIGRATION.md](../Task/STATELESS_ARCHITECTURE_MIGRATION.md) |
+| 이미지 내용 기반 양식 판별 | [Task/MOBILE_PHOTO_MISCLASSIFICATION_FIX.md](../Task/MOBILE_PHOTO_MISCLASSIFICATION_FIX.md) |
+| 카메라 촬영 흐름 / 원근 보정 | [Task/MOBILE_CAPTURE_PERSPECTIVE_CORRECTION.md](../Task/MOBILE_CAPTURE_PERSPECTIVE_CORRECTION.md), [Task/CAMERA_UPLOAD_ROBUSTNESS_FIXES.md](../Task/CAMERA_UPLOAD_ROBUSTNESS_FIXES.md) |
+| ROI 마킹 밀도 계산 / CAGI·만족도 인식 정확도 | [Task/RECOGNITION_ACCURACY_DYNAMIC_ROW_DETECTION.md](../Task/RECOGNITION_ACCURACY_DYNAMIC_ROW_DETECTION.md) |
+
+버그로 확정된 항목은 [Docs/BUG_REPORTS.md](BUG_REPORTS.md)에도 원인·대응이 요약되어 있다.

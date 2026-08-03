@@ -283,3 +283,14 @@ PDF 업로드는 다음 원칙을 따른다.
 - 클라이언트에서 PDF 페이지를 큰 PNG로 업로드하지 않는다.
 - JPEG 변환과 scale/quality 축소를 우선 적용한다.
 - 배포본에서 업로드 실패가 발생하면 `/api/upload` status code를 기준으로 원인을 분류한다.
+
+---
+
+## 관련 Task 문서
+
+이 스펙에서 정의한 규칙 자체는 안정적이지만, 실제 이미지에서 그 규칙을 적용하는 과정(경계 검출, 좌표 정렬, 판별 임계값)은 실사용 중 여러 번 문제를 드러냈다. 원인 조사·구현·검증의 전체 히스토리는 아래 Task 문서를 참고할 것 — 이 문서에는 규칙만 남기고 그 과정은 옮기지 않는다.
+
+- [Task/MOBILE_PHOTO_MISCLASSIFICATION_FIX.md](../Task/MOBILE_PHOTO_MISCLASSIFICATION_FIX.md) — 3절(양식 종류 분류)의 내용 기반 판별이 원근왜곡 사진에서 오판정한 사례와 수정.
+- [Task/MOBILE_CAPTURE_PERSPECTIVE_CORRECTION.md](../Task/MOBILE_CAPTURE_PERSPECTIVE_CORRECTION.md) — 2절(이미지 처리 단계)의 "원근 보정" 단계를 실제로 도입한 설계·구현·회귀 수정 전체 과정.
+- [Task/RECOGNITION_ACCURACY_DYNAMIC_ROW_DETECTION.md](../Task/RECOGNITION_ACCURACY_DYNAMIC_ROW_DETECTION.md) — 6절(체크마크 판정 방식)의 정확도를 보완하기 위해 도입한 동적 표 행 검출.
+- [Task/PDF_BATCH_RENDER_HANG.md](../Task/PDF_BATCH_RENDER_HANG.md) — 위 "PDF 업로드" 운영 원칙과 관련된 pdf.js 렌더링 멈춤/JBIG2 문제.
