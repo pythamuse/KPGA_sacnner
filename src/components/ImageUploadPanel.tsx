@@ -18,6 +18,7 @@ type UploadKind = 'cagi' | 'satisfaction';
 
 const MAX_UPLOAD_IMAGE_BYTES = 3.8 * 1024 * 1024;
 const PERSPECTIVE_CORRECTION_SCALE = 3;
+const MAX_DETECTION_DIMENSION = 1600;
 const PDF_RENDER_OPTIONS = [
   { scale: 1.5, quality: 0.86 },
   { scale: 1.25, quality: 0.82 },
@@ -320,7 +321,11 @@ export default function ImageUploadPanel({
       const image = await loadImageFile(file);
 
       try {
-        const { width, height } = getImageDimensions(image);
+        const { width: naturalWidth, height: naturalHeight } = getImageDimensions(image);
+        const longestSide = Math.max(naturalWidth, naturalHeight);
+        const detectionScale = longestSide > MAX_DETECTION_DIMENSION ? MAX_DETECTION_DIMENSION / longestSide : 1;
+        const width = Math.max(1, Math.round(naturalWidth * detectionScale));
+        const height = Math.max(1, Math.round(naturalHeight * detectionScale));
         const canvas = document.createElement('canvas');
         const context = canvas.getContext('2d');
 
