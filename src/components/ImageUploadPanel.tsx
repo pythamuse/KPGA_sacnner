@@ -1,7 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { withTimeout } from '@/lib/pdf/withTimeout';
-import { loadOpenCv } from '@/lib/documentScanner/loadOpenCv';
-import { detectDocumentQuad, warpToRectangle } from '@/lib/documentScanner/perspectiveCorrect';
+import { correctImageInWorker } from '@/lib/documentScanner/perspectiveCorrectClient';
 import { cagiTemplate, satisfactionTemplate } from '@/lib/recognition/roiTemplates';
 
 export type UploadMode = 'sequential' | 'batch';
@@ -19,6 +18,7 @@ type UploadKind = 'cagi' | 'satisfaction';
 const MAX_UPLOAD_IMAGE_BYTES = 3.8 * 1024 * 1024;
 const PERSPECTIVE_CORRECTION_SCALE = 3;
 const MAX_DETECTION_DIMENSION = 1600;
+const PERSPECTIVE_CORRECTION_TIMEOUT_MS = 9000;
 // Temporarily disabled: detectDocumentQuad/warpToRectangle has been observed to hang the
 // entire page (unrecoverable, even devtools become unresponsive) regardless of image size.
 // See Docs/29_PERSPECTIVE_CORRECTION_HANG_EMERGENCY_DISABLE.md. Re-enable only after the
@@ -150,7 +150,7 @@ export default function ImageUploadPanel({
     completed: UploadKind[];
   }>({ active: false, step: 'cagi', completed: [] });
   const [correctionPreview, setCorrectionPreview] = useState<{
-    canvas: HTMLCanvasElement;
+    blob: Blob;
     step: UploadKind;
     previewSrc: string;
     source: 'camera' | 'file';
@@ -251,6 +251,14 @@ export default function ImageUploadPanel({
     };
   }, []);
 
+  useEffect(() => {
+    return () => {
+      if (correctionPreview?.previewSrc.startsWith('blob:')) {
+        URL.revokeObjectURL(correctionPreview.previewSrc);
+      }
+    };
+  }, [correctionPreview]);
+
   const uploadSingleFile = async (file: File, type: UploadKind, replaceExisting = false): Promise<any> => {
     const uploadFile = await shrinkImageFileIfNeeded(file, MAX_UPLOAD_IMAGE_BYTES);
     const formData = new FormData();
@@ -343,23 +351,19 @@ export default function ImageUploadPanel({
         context.drawImage(image, 0, 0, width, height);
 
         if (PERSPECTIVE_CORRECTION_ENABLED) {
-          const cv = await withTimeout(loadOpenCv(), 5000, 'OpenCV.js load timed out.');
-          const quad = detectDocumentQuad(cv, canvas);
+          const template = type === 'cagi' ? cagiTemplate : satisfactionTemplate;
+          const correctedBlob = await correctImageInWorker(
+            canvas,
+            template.baseSize.width * PERSPECTIVE_CORRECTION_SCALE,
+            template.baseSize.height * PERSPECTIVE_CORRECTION_SCALE,
+            PERSPECTIVE_CORRECTION_TIMEOUT_MS,
+          );
 
-          if (quad) {
-            const template = type === 'cagi' ? cagiTemplate : satisfactionTemplate;
-            const correctedCanvas = warpToRectangle(
-              cv,
-              canvas,
-              quad,
-              template.baseSize.width * PERSPECTIVE_CORRECTION_SCALE,
-              template.baseSize.height * PERSPECTIVE_CORRECTION_SCALE,
-            );
-
+          if (correctedBlob) {
             setCorrectionPreview({
-              canvas: correctedCanvas,
+              blob: correctedBlob,
               step: type,
-              previewSrc: correctedCanvas.toDataURL('image/jpeg', 0.88),
+              previewSrc: URL.createObjectURL(correctedBlob),
               source: 'file',
             });
             return;
@@ -475,7 +479,6 @@ export default function ImageUploadPanel({
 
       cameraStreamRef.current = stream;
       setCameraFlow({ active: true, step: 'cagi', completed: [] });
-      void loadOpenCv().catch(() => undefined);
     } catch (err: any) {
       if (err?.name === 'NotAllowedError') {
         setCameraError('카메라 권한이 거부되었습니다. 브라우저 권한을 허용한 뒤 다시 시도해주세요.');
@@ -501,44 +504,26 @@ export default function ImageUploadPanel({
     }
   };
 
-  const uploadCapturedCanvas = async (canvas: HTMLCanvasElement, step: UploadKind): Promise<boolean> => {
-    const blob = await new Promise<Blob | null>((resolve) => {
-      canvas.toBlob(resolve, 'image/jpeg', 0.92);
-    });
-
-    if (!blob) {
-      setCameraError('촬영 이미지를 저장할 수 없습니다. 다시 시도해주세요.');
-      return false;
-    }
-
-    const file = new File([blob], `${step}_${Date.now()}.jpg`, { type: 'image/jpeg' });
-    const uploaded = await uploadSequentialFile(file, step);
+  const uploadCorrectedBlob = async (blob: Blob, type: UploadKind, source: 'camera' | 'file'): Promise<boolean> => {
+    const file = new File([blob], `${type}_${Date.now()}.jpg`, { type: 'image/jpeg' });
+    const uploaded = await uploadSequentialFile(file, type);
     if (!uploaded) return false;
 
-    advanceCameraFlowAfterUpload(step);
-    return true;
-  };
-
-  const uploadCorrectedFileCanvas = async (canvas: HTMLCanvasElement, type: UploadKind): Promise<boolean> => {
-    const blob = await new Promise<Blob | null>((resolve) => {
-      canvas.toBlob(resolve, 'image/jpeg', 0.92);
-    });
-
-    if (!blob) {
-      setCameraError('보정된 이미지를 저장할 수 없습니다. 다시 선택해주세요.');
-      return false;
+    if (source === 'camera') {
+      advanceCameraFlowAfterUpload(type);
     }
 
-    const file = new File([blob], `${type}_${Date.now()}.jpg`, { type: 'image/jpeg' });
-    return await uploadSequentialFile(file, type);
+    return true;
   };
 
   const confirmCorrectionPreview = async () => {
     if (!correctionPreview) return;
 
-    const uploaded = correctionPreview.source === 'camera'
-      ? await uploadCapturedCanvas(correctionPreview.canvas, correctionPreview.step)
-      : await uploadCorrectedFileCanvas(correctionPreview.canvas, correctionPreview.step);
+    const uploaded = await uploadCorrectedBlob(
+      correctionPreview.blob,
+      correctionPreview.step,
+      correctionPreview.source,
+    );
 
     if (uploaded) {
       setCorrectionPreview(null);
@@ -582,23 +567,19 @@ export default function ImageUploadPanel({
 
       try {
         if (PERSPECTIVE_CORRECTION_ENABLED) {
-          const cv = await withTimeout(loadOpenCv(), 5000, 'OpenCV.js load timed out.');
-          const quad = detectDocumentQuad(cv, canvas);
+          const template = cameraFlow.step === 'cagi' ? cagiTemplate : satisfactionTemplate;
+          const correctedBlob = await correctImageInWorker(
+            canvas,
+            template.baseSize.width * PERSPECTIVE_CORRECTION_SCALE,
+            template.baseSize.height * PERSPECTIVE_CORRECTION_SCALE,
+            PERSPECTIVE_CORRECTION_TIMEOUT_MS,
+          );
 
-          if (quad) {
-            const template = cameraFlow.step === 'cagi' ? cagiTemplate : satisfactionTemplate;
-            const correctedCanvas = warpToRectangle(
-              cv,
-              canvas,
-              quad,
-              template.baseSize.width * PERSPECTIVE_CORRECTION_SCALE,
-              template.baseSize.height * PERSPECTIVE_CORRECTION_SCALE,
-            );
-
+          if (correctedBlob) {
             setCorrectionPreview({
-              canvas: correctedCanvas,
+              blob: correctedBlob,
               step: cameraFlow.step,
-              previewSrc: correctedCanvas.toDataURL('image/jpeg', 0.88),
+              previewSrc: URL.createObjectURL(correctedBlob),
               source: 'camera',
             });
             return;
@@ -638,7 +619,7 @@ export default function ImageUploadPanel({
 
   const handleResetBatch = async () => {
     setIsBatchProcessing(true);
-    setBatchStatusMessage('?낅줈???뚯씪???뺣━?섍퀬 ?덉뒿?덈떎.');
+    setBatchStatusMessage('업로드된 파일을 정리하고 있습니다.');
 
     try {
       const res = await fetch('/api/jobs/cleanup', {
@@ -649,7 +630,7 @@ export default function ImageUploadPanel({
 
       if (!res.ok) {
         const errData = await res.json();
-        throw new Error(errData.error || '?뚯씪 ?뺣━ ?ㅽ뙣');
+        throw new Error(errData.error || '파일 정리 실패');
       }
 
       setCagiCount(0);
@@ -658,7 +639,7 @@ export default function ImageUploadPanel({
       setSatFile(null);
       setCameraError('');
     } catch (err: any) {
-      alert(`?낅줈??珥덇린??以??ㅻ쪟媛 諛쒖깮?덉뒿?덈떎: ${err.message}`);
+      alert(`업로드 초기화 중 오류가 발생했습니다: ${err.message}`);
     } finally {
       setIsBatchProcessing(false);
       setBatchStatusMessage('');
