@@ -293,4 +293,5 @@ PDF 업로드는 다음 원칙을 따른다.
 - [Task/MOBILE_PHOTO_MISCLASSIFICATION_FIX.md](../Task/MOBILE_PHOTO_MISCLASSIFICATION_FIX.md) — 3절(양식 종류 분류)의 내용 기반 판별이 원근왜곡 사진에서 오판정한 사례와 수정.
 - [Task/MOBILE_CAPTURE_PERSPECTIVE_CORRECTION.md](../Task/MOBILE_CAPTURE_PERSPECTIVE_CORRECTION.md) — 2절(이미지 처리 단계)의 "원근 보정" 단계를 실제로 도입한 설계·구현·회귀 수정 전체 과정.
 - [Task/RECOGNITION_ACCURACY_DYNAMIC_ROW_DETECTION.md](../Task/RECOGNITION_ACCURACY_DYNAMIC_ROW_DETECTION.md) — 6절(체크마크 판정 방식)의 정확도를 보완하기 위해 도입한 동적 표 행 검출.
+- [Task/OCR_ANCHORED_ROW_DETECTION.md](../Task/OCR_ANCHORED_ROW_DETECTION.md) — 위 동적 표 행 검출을 OCR 텍스트 위치 앵커로 보강한 후속 작업. OCR은 영역(행) 위치 파악에만 쓰고, 6절의 마킹 판정 방식(픽셀 밀도) 자체는 바꾸지 않는다.
 - [Task/PDF_BATCH_RENDER_HANG.md](../Task/PDF_BATCH_RENDER_HANG.md) — 위 "PDF 업로드" 운영 원칙과 관련된 pdf.js 렌더링 멈춤/JBIG2 문제.
