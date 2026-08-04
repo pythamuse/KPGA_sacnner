@@ -5,6 +5,7 @@ import {
   satisfactionBinaryYs,
   satisfactionScaleYs,
 } from './roiTemplates';
+import { detectOcrTextLines } from './ocrTextLines';
 
 export interface HorizontalLine {
   y: number;
@@ -114,24 +115,48 @@ export function matchRowPattern(
   return null;
 }
 
-export function buildCagiRowOverrides(image: ImageAnalysisData): Record<string, RowYOverride> {
+export function buildCagiRowOverrides(image: ImageAnalysisData): Record<string, RowYOverride>;
+export function buildCagiRowOverrides(image: ImageAnalysisData, imageBuffer: Buffer): Promise<Record<string, RowYOverride>>;
+export function buildCagiRowOverrides(
+  image: ImageAnalysisData,
+  imageBuffer?: Buffer,
+): Record<string, RowYOverride> | Promise<Record<string, RowYOverride>> {
   const questionYs = [...cagiQuestionYs, ...cagiLateQuestionYs];
-  const match = findRowMatch(image, questionYs);
-  if (!match?.confident) {
-    return {};
+  const fields = questionYs.map((_, index) => `cagi.q${String(index + 1).padStart(2, '0')}`);
+
+  if (imageBuffer) {
+    return buildRowOverridesAsync(image, imageBuffer, questionYs, fields);
   }
 
-  return buildOverridesFromRowCenters(
-    match.lineYs,
-    questionYs.map((_, index) => `cagi.q${String(index + 1).padStart(2, '0')}`),
-    image.height,
-  );
+  return buildRowOverridesSync(image, questionYs, fields);
 }
 
-export function buildSatisfactionRowOverrides(image: ImageAnalysisData): Record<string, RowYOverride> {
+export function buildSatisfactionRowOverrides(image: ImageAnalysisData): Record<string, RowYOverride>;
+export function buildSatisfactionRowOverrides(
+  image: ImageAnalysisData,
+  imageBuffer: Buffer,
+): Promise<Record<string, RowYOverride>>;
+export function buildSatisfactionRowOverrides(
+  image: ImageAnalysisData,
+  imageBuffer?: Buffer,
+): Record<string, RowYOverride> | Promise<Record<string, RowYOverride>> {
+  if (imageBuffer) {
+    return buildSatisfactionRowOverridesAsync(image, imageBuffer);
+  }
+
   return {
     ...buildSatisfactionGroupOverrides(image, satisfactionBinaryYs, 2),
     ...buildSatisfactionGroupOverrides(image, satisfactionScaleYs, 7),
+  };
+}
+
+async function buildSatisfactionRowOverridesAsync(
+  image: ImageAnalysisData,
+  imageBuffer: Buffer,
+): Promise<Record<string, RowYOverride>> {
+  return {
+    ...(await buildSatisfactionGroupOverridesAsync(image, imageBuffer, satisfactionBinaryYs, 2)),
+    ...(await buildSatisfactionGroupOverridesAsync(image, imageBuffer, satisfactionScaleYs, 7)),
   };
 }
 
@@ -140,19 +165,65 @@ function buildSatisfactionGroupOverrides(
   rowYs: number[],
   firstQuestionNumber: number,
 ): Record<string, RowYOverride> {
-  const match = findRowMatch(image, rowYs);
+  return buildRowOverridesSync(
+    image,
+    rowYs,
+    rowYs.map((_, index) => `satisfaction.q${String(firstQuestionNumber + index).padStart(2, '0')}`),
+  );
+}
+
+async function buildSatisfactionGroupOverridesAsync(
+  image: ImageAnalysisData,
+  imageBuffer: Buffer,
+  rowYs: number[],
+  firstQuestionNumber: number,
+): Promise<Record<string, RowYOverride>> {
+  return buildRowOverridesAsync(
+    image,
+    imageBuffer,
+    rowYs,
+    rowYs.map((_, index) => `satisfaction.q${String(firstQuestionNumber + index).padStart(2, '0')}`),
+  );
+}
+
+function buildRowOverridesSync(
+  image: ImageAnalysisData,
+  templateYs: number[],
+  fields: string[],
+): Record<string, RowYOverride> {
+  const match = findRowMatch(image, templateYs);
   if (!match?.confident) {
     return {};
   }
 
-  return buildOverridesFromRowCenters(
-    match.lineYs,
-    rowYs.map((_, index) => `satisfaction.q${String(firstQuestionNumber + index).padStart(2, '0')}`),
-    image.height,
-  );
+  return buildOverridesFromRowCenters(match.lineYs, fields, image.height);
 }
 
-function findRowMatch(image: ImageAnalysisData, templateYs: number[]): RowMatchResult | null {
+async function buildRowOverridesAsync(
+  image: ImageAnalysisData,
+  imageBuffer: Buffer,
+  templateYs: number[],
+  fields: string[],
+): Promise<Record<string, RowYOverride>> {
+  const match = await findRowMatch(image, templateYs, imageBuffer);
+  if (!match?.confident) {
+    return {};
+  }
+
+  return buildOverridesFromRowCenters(match.lineYs, fields, image.height);
+}
+
+function findRowMatch(image: ImageAnalysisData, templateYs: number[]): RowMatchResult | null;
+function findRowMatch(
+  image: ImageAnalysisData,
+  templateYs: number[],
+  imageBuffer: Buffer,
+): Promise<RowMatchResult | null>;
+function findRowMatch(
+  image: ImageAnalysisData,
+  templateYs: number[],
+  imageBuffer?: Buffer,
+): RowMatchResult | null | Promise<RowMatchResult | null> {
   const expectedRelativeGaps = buildExpectedRelativeGaps(templateYs);
   if (expectedRelativeGaps.length === 0) {
     return null;
@@ -169,8 +240,40 @@ function findRowMatch(image: ImageAnalysisData, templateYs: number[]): RowMatchR
   const searchBottom = image.height * 0.9;
   const xLeft = bounds.left + baseWidth * 0.08;
   const xRight = bounds.right - baseWidth * 0.02;
+
+  if (imageBuffer) {
+    return findRowMatchWithOcrFallback(image, imageBuffer, expectedRelativeGaps, searchTop, searchBottom, xLeft, xRight);
+  }
+
   const detectedLines = detectHorizontalLines(image, searchTop, searchBottom, xLeft, xRight);
 
+  return matchRowPattern(detectedLines, expectedRelativeGaps);
+}
+
+async function findRowMatchWithOcrFallback(
+  image: ImageAnalysisData,
+  imageBuffer: Buffer,
+  expectedRelativeGaps: number[],
+  searchTop: number,
+  searchBottom: number,
+  xLeft: number,
+  xRight: number,
+): Promise<RowMatchResult | null> {
+  const ocrLines = await detectOcrTextLines(
+    imageBuffer,
+    image.width,
+    image.height,
+    searchTop,
+    searchBottom,
+    xLeft,
+    xRight,
+  );
+  const ocrMatch = matchRowPattern(ocrLines, expectedRelativeGaps);
+  if (ocrMatch?.confident) {
+    return ocrMatch;
+  }
+
+  const detectedLines = detectHorizontalLines(image, searchTop, searchBottom, xLeft, xRight);
   return matchRowPattern(detectedLines, expectedRelativeGaps);
 }
 
