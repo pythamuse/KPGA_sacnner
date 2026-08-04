@@ -11,7 +11,16 @@ export interface OcrTextLine {
 const MIN_CONFIDENCE = 30;
 const MIN_LINE_HEIGHT = 6;
 const GROUP_DISTANCE_PX = 8;
-const OCR_TIMEOUT_MS = 60_000;
+// Emergency fix (see Task/OCR_ANCHORED_ROW_DETECTION.md cycle 1 feedback): the original
+// per-stage 60s timeouts (60s worker init + 60s recognize) let a single /api/recognize
+// request take 184s in production, because Vercel serverless containers are ephemeral and
+// tesseract's Korean model has to be re-initialized from a cold cache far more often than
+// in local testing. OCR is a "nice to have" anchor -- it must never cost the user-facing
+// request more than a small, bounded amount of time. One short budget covers worker
+// creation + recognition together; if it's not done in time, this silently returns []
+// and the caller falls back to the existing pixel-line detector, exactly as on any other
+// OCR failure.
+const OCR_TOTAL_TIMEOUT_MS = 6_000;
 const OCR_CACHE_PATH = path.join(os.tmpdir(), 'gambling-prevention-tesseract-cache');
 
 let workerPromise: Promise<Worker> | null = null;
@@ -35,6 +44,17 @@ export async function detectOcrTextLines(
       return [];
     }
 
+    return await withTimeout(recognizeCrop(imageBuffer, crop), OCR_TOTAL_TIMEOUT_MS);
+  } catch {
+    return [];
+  }
+}
+
+async function recognizeCrop(
+  imageBuffer: Buffer,
+  crop: { left: number; top: number; width: number; height: number },
+): Promise<OcrTextLine[]> {
+  try {
     const croppedBuffer = await sharp(imageBuffer)
       .rotate()
       .extract(crop)
@@ -43,11 +63,8 @@ export async function detectOcrTextLines(
       .png()
       .toBuffer();
 
-    const worker = await withTimeout(getWorker(), OCR_TIMEOUT_MS);
-    const result = await withTimeout(
-      worker.recognize(croppedBuffer, {}, { text: true, blocks: true }),
-      OCR_TIMEOUT_MS,
-    );
+    const worker = await getWorker();
+    const result = await worker.recognize(croppedBuffer, {}, { text: true, blocks: true });
 
     const lines = result.data.lines
       .map((line) => {
