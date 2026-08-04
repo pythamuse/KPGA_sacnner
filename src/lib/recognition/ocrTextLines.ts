@@ -24,6 +24,7 @@ const OCR_TOTAL_TIMEOUT_MS = 6_000;
 const OCR_CACHE_PATH = path.join(os.tmpdir(), 'gambling-prevention-tesseract-cache');
 
 let workerPromise: Promise<Worker> | null = null;
+let workerReady = false;
 
 export async function detectOcrTextLines(
   imageBuffer: Buffer,
@@ -36,6 +37,16 @@ export async function detectOcrTextLines(
 ): Promise<OcrTextLine[]> {
   try {
     if (!Buffer.isBuffer(imageBuffer) || imageWidth <= 0 || imageHeight <= 0) {
+      return [];
+    }
+
+    // If a previous call in this container already kicked off worker init and it's still
+    // not ready, don't pay the timeout again -- a single /api/recognize request can call
+    // this up to three times (CAGI rows + two satisfaction groups), and re-waiting the full
+    // budget each time is what turned one slow cold start into 3x the latency in production.
+    // Only the very first attempt per container waits; the rest fall back immediately until
+    // the background init actually finishes (at which point they get the fast, warm path).
+    if (workerPromise && !workerReady) {
       return [];
     }
 
@@ -92,6 +103,7 @@ function getWorker(): Promise<Worker> {
           tessedit_pageseg_mode: PSM.SPARSE_TEXT,
           preserve_interword_spaces: '1',
         });
+        workerReady = true;
         return worker;
       })
       .catch((error) => {
