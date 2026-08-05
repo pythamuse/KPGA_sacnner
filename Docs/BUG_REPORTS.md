@@ -16,7 +16,7 @@
 | 10 | OCR 앵커 도입 후 `/api/recognize`가 184초까지 걸림 | 완화(후속 조정 완료, 실배포 재측정 필요) | [OCR_ANCHORED_ROW_DETECTION](../Task/OCR_ANCHORED_ROW_DETECTION.md) |
 | 11 | 종이 경계 검출 실패 상태에서도 ROI 후보가 자동값으로 확정될 수 있음 | 해결(경계 불확실 시 자동 확정 차단) | [OCR_ANCHORED_ROW_DETECTION](../Task/OCR_ANCHORED_ROW_DETECTION.md) |
 | 12 | 실사용 촬영 이미지에서 원근 보정 후에도 문서 좌표가 어긋남 | 1차 품질 게이트 구현, 실사용 benchmark 필요 | [DOCUMENT_SCAN_STRATEGY_REVIEW](../Docs/14_DOCUMENT_SCAN_STRATEGY_REVIEW.md) |
-| 13 | 보정본이 양식 판정을 오염시켜 `FORM_TYPE_MISMATCH` 발생 | 2차 수정, 배포 재검증 필요 | [MOBILE_PHOTO_MISCLASSIFICATION_FIX](../Task/MOBILE_PHOTO_MISCLASSIFICATION_FIX.md) |
+| 13 | 보정본이 양식 판정을 오염시켜 `FORM_TYPE_MISMATCH` 발생 | 3차 수정 완료, 최신 배포 검증 필요 | [MOBILE_PHOTO_MISCLASSIFICATION_FIX](../Task/MOBILE_PHOTO_MISCLASSIFICATION_FIX.md) |
 
 ---
 
@@ -104,4 +104,6 @@
 **재현 샘플**: 새 `만족도조사 샘플.jpg`와 `선별검사 샘플.jpg`, 만족도 칸에서 CAGI로 판정된 Vercel 화면.
 **원인**: 보정 Worker가 실제 문서 외곽과 내부 표를 기하학 점수만으로 구분하지 못했고, 서버 분류기도 표 선의 픽셀 밀도 우세만으로 업로드 칸을 뒤집을 수 있었음.
 **대응**: 보정 후보에 페이지 크기 게이트를 추가하고, 서버 프레임 검출에 네 변 연속성 검사를 추가했다. 양식별 고유 구조 점수와 최소 점수 차이를 함께 통과한 경우에만 `FORM_TYPE_MISMATCH`를 발생시킨다.
-**상태**: 코드 및 합성 회귀 테스트 완료(대상 4개 파일, 16개 테스트). 실제 Vercel 배포와 새 원본 샘플 재검증 필요.
+**추가 진단**: 실제 선별검사 샘플 원본과 OpenCV 보정 결과는 모두 CAGI로 판정됐다. 같은 보정 결과를 구 분류기(만족도 문항 1~5만 비교)에 넣었을 때만 CAGI `0.534`, 만족도 `0.776`으로 뒤집혔으며, 화면 오류와 일치한다. 따라서 이번 화면은 파일 자체보다 이전 분류 정책을 사용하는 배포본 또는 최신 커밋 미반영 상태에서 발생한 것으로 판단한다.
+**대응**: 프레임 최소 크기를 입력의 70% 폭·78% 높이, 여백을 각 20% 이내로 강화해 중앙 내부 표를 문서 프레임으로 승격하지 않도록 했다. 인식 응답에 `recognitionPolicyVersion: 2026-08-05.3`을 포함해 배포본 정책을 확인할 수 있게 했다.
+**상태**: 코드 및 회귀 테스트 완료(전체 12개 파일, 52개 테스트). 새 커밋 배포 후 `/api/recognize` 응답의 정책 버전과 실제 샘플 재검증이 남아 있다.

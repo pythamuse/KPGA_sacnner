@@ -128,4 +128,20 @@ describe('마킹 밀도 기반 선택지 분석', () => {
 
     expect(analysis.contentBoundsConfident).toBe(true);
   });
+
+  it('페이지 중앙의 큰 내부 표도 문서 프레임으로 승격하지 않는다', async () => {
+    fs.mkdirSync(fixtureDir, { recursive: true });
+    const filePath = path.join(fixtureDir, 'large-inner-frame.png');
+    const svg = `
+      <svg xmlns="http://www.w3.org/2000/svg" width="1000" height="1400">
+        <rect width="100%" height="100%" fill="#fff"/>
+        <rect x="200" y="250" width="600" height="1000" fill="none" stroke="#000" stroke-width="4"/>
+      </svg>
+    `;
+    await sharp(Buffer.from(svg)).png().toFile(filePath);
+
+    const analysis = await loadImageAnalysisData(filePath);
+
+    expect(analysis.contentBoundsConfident).toBe(false);
+  });
 });

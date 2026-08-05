@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
 import { getJobDir } from '../../../lib/excel/templateManager';
-import { classifyForm } from '../../../lib/recognition/classifyForm';
+import { classifyForm, FORM_CLASSIFIER_POLICY_VERSION } from '../../../lib/recognition/classifyForm';
 import { recognizeStudentForms } from '../../../lib/recognition/detectCheckmarks';
 import { matchBatch } from '../../../lib/recognition/batchMatcher';
 import { hasJobSession } from '../../../lib/storage/jobStore';
@@ -97,6 +97,7 @@ export async function POST(req: Request) {
       return NextResponse.json({
         error: buildFormTypeMismatchMessage(typeMismatches),
         code: 'FORM_TYPE_MISMATCH',
+        recognitionPolicyVersion: FORM_CLASSIFIER_POLICY_VERSION,
         mismatches: typeMismatches,
       }, { status: 400 });
     }
@@ -157,7 +158,8 @@ export async function POST(req: Request) {
 
     return NextResponse.json({
       studentDrafts,
-      warnings: earlyInterventionWarnings
+      warnings: earlyInterventionWarnings,
+      recognitionPolicyVersion: FORM_CLASSIFIER_POLICY_VERSION,
     });
 
   } catch (err: any) {

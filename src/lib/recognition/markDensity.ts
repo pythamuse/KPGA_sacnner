@@ -196,7 +196,7 @@ function detectFrameBounds(image: Pick<ImageAnalysisData, 'width' | 'height' | '
   const left = verticalCols[0];
   const right = verticalCols[verticalCols.length - 1] + 1;
 
-  if ((right - left) < image.width * 0.45 || (bottom - top) < image.height * 0.45) {
+  if ((right - left) < image.width * 0.58 || (bottom - top) < image.height * 0.62) {
     return null;
   }
 
@@ -295,12 +295,12 @@ function isPlausibleFrameBounds(
   // The templates are portrait forms. Reject small internal tables or a partial
   // page frame before normalized ROI coordinates are allowed to drive recognition.
   return (
-    frameWidth >= image.width * 0.55 &&
-    frameHeight >= image.height * 0.7 &&
-    bounds.left <= image.width * 0.3 &&
-    bounds.right >= image.width * 0.7 &&
-    bounds.top <= image.height * 0.25 &&
-    bounds.bottom >= image.height * 0.75 &&
+    frameWidth >= image.width * 0.7 &&
+    frameHeight >= image.height * 0.78 &&
+    bounds.left <= image.width * 0.2 &&
+    bounds.right >= image.width * 0.8 &&
+    bounds.top <= image.height * 0.2 &&
+    bounds.bottom >= image.height * 0.8 &&
     aspectRatio >= 1.05 &&
     aspectRatio <= 1.9
   );

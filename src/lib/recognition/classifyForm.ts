@@ -5,6 +5,10 @@ import { ChoiceGroup, FormType, cagiTemplate, satisfactionTemplate } from './roi
 
 type ClassifiedFormType = FormType | 'unknown';
 
+// Included in recognition responses so a deployed client can be compared with
+// the classifier policy that produced its result.
+export const FORM_CLASSIFIER_POLICY_VERSION = '2026-08-05.3';
+
 const imageExtensions = new Set(['.png', '.jpg', '.jpeg', '.webp']);
 
 export async function classifyForm(filePath: string): Promise<ClassifiedFormType> {

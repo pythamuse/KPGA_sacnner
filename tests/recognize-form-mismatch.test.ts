@@ -4,6 +4,7 @@ import path from 'path';
 import sharp from 'sharp';
 import { getJobDir } from '../src/lib/excel/templateManager';
 import { ChoiceGroup } from '../src/lib/recognition/roiTemplates';
+import { FORM_CLASSIFIER_POLICY_VERSION } from '../src/lib/recognition/classifyForm';
 import { POST as jobsPOST } from '../src/app/api/jobs/route';
 import { POST as recognizePOST } from '../src/app/api/recognize/route';
 
@@ -49,6 +50,7 @@ describe('인식 API 양식 칸 불일치 감지', () => {
 
     const body = await response.json();
     expect(body.code).toBe('FORM_TYPE_MISMATCH');
+    expect(body.recognitionPolicyVersion).toBe(FORM_CLASSIFIER_POLICY_VERSION);
     expect(body.mismatches).toEqual([
       {
         filename: 'cagi_wrong_bucket.png',
