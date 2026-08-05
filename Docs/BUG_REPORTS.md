@@ -17,6 +17,7 @@
 | 11 | 종이 경계 검출 실패 상태에서도 ROI 후보가 자동값으로 확정될 수 있음 | 해결(경계 불확실 시 자동 확정 차단) | [OCR_ANCHORED_ROW_DETECTION](../Task/OCR_ANCHORED_ROW_DETECTION.md) |
 | 12 | 실사용 촬영 이미지에서 원근 보정 후에도 문서 좌표가 어긋남 | 1차 품질 게이트 구현, 실사용 benchmark 필요 | [DOCUMENT_SCAN_STRATEGY_REVIEW](../Docs/14_DOCUMENT_SCAN_STRATEGY_REVIEW.md) |
 | 13 | 보정본이 양식 판정을 오염시켜 `FORM_TYPE_MISMATCH` 발생 | 4차 수정 완료, 최신 배포 검증 필요 | [MOBILE_PHOTO_MISCLASSIFICATION_FIX](../Task/MOBILE_PHOTO_MISCLASSIFICATION_FIX.md), [FORM_TYPE_MISMATCH_DESKEW_FIX](../Task/FORM_TYPE_MISMATCH_DESKEW_FIX.md) |
+| 14 | JBIG2 스캔 PDF가 빈 캔버스로 변환되어 검수 원본과 ROI가 모두 비어 보임 | 수정 완료, 실제 19페이지 PDF 재검증 필요 | [PDF_JBIG2_WASM_RENDER_GUARD](../Task/PDF_JBIG2_WASM_RENDER_GUARD.md) |
 
 ---
 
@@ -25,6 +26,13 @@
 **원인**: pdf.js의 순수 JS JBIG2 디코더가 특정 스캐너 인코딩 방식의 이미지에서 `page.render()`를 무한 대기시킴.
 **대응**: pdf.js를 3.4.120 → 6.1.200(ESM)으로 업그레이드해 대부분의 페이지는 해결됐으나, JBIG2 인코딩 페이지는 여전히 재현됨. 페이지별 타임아웃(`withTimeout.ts`)으로 증상만 완화 중.
 **상태**: 부분 해결 — 근본 해결은 서버 사이드 렌더링(poppler/mupdf/pdfium) 전환 후속 과제로 남음.
+
+## 14. JBIG2 스캔 PDF의 빈 원본/ROI 업로드
+
+**재현**: 19페이지 선별검사지 PDF와 만족도조사 PDF를 일괄 업로드한 뒤 검수 화면을 확인하면, 보정 엔진 경고가 페이지 수만큼 표시되고 원본 이미지와 학교유형 ROI가 빈 흰색으로 표시됨.
+**원인**: PDF.js 6.1.200의 JBIG2 디코더가 필요한 WASM 경로 없이 실행되어 `wasmUrl` 및 `nulljbig2_nowasm_fallback.js` 오류가 발생함. 렌더링 완료 후 생성된 빈 캔버스를 정상 JPEG처럼 업로드한 것이 후속 증상의 직접 원인임.
+**대응**: 같은 버전의 `pdfjs-dist` WASM 경로를 명시하고, 내용 없는 캔버스를 페이지 변환 실패로 처리함. PDF에서 생성된 평면 이미지는 보정 워커를 실행하지 않아 보정 엔진 가용성과 관계없이 업로드함.
+**상태**: 코드 및 단위 테스트 완료. 실제 JBIG2 PDF로 배포 환경 재검증 필요.
 
 ## 2. Vercel 인스턴스 간 `/tmp` 미공유로 저장/다운로드/이미지 미리보기 404
 

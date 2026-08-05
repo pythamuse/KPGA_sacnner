@@ -5,6 +5,11 @@ import {
   correctImageInWorkerDetailed,
   warmupPerspectiveWorker,
 } from '@/lib/documentScanner/perspectiveCorrectClient';
+import {
+  PDFJS_WORKER_SRC,
+  buildPdfDocumentOptions,
+  hasMeaningfulRenderedPixels,
+} from '@/lib/pdf/pdfRenderConfig';
 import { cagiTemplate, satisfactionTemplate } from '@/lib/recognition/roiTemplates';
 
 export type UploadMode = 'sequential' | 'batch';
@@ -31,6 +36,11 @@ type BatchNormalizationResult = {
   corrected: boolean;
   confidence: number;
   reason?: string;
+};
+
+type BatchUploadItem = {
+  file: File;
+  source: 'image' | 'pdf';
 };
 
 const MAX_UPLOAD_IMAGE_BYTES = 3.8 * 1024 * 1024;
@@ -242,19 +252,26 @@ export default function ImageUploadPanel({
 
       canvas.height = viewport.height;
       canvas.width = viewport.width;
-      await withTimeout(
-        page.render({ canvasContext: context, viewport }).promise,
-        20000,
-        `${pageNumber}페이지 변환이 시간 내에 끝나지 않았습니다. 파일이 손상되었거나 처리하기 어려운 이미지일 수 있습니다. 다른 파일로 다시 시도하거나 이미지로 변환해 업로드해주세요.`,
-      );
+      try {
+        await withTimeout(
+          page.render({ canvasContext: context, viewport }).promise,
+          20000,
+          `${pageNumber}페이지 변환이 시간 내에 끝나지 않았습니다. 파일이 손상되었거나 처리하기 어려운 이미지일 수 있습니다. 다른 파일로 다시 시도하거나 이미지로 변환해 업로드해주세요.`,
+        );
 
-      const blob = await canvasToBlob(canvas, 'image/jpeg', option.quality);
-      canvas.width = 1;
-      canvas.height = 1;
+        const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+        if (!hasMeaningfulRenderedPixels(pixels, canvas.width, canvas.height)) {
+          throw new Error(`${pageNumber}페이지가 내용 없는 이미지로 렌더링되었습니다. PDF 이미지 디코더가 실패했을 수 있어 사용할 수 없는 이미지는 업로드하지 않습니다.`);
+        }
 
-      fallbackBlob = blob;
-      if (blob.size <= MAX_UPLOAD_IMAGE_BYTES) {
-        return new File([blob], `${type}_page_${pageIndexStr}.jpg`, { type: 'image/jpeg' });
+        const blob = await canvasToBlob(canvas, 'image/jpeg', option.quality);
+        fallbackBlob = blob;
+        if (blob.size <= MAX_UPLOAD_IMAGE_BYTES) {
+          return new File([blob], `${type}_page_${pageIndexStr}.jpg`, { type: 'image/jpeg' });
+        }
+      } finally {
+        canvas.width = 1;
+        canvas.height = 1;
       }
     }
 
@@ -272,10 +289,10 @@ export default function ImageUploadPanel({
       throw new Error('PDF 변환 라이브러리가 로드되지 않았습니다. 페이지를 새로고침한 뒤 다시 시도해주세요.');
     }
 
-    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/6.1.200/pdf.worker.min.mjs';
+    pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_SRC;
 
     const arrayBuffer = await file.arrayBuffer();
-    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+    const pdf = await pdfjsLib.getDocument(buildPdfDocumentOptions(arrayBuffer)).promise;
     const imageFiles: File[] = [];
 
     setBatchStatusMessage(`PDF ${pdf.numPages}페이지를 업로드용 이미지로 변환하고 있습니다.`);
@@ -464,7 +481,7 @@ export default function ImageUploadPanel({
     setBatchStatusMessage('파일을 확인하고 있습니다.');
     setBatchCorrectionWarnings((previous) => previous.filter((warning) => warning.type !== type));
 
-    let filesToUpload: File[] = [];
+    let filesToUpload: BatchUploadItem[] = [];
     const correctionWarnings: BatchCorrectionWarning[] = [];
     let correctionEngineReady = false;
     let correctionEngineUnavailable = false;
@@ -474,13 +491,16 @@ export default function ImageUploadPanel({
         const file = files[i];
         if (file.type === 'application/pdf') {
           const extractedImages = await convertPdfToImages(file, type);
-          filesToUpload = [...filesToUpload, ...extractedImages];
+          filesToUpload = [
+            ...filesToUpload,
+            ...extractedImages.map((extracted) => ({ file: extracted, source: 'pdf' as const })),
+          ];
         } else if (file.type.startsWith('image/')) {
-          filesToUpload.push(file);
+          filesToUpload.push({ file, source: 'image' });
         }
       }
 
-      if (PERSPECTIVE_CORRECTION_ENABLED) {
+      if (PERSPECTIVE_CORRECTION_ENABLED && filesToUpload.some((item) => item.source === 'image')) {
         setBatchStatusMessage('페이지 보정 엔진을 준비하고 있습니다.');
         correctionEngineReady = await warmupPerspectiveWorker(BATCH_WORKER_WARMUP_TIMEOUT_MS);
         correctionEngineUnavailable = !correctionEngineReady;
@@ -490,11 +510,12 @@ export default function ImageUploadPanel({
       let successCount = 0;
 
       for (let i = 0; i < total; i++) {
-        const sourceFile = filesToUpload[i];
+        const { file: sourceFile, source } = filesToUpload[i];
+        const needsPerspectiveCorrection = source === 'image';
         let fileToUpload = sourceFile;
         let pageCorrectionWarningAdded = false;
 
-        if (PERSPECTIVE_CORRECTION_ENABLED && !correctionEngineUnavailable) {
+        if (needsPerspectiveCorrection && PERSPECTIVE_CORRECTION_ENABLED && !correctionEngineUnavailable) {
           if (!correctionEngineReady) {
             setBatchStatusMessage(`페이지 보정 엔진을 다시 준비하고 있습니다. (${i + 1}/${total})`);
             correctionEngineReady = await warmupPerspectiveWorker(BATCH_WORKER_WARMUP_TIMEOUT_MS);
@@ -536,7 +557,7 @@ export default function ImageUploadPanel({
           }
         }
 
-        if (correctionEngineUnavailable && PERSPECTIVE_CORRECTION_ENABLED && !pageCorrectionWarningAdded) {
+        if (needsPerspectiveCorrection && correctionEngineUnavailable && PERSPECTIVE_CORRECTION_ENABLED && !pageCorrectionWarningAdded) {
           correctionWarnings.push({
             type,
             page: i + 1,
