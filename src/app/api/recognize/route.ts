@@ -9,6 +9,13 @@ import { hasJobSession } from '../../../lib/storage/jobStore';
 import { hasCagiEarlyInterventionMarks } from '../../../lib/recognition/cagiEarlyIntervention';
 import { buildSourcePreview } from '../../../lib/recognition/buildSourcePreview';
 
+export function GET() {
+  return NextResponse.json({
+    service: 'recognize',
+    recognitionPolicyVersion: FORM_CLASSIFIER_POLICY_VERSION,
+  });
+}
+
 export async function POST(req: Request) {
   try {
     const { jobId } = await req.json();

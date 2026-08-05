@@ -6,7 +6,7 @@ import { getJobDir } from '../src/lib/excel/templateManager';
 import { ChoiceGroup } from '../src/lib/recognition/roiTemplates';
 import { FORM_CLASSIFIER_POLICY_VERSION } from '../src/lib/recognition/classifyForm';
 import { POST as jobsPOST } from '../src/app/api/jobs/route';
-import { POST as recognizePOST } from '../src/app/api/recognize/route';
+import { GET as recognizeGET, POST as recognizePOST } from '../src/app/api/recognize/route';
 
 const createdJobDirs: string[] = [];
 
@@ -29,6 +29,15 @@ afterAll(() => {
 });
 
 describe('인식 API 양식 칸 불일치 감지', () => {
+  it('GET 상태 조회가 현재 양식 분류 정책 버전을 반환한다', async () => {
+    const response = recognizeGET();
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      service: 'recognize',
+      recognitionPolicyVersion: FORM_CLASSIFIER_POLICY_VERSION,
+    });
+  });
+
   it('CAGI 칸에 만족도 양식 이미지가 업로드되면 FORM_TYPE_MISMATCH를 반환한다', async () => {
     const jobResponse = await jobsPOST();
     const { jobId } = await jobResponse.json();

@@ -108,6 +108,6 @@ npm run build
 
 ### 배포 후 확인 기준
 
-1. `/api/recognize` 응답에 `recognitionPolicyVersion: "2026-08-05.3"`이 표시되어야 한다.
+1. `GET /api/recognize` 또는 인식 응답에 `recognitionPolicyVersion: "2026-08-05.3"`이 표시되어야 한다.
 2. 같은 두 사진을 각각 선별검사지·만족도조사 칸에 올렸을 때 `FORM_TYPE_MISMATCH` 없이 인식 검수 화면으로 이동해야 한다.
 3. 선별검사지의 조기개입 표기는 기존처럼 페이지 번호 노티스로만 표시되고 추출 데이터에는 포함되지 않아야 한다.
