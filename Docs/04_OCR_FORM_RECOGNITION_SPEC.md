@@ -295,3 +295,17 @@ PDF 업로드는 다음 원칙을 따른다.
 - [Task/RECOGNITION_ACCURACY_DYNAMIC_ROW_DETECTION.md](../Task/RECOGNITION_ACCURACY_DYNAMIC_ROW_DETECTION.md) — 6절(체크마크 판정 방식)의 정확도를 보완하기 위해 도입한 동적 표 행 검출.
 - [Task/OCR_ANCHORED_ROW_DETECTION.md](../Task/OCR_ANCHORED_ROW_DETECTION.md) — 위 동적 표 행 검출을 OCR 텍스트 위치 앵커로 보강한 후속 작업. OCR은 영역(행) 위치 파악에만 쓰고, 6절의 마킹 판정 방식(픽셀 밀도) 자체는 바꾸지 않는다.
 - [Task/PDF_BATCH_RENDER_HANG.md](../Task/PDF_BATCH_RENDER_HANG.md) — 위 "PDF 업로드" 운영 원칙과 관련된 pdf.js 렌더링 멈춤/JBIG2 문제.
+- [Docs/14_DOCUMENT_SCAN_STRATEGY_REVIEW.md](14_DOCUMENT_SCAN_STRATEGY_REVIEW.md) — 실사용 촬영 샘플을 기준으로 자동 촬영(A)과 문서 보정 강화(B)의 적용 순서 및 혼합 전략.
+
+## 2026-08-05 인식 안전장치 및 실행 순서
+
+실제 ROI 오정렬과 Vercel OCR 지연을 반영해 이미지 인식은 다음 순서로 실행한다.
+
+- 신뢰 가능한 외곽 프레임이 검출된 경우에만 ROI 채점 결과를 자동값으로 확정한다.
+- 프레임 크기·여백·종횡비가 양식 전체와 맞지 않으면 `contentBoundsConfident`를 false로 취급한다.
+- 문항 행 위치는 서버의 픽셀 기반 가로선 검출을 먼저 사용한다.
+- 픽셀 기반 행 매칭이 실패할 때만 OCR 텍스트 위치 앵커를 최대 2.5초 동안 보조적으로 시도한다.
+- OCR 또는 행 검출이 실패해도 이미지 인식 요청은 중단하지 않고 기존 ROI 또는 빈 결과로 폴백한다.
+- 경계가 불확실한 입력은 후보 점수와 low confidence만 검수 화면에 표시하고, 사용자가 확인·수정한 값만 저장한다.
+
+이 원칙은 OCR이 체크마크 자체를 판독하지 않는다는 기존 정책과도 일치한다. OCR은 영역 위치 파악에만 사용하고, 실제 응답 판정은 픽셀 밀도와 사용자 검수로 제한한다.

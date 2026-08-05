@@ -60,9 +60,35 @@ describe('만족도 ROI 인식', () => {
     expect(draft.confidence['satisfaction.q01']).toBe('high');
     expect(draft.candidates?.['satisfaction.q10']?.[0]).toMatchObject({ value: 4 });
   });
+
+  it('종이 경계를 찾지 못한 이미지는 자동값을 확정하지 않는다', async () => {
+    const cagiPath = path.join(fixtureDir, 'cagi-no-frame.png');
+    const satisfactionPath = path.join(fixtureDir, 'satisfaction-no-frame.png');
+
+    await writeMarkedForm(cagiPath, cagiTemplate.choiceGroups, {
+      'basic.gender': 0,
+      'cagi.q01': 0,
+    }, false);
+    await writeMarkedForm(satisfactionPath, satisfactionTemplate.choiceGroups, {
+      'satisfaction.q01': 4,
+    }, false);
+
+    const draft = await recognizeStudentForms(cagiPath, satisfactionPath);
+
+    expect(draft.cagi.q01).toBeUndefined();
+    expect(draft.satisfaction.q01).toBeUndefined();
+    expect(draft.confidence['cagi.q01']).toBe('low');
+    expect(draft.confidence['satisfaction.q01']).toBe('low');
+    expect(draft.warnings).toHaveLength(2);
+  });
 });
 
-async function writeMarkedForm(filePath: string, groups: ChoiceGroup[], selectedValues: Record<string, number | string>) {
+async function writeMarkedForm(
+  filePath: string,
+  groups: ChoiceGroup[],
+  selectedValues: Record<string, number | string>,
+  includeFrame = true,
+) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
 
   const width = 1000;
@@ -94,7 +120,7 @@ async function writeMarkedForm(filePath: string, groups: ChoiceGroup[], selected
   const svg = `
     <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
       <rect width="100%" height="100%" fill="#fff"/>
-      <rect x="${bounds.left}" y="${bounds.top}" width="${bounds.width}" height="${bounds.height}" fill="none" stroke="#000" stroke-width="6"/>
+      ${includeFrame ? `<rect x="${bounds.left}" y="${bounds.top}" width="${bounds.width}" height="${bounds.height}" fill="none" stroke="#000" stroke-width="6"/>` : ''}
       ${marks.join('\n')}
     </svg>
   `;

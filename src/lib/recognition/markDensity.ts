@@ -200,6 +200,10 @@ function detectFrameBounds(image: Pick<ImageAnalysisData, 'width' | 'height' | '
     return null;
   }
 
+  if (!isPlausibleFrameBounds(image, { left, top, right, bottom })) {
+    return null;
+  }
+
   return {
     left,
     top,
@@ -212,6 +216,7 @@ export function analyzeChoiceGroup(
   image: ImageAnalysisData,
   group: ChoiceGroup,
   yOverride?: { top: number; bottom: number },
+  allowAutoValue = true,
 ): ChoiceGroupResult {
   const candidates = group.candidates
     .map((candidate) => ({
@@ -224,6 +229,16 @@ export function analyzeChoiceGroup(
   const second = candidates[1];
 
   if (!best) {
+    return {
+      field: group.field,
+      confidence: 'low',
+      candidates,
+    };
+  }
+
+  // A fallback content bound may still produce plausible-looking candidate scores.
+  // Never turn those scores into automatic data when the page frame was not trusted.
+  if (!allowAutoValue) {
     return {
       field: group.field,
       confidence: 'low',
@@ -264,4 +279,26 @@ function clamp(value: number, min: number, max: number): number {
 
 function roundScore(value: number): number {
   return Math.round(value * 1000) / 1000;
+}
+
+function isPlausibleFrameBounds(
+  image: Pick<ImageAnalysisData, 'width' | 'height'>,
+  bounds: PixelBounds,
+): boolean {
+  const frameWidth = bounds.right - bounds.left;
+  const frameHeight = bounds.bottom - bounds.top;
+  const aspectRatio = frameHeight / frameWidth;
+
+  // The templates are portrait forms. Reject small internal tables or a partial
+  // page frame before normalized ROI coordinates are allowed to drive recognition.
+  return (
+    frameWidth >= image.width * 0.55 &&
+    frameHeight >= image.height * 0.7 &&
+    bounds.left <= image.width * 0.3 &&
+    bounds.right >= image.width * 0.7 &&
+    bounds.top <= image.height * 0.25 &&
+    bounds.bottom >= image.height * 0.75 &&
+    aspectRatio >= 1.05 &&
+    aspectRatio <= 1.9
+  );
 }

@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
 import { getJobDir } from '../../../lib/excel/templateManager';
@@ -9,7 +9,7 @@ import { hasJobSession } from '../../../lib/storage/jobStore';
 import { hasCagiEarlyInterventionMarks } from '../../../lib/recognition/cagiEarlyIntervention';
 import { buildSourcePreview } from '../../../lib/recognition/buildSourcePreview';
 
-export async function POST(req: NextRequest) {
+export async function POST(req: Request) {
   try {
     const { jobId } = await req.json();
 
@@ -131,9 +131,10 @@ export async function POST(req: NextRequest) {
 
     // 5. 각 매칭 쌍에 대해 순차적(또는 병렬) 인식 수행 및 드래프트 일괄 리스트 구축
     const studentDrafts = [];
+    const ocrDeadlineAt = Date.now() + 2_500;
     for (let i = 0; i < matchedPairs.length; i++) {
       const pair = matchedPairs[i];
-      const draft = await recognizeStudentForms(pair.cagiPath, pair.satisfactionPath);
+      const draft = await recognizeStudentForms(pair.cagiPath, pair.satisfactionPath, { ocrDeadlineAt });
       
       // 개별 드래프트 객체에 이미지 정보 주입
       const cagiImageId = path.basename(pair.cagiPath).split('.')[0];

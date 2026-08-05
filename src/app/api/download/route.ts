@@ -1,8 +1,8 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextResponse } from 'next/server';
 import { generateWorkbookPair } from '../../../lib/excel/generateWorkbookPair';
 import { StudentData } from '../../../lib/validation/types';
 
-export async function POST(req: NextRequest) {
+export async function POST(req: Request) {
   try {
     const { type, students: rawStudents } = await req.json();
 

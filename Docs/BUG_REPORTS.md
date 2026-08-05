@@ -13,7 +13,9 @@
 | 7 | 카메라/파일 업로드 경로에 용량 초과(413) 방어 누락 | 구현됨(검증 기록 없음) | [CAMERA_UPLOAD_ROBUSTNESS_FIXES](../Task/CAMERA_UPLOAD_ROBUSTNESS_FIXES.md) |
 | 8 | ROI 좌표 기반 문항 인식이 실제 사진에서 엉뚱한 행을 읽음 | 부분 해결(재검증 필요) | [MOBILE_CAPTURE_PERSPECTIVE_CORRECTION](../Task/MOBILE_CAPTURE_PERSPECTIVE_CORRECTION.md), [RECOGNITION_ACCURACY_DYNAMIC_ROW_DETECTION](../Task/RECOGNITION_ACCURACY_DYNAMIC_ROW_DETECTION.md) |
 | 9 | 파일 업로드 원근보정 도입 후 웹페이지 전체 프리징 | 해결(근본 메커니즘은 미규명) | [MOBILE_CAPTURE_PERSPECTIVE_CORRECTION](../Task/MOBILE_CAPTURE_PERSPECTIVE_CORRECTION.md) |
-| 10 | OCR 앵커 도입 후 `/api/recognize`가 184초까지 걸림 | 완화(9.76초, 근본 해결 아님) | [OCR_ANCHORED_ROW_DETECTION](../Task/OCR_ANCHORED_ROW_DETECTION.md) |
+| 10 | OCR 앵커 도입 후 `/api/recognize`가 184초까지 걸림 | 완화(후속 조정 완료, 실배포 재측정 필요) | [OCR_ANCHORED_ROW_DETECTION](../Task/OCR_ANCHORED_ROW_DETECTION.md) |
+| 11 | 종이 경계 검출 실패 상태에서도 ROI 후보가 자동값으로 확정될 수 있음 | 해결(경계 불확실 시 자동 확정 차단) | [OCR_ANCHORED_ROW_DETECTION](../Task/OCR_ANCHORED_ROW_DETECTION.md) |
+| 12 | 실사용 촬영 이미지에서 원근 보정 후에도 문서 좌표가 어긋남 | 분석 완료, 후속 구현 필요 | [DOCUMENT_SCAN_STRATEGY_REVIEW](../Docs/14_DOCUMENT_SCAN_STRATEGY_REVIEW.md) |
 
 ---
 
@@ -75,4 +77,23 @@
 
 **원인**: 새로 추가한 OCR 텍스트 앵커 탐지(`detectOcrTextLines`)가 개별 연산(워커 초기화, 인식)마다 60초 타임아웃을 걸어뒀지만, 요청 전체에 대한 상한이 없었다. Vercel 서버리스 컨테이너는 로컬과 달리 매 요청마다 콜드 스타트를 겪을 수 있고, 한 요청 안에서 이 함수가 최대 3번(CAGI 표 1회 + 만족도 그룹 2회) 호출되어 지연이 배가됐다.
 **대응**: (1) 개별 60초 타임아웃 2개를 요청 하나당 6초 예산으로 통합. (2) 같은 컨테이너 안에서 이미 진행 중인 워커 초기화가 안 끝났다면 이후 호출은 재대기 없이 즉시 폴백하도록 변경.
-**상태**: 완화됨(184초 → 21.7초 → 9.76초, 프로덕션에서 직접 재측정 확인). 근본 해결은 아님 — 콜드 컨테이너에서는 이 기능이 사실상 항상 6초 지연만 추가하고 작동하지 않을 가능성이 높음(재검토 필요).
+**추가 대응**: 픽셀 행 검출을 OCR보다 먼저 실행하고, OCR 전체 예산을 2.5초로 축소했으며, 동일 이미지·크롭의 OCR 결과를 캐시한다.
+**상태**: 완화됨(184초 → 21.7초 → 9.76초 측정 이후 추가 조정). 후속 배포에서 처리 시간과 실제 행 보정 효과를 재측정해야 한다.
+
+## 11. 종이 경계 불확실 상태에서 ROI 값 자동 확정
+
+**원인**: `detectFrameBounds`가 실패해 `detectDarkPixelBounds`로 대체된 경우에도 `recognizeStudentForms`가 정규화 ROI를 계속 채점했다. 후보 점수만 우연히 높아져도 실제 위치와 다른 값이 자동 확정될 가능성이 있었다.
+**대응**: 프레임 크기·여백·종횡비 검증을 추가하고, `contentBoundsConfident === false`이면 후보 점수와 low confidence만 전달한다. 자동값은 확정하지 않으며 검수 화면에 원본 대조 안내를 표시한다. 조기개입 ROI 감지도 같은 조건에서 건너뛴다.
+**상태**: 코드 및 합성 회귀 테스트 완료. 실제 휴대폰 사진과 배포본에서는 재검증 필요.
+
+## 12. 실사용 촬영 이미지에서 원근 보정 후에도 문서 좌표가 어긋남
+
+**재현 샘플**: 사용자가 제공한 `만족도조사.jpg`, `선별검사지.jpg`와 결과 화면.
+
+**관찰**: 두 사진 모두 문서 전체가 대체로 프레임 안에 있으나 기울기, 그림자, 낮은 외곽선 대비, 종이 휨이 함께 있다. 결과 화면에서 기본정보 일부가 비어 있거나 잘못 선택되고, CAGI 문항 crop이 실제 문항 행과 일치하지 않는다.
+
+**추정 원인**: 현재 보정은 Canny/contour에서 가장 큰 convex 4점 사각형 하나를 선택한다. 문서 내부 표가 페이지 외곽보다 선명하거나 페이지 외곽이 끊기면 내부 사각형을 문서로 선택할 수 있다. 보정 결과가 생성되면 후보 품질 점수와 템플릿 일치 검증 없이 사용되며, homography는 종이 휨과 렌즈 왜곡을 해결하지 못한다.
+
+**대응 방향**: 문서 외곽 후보를 여러 개 생성하고 템플릿 종횡비·각도·면적·변 연속성·여백·내부 표와의 구분으로 점수화한다. 저신뢰 결과는 자동 확정하지 않고 재촬영 또는 네 모서리 수동 조정으로 보낸다. 카메라 경로에는 안정 프레임 기반 자동 촬영을 보조 기능으로 추가한다.
+
+**상태**: 원인 범주와 설계 방향 분석 완료. 후보 점수화, 품질 게이트, 수동 조정, 자동 촬영은 후속 구현 및 실사용 샘플 검증이 필요하다. 세부 내용은 [Docs/14_DOCUMENT_SCAN_STRATEGY_REVIEW.md](14_DOCUMENT_SCAN_STRATEGY_REVIEW.md)를 참고한다.

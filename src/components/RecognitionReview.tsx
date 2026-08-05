@@ -353,6 +353,13 @@ export default function RecognitionReview({
         </div>
       )}
 
+      {draft.warnings?.map((warning) => (
+        <div key={warning} className="notice" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <strong>자동 인식 안내</strong>
+          <span>{warning}</span>
+        </div>
+      ))}
+
       {renderSourcePreview()}
 
       <div>

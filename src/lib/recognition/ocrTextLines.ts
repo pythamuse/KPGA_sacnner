@@ -8,6 +8,10 @@ export interface OcrTextLine {
   confidence: number;
 }
 
+export interface OcrOptions {
+  deadlineAt?: number;
+}
+
 const MIN_CONFIDENCE = 30;
 const MIN_LINE_HEIGHT = 6;
 const GROUP_DISTANCE_PX = 8;
@@ -20,11 +24,12 @@ const GROUP_DISTANCE_PX = 8;
 // creation + recognition together; if it's not done in time, this silently returns []
 // and the caller falls back to the existing pixel-line detector, exactly as on any other
 // OCR failure.
-const OCR_TOTAL_TIMEOUT_MS = 6_000;
+const OCR_TOTAL_TIMEOUT_MS = 2_500;
 const OCR_CACHE_PATH = path.join(os.tmpdir(), 'gambling-prevention-tesseract-cache');
 
 let workerPromise: Promise<Worker> | null = null;
 let workerReady = false;
+const ocrResultCache = new WeakMap<Buffer, Map<string, Promise<OcrTextLine[]>>>();
 
 export async function detectOcrTextLines(
   imageBuffer: Buffer,
@@ -34,6 +39,7 @@ export async function detectOcrTextLines(
   searchBottom: number,
   xLeft: number,
   xRight: number,
+  options?: OcrOptions,
 ): Promise<OcrTextLine[]> {
   try {
     if (!Buffer.isBuffer(imageBuffer) || imageWidth <= 0 || imageHeight <= 0) {
@@ -55,7 +61,28 @@ export async function detectOcrTextLines(
       return [];
     }
 
-    return await withTimeout(recognizeCrop(imageBuffer, crop), OCR_TOTAL_TIMEOUT_MS);
+    let imageCache = ocrResultCache.get(imageBuffer);
+    if (!imageCache) {
+      imageCache = new Map();
+      ocrResultCache.set(imageBuffer, imageCache);
+    }
+
+    const cacheKey = `${crop.left}:${crop.top}:${crop.width}:${crop.height}`;
+    const remainingMs = options?.deadlineAt
+      ? Math.min(OCR_TOTAL_TIMEOUT_MS, options.deadlineAt - Date.now())
+      : OCR_TOTAL_TIMEOUT_MS;
+
+    if (remainingMs <= 0) {
+      return [];
+    }
+
+    let recognition = imageCache.get(cacheKey);
+    if (!recognition) {
+      recognition = recognizeCrop(imageBuffer, crop);
+      imageCache.set(cacheKey, recognition);
+    }
+
+    return await withTimeout(recognition, remainingMs);
   } catch {
     return [];
   }

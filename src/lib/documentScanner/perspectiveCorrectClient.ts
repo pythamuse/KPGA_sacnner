@@ -1,19 +1,51 @@
-type WorkerRequest = {
-  type: 'correct';
-  requestId: string;
-  imageData: ImageData;
-  outputWidth: number;
-  outputHeight: number;
-};
+export type PerspectiveCorrectionReason =
+  | 'no-document'
+  | 'low-confidence'
+  | 'timeout'
+  | 'worker-error';
+
+export interface PerspectiveCorrectionResult {
+  status: 'corrected' | 'skipped';
+  method: 'perspective' | 'deskew' | 'none';
+  confidence: number;
+  blob: Blob | null;
+  reason?: PerspectiveCorrectionReason;
+}
+
+type WorkerRequest =
+  | { type: 'warmup'; requestId: string }
+  | {
+    type: 'correct';
+    requestId: string;
+    imageData: ImageData;
+    outputWidth: number;
+    outputHeight: number;
+    expectedAspectRatio: number;
+    minimumConfidence: number;
+  };
 
 type WorkerResponse =
-  | { type: 'result'; requestId: string; ok: true; blob: Blob }
-  | { type: 'result'; requestId: string; ok: false };
+  | { type: 'ready'; requestId: string }
+  | {
+    type: 'result';
+    requestId: string;
+    ok: true;
+    blob: Blob;
+    confidence: number;
+    method: 'perspective' | 'deskew';
+  }
+  | {
+    type: 'result';
+    requestId: string;
+    ok: false;
+    confidence: number;
+    reason: 'no-document' | 'low-confidence' | 'worker-error';
+  };
 
 type InFlightRequest = {
   worker: Worker;
   timeoutId: ReturnType<typeof setTimeout>;
-  resolve: (blob: Blob | null) => void;
+  resolve: (response: WorkerResponse | null) => void;
 };
 
 let workerInstance: Worker | null = null;
@@ -29,7 +61,7 @@ function createRequestId(): string {
   return `${Date.now()}-${requestCounter}`;
 }
 
-function settleRequest(requestId: string, blob: Blob | null) {
+function settleRequest(requestId: string, response: WorkerResponse | null) {
   const request = inFlightRequests.get(requestId);
   if (!request) {
     return;
@@ -37,7 +69,7 @@ function settleRequest(requestId: string, blob: Blob | null) {
 
   clearTimeout(request.timeoutId);
   inFlightRequests.delete(requestId);
-  request.resolve(blob);
+  request.resolve(response);
 }
 
 function terminateWorker(worker: Worker) {
@@ -55,8 +87,7 @@ function terminateWorker(worker: Worker) {
     }
   });
 
-  for (let i = 0; i < requestIdsToSettle.length; i++) {
-    const requestId = requestIdsToSettle[i];
+  for (const requestId of requestIdsToSettle) {
     const request = inFlightRequests.get(requestId);
     if (!request) {
       continue;
@@ -81,11 +112,11 @@ function getWorker(): Worker | null {
 
   worker.addEventListener('message', (event: MessageEvent<WorkerResponse>) => {
     const message = event.data;
-    if (message?.type !== 'result') {
+    if (!message || (message.type !== 'ready' && message.type !== 'result')) {
       return;
     }
 
-    settleRequest(message.requestId, message.ok ? message.blob : null);
+    settleRequest(message.requestId, message);
   });
 
   worker.addEventListener('error', () => {
@@ -93,51 +124,20 @@ function getWorker(): Worker | null {
   });
 
   workerInstance = worker;
-  return workerInstance;
+  return worker;
 }
 
-export function correctImageInWorker(
-  bitmapSource: HTMLCanvasElement,
-  outputWidth: number,
-  outputHeight: number,
+function requestWorker(
+  worker: Worker,
+  message: WorkerRequest,
   timeoutMs: number,
-): Promise<Blob | null> {
-  if (typeof window === 'undefined') {
-    return Promise.resolve(null);
-  }
-
-  const worker = getWorker();
-  if (!worker) {
-    return Promise.resolve(null);
-  }
-
-  const context = bitmapSource.getContext('2d');
-  if (!context) {
-    return Promise.resolve(null);
-  }
-
-  let imageData: ImageData;
-  try {
-    imageData = context.getImageData(0, 0, bitmapSource.width, bitmapSource.height);
-  } catch {
-    return Promise.resolve(null);
-  }
-
-  const requestId = createRequestId();
-  const message: WorkerRequest = {
-    type: 'correct',
-    requestId,
-    imageData,
-    outputWidth,
-    outputHeight,
-  };
-
+): Promise<WorkerResponse | null> {
   return new Promise((resolve) => {
     const timeoutId = setTimeout(() => {
       terminateWorker(worker);
     }, timeoutMs);
 
-    inFlightRequests.set(requestId, {
+    inFlightRequests.set(message.requestId, {
       worker,
       timeoutId,
       resolve,
@@ -149,4 +149,106 @@ export function correctImageInWorker(
       terminateWorker(worker);
     }
   });
+}
+
+export async function warmupPerspectiveWorker(timeoutMs = 9000): Promise<boolean> {
+  if (typeof window === 'undefined') {
+    return false;
+  }
+
+  const worker = getWorker();
+  if (!worker) {
+    return false;
+  }
+
+  const response = await requestWorker(worker, {
+    type: 'warmup',
+    requestId: createRequestId(),
+  }, timeoutMs);
+
+  return response?.type === 'ready';
+}
+
+export async function correctImageInWorkerDetailed(
+  bitmapSource: HTMLCanvasElement,
+  outputWidth: number,
+  outputHeight: number,
+  timeoutMs: number,
+  minimumConfidence = 0.58,
+): Promise<PerspectiveCorrectionResult> {
+  const skipped = (reason: PerspectiveCorrectionReason, confidence = 0): PerspectiveCorrectionResult => ({
+    status: 'skipped',
+    method: 'none',
+    confidence,
+    blob: null,
+    reason,
+  });
+
+  if (typeof window === 'undefined') {
+    return skipped('worker-error');
+  }
+
+  const worker = getWorker();
+  if (!worker) {
+    return skipped('worker-error');
+  }
+
+  const context = bitmapSource.getContext('2d');
+  if (!context) {
+    return skipped('worker-error');
+  }
+
+  let imageData: ImageData;
+  try {
+    imageData = context.getImageData(0, 0, bitmapSource.width, bitmapSource.height);
+  } catch {
+    return skipped('worker-error');
+  }
+
+  const response = await requestWorker(worker, {
+    type: 'correct',
+    requestId: createRequestId(),
+    imageData,
+    outputWidth,
+    outputHeight,
+    expectedAspectRatio: outputHeight / outputWidth,
+    minimumConfidence,
+  }, timeoutMs);
+
+  if (!response) {
+    return skipped('timeout');
+  }
+
+  if (response.type !== 'result') {
+    return skipped('worker-error');
+  }
+
+  if (!response.ok) {
+    return skipped(response.reason, response.confidence);
+  }
+
+  return {
+    status: 'corrected',
+    method: response.method,
+    confidence: response.confidence,
+    blob: response.blob,
+  };
+}
+
+export async function correctImageInWorker(
+  bitmapSource: HTMLCanvasElement,
+  outputWidth: number,
+  outputHeight: number,
+  timeoutMs: number,
+  minimumConfidence = 0.58,
+): Promise<Blob | null> {
+  const result = await correctImageInWorkerDetailed(
+    bitmapSource,
+    outputWidth,
+    outputHeight,
+    timeoutMs,
+    minimumConfidence,
+  );
+
+  return result.blob;
 }

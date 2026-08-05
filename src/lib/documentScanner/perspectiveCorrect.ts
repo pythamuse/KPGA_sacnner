@@ -3,6 +3,15 @@ export interface Point {
   y: number;
 }
 
+export interface QuadQuality {
+  points: Point[];
+  areaRatio: number;
+  aspectRatio: number;
+  confidence: number;
+  angleScore: number;
+  edgeConsistency: number;
+}
+
 export function detectDocumentQuad(cv: any, canvas: HTMLCanvasElement): Point[] | null {
   const source = cv.imread(canvas);
   const gray = new cv.Mat();
@@ -71,30 +80,137 @@ export function orderQuadPoints(points: Point[]): Point[] {
     throw new Error('orderQuadPoints requires exactly 4 points.');
   }
 
-  let topLeft = points[0];
-  let topRight = points[0];
-  let bottomRight = points[0];
-  let bottomLeft = points[0];
+  const center = points.reduce(
+    (sum, point) => ({ x: sum.x + point.x / points.length, y: sum.y + point.y / points.length }),
+    { x: 0, y: 0 },
+  );
+  const sorted = [...points].sort((a, b) => (
+    Math.atan2(a.y - center.y, a.x - center.x) - Math.atan2(b.y - center.y, b.x - center.x)
+  ));
+  let topLeftIndex = 0;
 
-  for (const point of points) {
-    const sum = point.x + point.y;
-    const diff = point.y - point.x;
-
-    if (sum < topLeft.x + topLeft.y) {
-      topLeft = point;
-    }
-    if (sum > bottomRight.x + bottomRight.y) {
-      bottomRight = point;
-    }
-    if (diff < topRight.y - topRight.x) {
-      topRight = point;
-    }
-    if (diff > bottomLeft.y - bottomLeft.x) {
-      bottomLeft = point;
+  for (let i = 1; i < sorted.length; i++) {
+    if (sorted[i].x + sorted[i].y < sorted[topLeftIndex].x + sorted[topLeftIndex].y) {
+      topLeftIndex = i;
     }
   }
 
-  return [topLeft, topRight, bottomRight, bottomLeft];
+  return [0, 1, 2, 3].map((offset) => sorted[(topLeftIndex + offset) % sorted.length]);
+}
+
+export function evaluateQuad(
+  points: Point[],
+  imageWidth: number,
+  imageHeight: number,
+  expectedAspectRatio: number,
+): QuadQuality | null {
+  if (points.length !== 4 || imageWidth <= 0 || imageHeight <= 0 || expectedAspectRatio <= 0) {
+    return null;
+  }
+
+  const ordered = orderQuadPoints(points);
+  if (!isConvexQuad(ordered)) {
+    return null;
+  }
+
+  const [topLeft, topRight, bottomRight, bottomLeft] = ordered;
+  const topWidth = distance(topLeft, topRight);
+  const bottomWidth = distance(bottomLeft, bottomRight);
+  const leftHeight = distance(topLeft, bottomLeft);
+  const rightHeight = distance(topRight, bottomRight);
+  const averageWidth = (topWidth + bottomWidth) / 2;
+  const averageHeight = (leftHeight + rightHeight) / 2;
+
+  if (averageWidth <= 0 || averageHeight <= 0) {
+    return null;
+  }
+
+  const areaRatio = polygonArea(ordered) / (imageWidth * imageHeight);
+  const aspectRatio = averageHeight / averageWidth;
+  const widthConsistency = Math.min(topWidth, bottomWidth) / Math.max(topWidth, bottomWidth);
+  const heightConsistency = Math.min(leftHeight, rightHeight) / Math.max(leftHeight, rightHeight);
+  const edgeConsistency = (widthConsistency + heightConsistency) / 2;
+  const angleScore = ordered.reduce((score, _, index) => {
+    const previous = ordered[(index + 3) % 4];
+    const current = ordered[index];
+    const next = ordered[(index + 1) % 4];
+    const first = { x: previous.x - current.x, y: previous.y - current.y };
+    const second = { x: next.x - current.x, y: next.y - current.y };
+    const denominator = Math.hypot(first.x, first.y) * Math.hypot(second.x, second.y);
+
+    if (denominator === 0) {
+      return score;
+    }
+
+    const cosine = clamp((first.x * second.x + first.y * second.y) / denominator, -1, 1);
+    const angle = Math.acos(cosine) * (180 / Math.PI);
+    return score + clamp(1 - Math.abs(90 - angle) / 90, 0, 1);
+  }, 0) / 4;
+  const areaScore = clamp((areaRatio - 0.18) / 0.52, 0, 1);
+  const aspectScore = clamp(
+    1 - Math.abs(Math.log(aspectRatio / expectedAspectRatio)) / Math.log(1.9),
+    0,
+    1,
+  );
+  const confidence = clamp(
+    areaScore * 0.35 + aspectScore * 0.3 + edgeConsistency * 0.2 + angleScore * 0.15,
+    0,
+    1,
+  );
+
+  return {
+    points: ordered,
+    areaRatio,
+    aspectRatio,
+    confidence,
+    angleScore,
+    edgeConsistency,
+  };
+}
+
+function isConvexQuad(points: Point[]): boolean {
+  let sign = 0;
+
+  for (let i = 0; i < points.length; i++) {
+    const current = points[i];
+    const next = points[(i + 1) % points.length];
+    const following = points[(i + 2) % points.length];
+    const cross = (next.x - current.x) * (following.y - next.y) -
+      (next.y - current.y) * (following.x - next.x);
+
+    if (cross === 0) {
+      return false;
+    }
+
+    const currentSign = cross > 0 ? 1 : -1;
+    if (sign === 0) {
+      sign = currentSign;
+    } else if (sign !== currentSign) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function polygonArea(points: Point[]): number {
+  let sum = 0;
+
+  for (let i = 0; i < points.length; i++) {
+    const current = points[i];
+    const next = points[(i + 1) % points.length];
+    sum += current.x * next.y - next.x * current.y;
+  }
+
+  return Math.abs(sum) / 2;
+}
+
+function distance(first: Point, second: Point): number {
+  return Math.hypot(first.x - second.x, first.y - second.y);
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
 }
 
 export function warpToRectangle(
