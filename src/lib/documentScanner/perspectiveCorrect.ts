@@ -129,9 +129,24 @@ export function evaluateQuad(
   // large enough to plausibly be the page before it is allowed to drive a
   // perspective warp. Otherwise an inner table may be stretched into a
   // page-sized image and later confuse the server-side form classifier.
-  const widthCoverage = averageWidth / imageWidth;
-  const heightCoverage = averageHeight / imageHeight;
-  if (widthCoverage < 0.55 || heightCoverage < 0.7) {
+  const left = Math.min(...ordered.map((point) => point.x));
+  const right = Math.max(...ordered.map((point) => point.x));
+  const top = Math.min(...ordered.map((point) => point.y));
+  const bottom = Math.max(...ordered.map((point) => point.y));
+  const widthCoverage = (right - left) / imageWidth;
+  const heightCoverage = (bottom - top) / imageHeight;
+
+  // Keep the client-side correction gate aligned with the server-side frame
+  // gate. A wide internal table can look rectangular, but it must not be
+  // stretched into a full page and then drive fixed ROI classification.
+  if (
+    widthCoverage < 0.7 ||
+    heightCoverage < 0.78 ||
+    left > imageWidth * 0.2 ||
+    right < imageWidth * 0.8 ||
+    top > imageHeight * 0.2 ||
+    bottom < imageHeight * 0.8
+  ) {
     return null;
   }
 

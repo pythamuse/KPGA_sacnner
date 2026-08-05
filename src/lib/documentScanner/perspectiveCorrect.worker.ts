@@ -27,7 +27,7 @@ type CorrectResponse =
     ok: true;
     blob: Blob;
     confidence: number;
-    method: 'perspective' | 'deskew';
+    method: 'perspective';
   }
   | {
     type: 'result';
@@ -92,7 +92,7 @@ function detectDocumentQuadFromMat(
   imageWidth: number,
   imageHeight: number,
   expectedAspectRatio: number,
-): { quality: QuadQuality | null; deskewAngle: number } {
+): QuadQuality | null {
   const gray = new cv.Mat();
   const blurred = new cv.Mat();
   const detectionMaps: any[] = [];
@@ -138,72 +138,11 @@ function detectDocumentQuadFromMat(
       }
     }
 
-    return {
-      quality: best,
-      deskewAngle: estimateDeskewAngle(cv, detectionMaps[0], imageWidth, imageHeight),
-    };
+    return best;
   } finally {
     detectionMaps.forEach((detectionMap) => detectionMap.delete());
     blurred.delete();
     gray.delete();
-  }
-}
-
-function estimateDeskewAngle(cv: any, edges: any, imageWidth: number, imageHeight: number): number {
-  if (!edges || typeof cv.HoughLinesP !== 'function') {
-    return 0;
-  }
-
-  const lines = new cv.Mat();
-
-  try {
-    cv.HoughLinesP(
-      edges,
-      lines,
-      1,
-      Math.PI / 180,
-      Math.max(30, Math.round(Math.min(imageWidth, imageHeight) * 0.12)),
-      Math.max(40, Math.round(Math.min(imageWidth, imageHeight) * 0.25)),
-      Math.max(8, Math.round(Math.min(imageWidth, imageHeight) * 0.03)),
-    );
-
-    let weightedAngle = 0;
-    let totalWeight = 0;
-
-    for (let i = 0; i < lines.rows; i++) {
-      const x1 = lines.data32S[i * 4];
-      const y1 = lines.data32S[i * 4 + 1];
-      const x2 = lines.data32S[i * 4 + 2];
-      const y2 = lines.data32S[i * 4 + 3];
-      const length = Math.hypot(x2 - x1, y2 - y1);
-
-      if (length <= 0) {
-        continue;
-      }
-
-      let angle = Math.atan2(y2 - y1, x2 - x1) * (180 / Math.PI);
-      while (angle > 90) angle -= 180;
-      while (angle < -90) angle += 180;
-      if (angle > 45) angle -= 90;
-      if (angle < -45) angle += 90;
-
-      if (Math.abs(angle) > 12) {
-        continue;
-      }
-
-      weightedAngle += angle * length;
-      totalWeight += length;
-    }
-
-    if (totalWeight === 0) {
-      return 0;
-    }
-
-    return Math.max(-12, Math.min(12, weightedAngle / totalWeight));
-  } catch {
-    return 0;
-  } finally {
-    lines.delete();
   }
 }
 
@@ -315,56 +254,6 @@ async function warpToBlob(
   }
 }
 
-async function deskewToBlob(
-  cv: any,
-  source: any,
-  angle: number,
-  outputWidth: number,
-  outputHeight: number,
-): Promise<Blob> {
-  const sourceWidth = source.cols;
-  const sourceHeight = source.rows;
-  const radians = Math.abs(angle) * (Math.PI / 180);
-  const rotatedWidth = Math.max(
-    1,
-    Math.round(sourceWidth * Math.cos(radians) + sourceHeight * Math.sin(radians)),
-  );
-  const rotatedHeight = Math.max(
-    1,
-    Math.round(sourceHeight * Math.cos(radians) + sourceWidth * Math.sin(radians)),
-  );
-  const center = new cv.Point(sourceWidth / 2, sourceHeight / 2);
-  const transform = cv.getRotationMatrix2D(center, -angle, 1);
-  const rotated = new cv.Mat();
-  const resized = new cv.Mat();
-
-  try {
-    const transformData = transform.data64F || transform.data32F;
-    if (!transformData) {
-      throw new Error('Unable to read the affine transform matrix.');
-    }
-
-    transformData[2] += (rotatedWidth - sourceWidth) / 2;
-    transformData[5] += (rotatedHeight - sourceHeight) / 2;
-    cv.warpAffine(
-      source,
-      rotated,
-      transform,
-      new cv.Size(rotatedWidth, rotatedHeight),
-      cv.INTER_LINEAR,
-      cv.BORDER_REPLICATE,
-      new cv.Scalar(),
-    );
-    cv.resize(rotated, resized, new cv.Size(outputWidth, outputHeight), 0, 0, cv.INTER_AREA);
-
-    return await matToBlob(cv, resized, outputWidth, outputHeight);
-  } finally {
-    resized.delete();
-    rotated.delete();
-    transform.delete();
-  }
-}
-
 async function matToBlob(cv: any, mat: any, outputWidth: number, outputHeight: number): Promise<Blob> {
   const canvas = new OffscreenCanvas(outputWidth, outputHeight);
   const context = canvas.getContext('2d');
@@ -397,21 +286,19 @@ async function detectAndWarp(
   expectedAspectRatio: number,
   minimumConfidence: number,
 ): Promise<
-  | { found: true; blob: Blob; confidence: number; method: 'perspective' | 'deskew' }
+  | { found: true; blob: Blob; confidence: number; method: 'perspective' }
   | { found: false; confidence: number; reason: 'no-document' | 'low-confidence' }
 > {
   const source = cv.matFromImageData(imageData);
 
   try {
-    const detection = detectDocumentQuadFromMat(
+    const quality = detectDocumentQuadFromMat(
       cv,
       source,
       imageData.width,
       imageData.height,
       expectedAspectRatio,
     );
-    const quality = detection.quality;
-
     if (quality && quality.confidence >= minimumConfidence) {
       return {
         found: true,
@@ -421,21 +308,9 @@ async function detectAndWarp(
       };
     }
 
-    if (Math.abs(detection.deskewAngle) >= 0.6 && Math.abs(detection.deskewAngle) <= 12) {
-      return {
-        found: true,
-        confidence: Math.max(quality?.confidence || 0.55, 0.55),
-        method: 'deskew',
-        blob: await deskewToBlob(
-          cv,
-          source,
-          detection.deskewAngle,
-          outputWidth,
-          outputHeight,
-        ),
-      };
-    }
-
+    // Do not deskew from arbitrary long lines. Form tables have prominent
+    // horizontal edges, and rotating/resizing from those untrusted lines can
+    // turn an inner table into a page-sized image that pollutes form typing.
     if (!quality) {
       return { found: false, confidence: 0, reason: 'no-document' };
     }

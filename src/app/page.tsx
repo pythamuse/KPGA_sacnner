@@ -111,7 +111,7 @@ function BrandHeader() {
           whiteSpace: 'nowrap',
         }}
       >
-        테스트 버전 v2026-08-05.4
+        테스트 버전 v2026-08-05.5
       </span>
     </div>
   );
@@ -160,6 +160,52 @@ export default function Home() {
     }
   };
 
+  const requestRecognition = async () => {
+    if (!jobId) return;
+
+    setIsRecognizing(true);
+    setErrors([]);
+    setNotices([]);
+
+    let trustUploadedTypes = false;
+
+    try {
+      while (true) {
+        const res = await fetch('/api/recognize', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ jobId, trustUploadedTypes }),
+        });
+        const data = await res.json();
+
+        if (!res.ok) {
+          if (!trustUploadedTypes && data.code === 'FORM_TYPE_MISMATCH' && data.canProceedWithUploadedTypes) {
+            const shouldUseUploadedTypes = window.confirm(
+              '자동 양식 판정과 선택한 업로드 칸이 다릅니다.\n\n사진 보정 결과가 불확실할 수 있습니다. 선택한 업로드 칸을 기준으로 검수 화면으로 계속 진행하시겠습니까?',
+            );
+
+            if (shouldUseUploadedTypes) {
+              trustUploadedTypes = true;
+              continue;
+            }
+          }
+
+          setErrors([{ code: data.code || 'RECOGNIZE_ERROR', message: data.error }]);
+          return;
+        }
+
+        setDrafts(data.studentDrafts);
+        setNotices(data.warnings || []);
+        setCurrentDraftIndex(0);
+        return;
+      }
+    } catch (err: any) {
+      setErrors([{ code: 'API_ERROR', message: `이미지 인식 요청 오류: ${err.message}` }]);
+    } finally {
+      setIsRecognizing(false);
+    }
+  };
+
   const handleSequentialUploadSuccess = async (type: 'cagi' | 'satisfaction', imageId: string) => {
     let currentCagi = cagiImageId;
     let currentSat = satImageId;
@@ -173,62 +219,14 @@ export default function Home() {
     }
 
     if (currentCagi && currentSat && jobId) {
-      setIsRecognizing(true);
-      setErrors([]);
-      setNotices([]);
-      try {
-        const res = await fetch('/api/recognize', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ jobId }),
-        });
-
-        const data = await res.json();
-
-        if (!res.ok) {
-          setErrors([{ code: data.code || 'RECOGNIZE_ERROR', message: data.error }]);
-          return;
-        }
-
-        setDrafts(data.studentDrafts);
-        setNotices(data.warnings || []);
-        setCurrentDraftIndex(0);
-      } catch (err: any) {
-        setErrors([{ code: 'API_ERROR', message: `이미지 인식 요청 오류: ${err.message}` }]);
-      } finally {
-        setIsRecognizing(false);
-      }
+      await requestRecognition();
     }
   };
 
   const handleTriggerBatchAnalysis = async () => {
     if (!jobId) return;
 
-    setIsRecognizing(true);
-    setErrors([]);
-    setNotices([]);
-    try {
-      const res = await fetch('/api/recognize', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jobId }),
-      });
-
-      const data = await res.json();
-
-      if (!res.ok) {
-        setErrors([{ code: data.code || 'RECOGNIZE_ERROR', message: data.error }]);
-        return;
-      }
-
-      setDrafts(data.studentDrafts);
-      setNotices(data.warnings || []);
-      setCurrentDraftIndex(0);
-    } catch (err: any) {
-      setErrors([{ code: 'API_ERROR', message: `일괄 이미지 분석 오류: ${err.message}` }]);
-    } finally {
-      setIsRecognizing(false);
-    }
+    await requestRecognition();
   };
 
   const handleDraftChange = (updatedDraft: RecognitionDraft) => {

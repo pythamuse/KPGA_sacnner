@@ -60,6 +60,7 @@ describe('인식 API 양식 칸 불일치 감지', () => {
     const body = await response.json();
     expect(body.code).toBe('FORM_TYPE_MISMATCH');
     expect(body.recognitionPolicyVersion).toBe(FORM_CLASSIFIER_POLICY_VERSION);
+    expect(body.canProceedWithUploadedTypes).toBe(true);
     expect(body.mismatches).toEqual([
       {
         filename: 'cagi_wrong_bucket.png',
@@ -67,6 +68,33 @@ describe('인식 API 양식 칸 불일치 감지', () => {
         detectedAs: 'satisfaction',
       },
     ]);
+  });
+
+  it('uses the selected upload bucket only after the explicit override flag is provided', async () => {
+    const jobResponse = await jobsPOST();
+    const { jobId } = await jobResponse.json();
+    const jobDir = getJobDir(jobId);
+    createdJobDirs.push(jobDir);
+
+    const uploadDir = path.join(jobDir, 'uploads');
+    fs.mkdirSync(uploadDir, { recursive: true });
+    await writeSyntheticForm(path.join(uploadDir, 'cagi_override_bucket.png'), satisfactionGroups);
+
+    const req = new Request('http://localhost/api/recognize', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jobId, trustUploadedTypes: true }),
+    });
+
+    const response = await recognizePOST(req as any);
+    expect(response.status).toBe(400);
+
+    const body = await response.json();
+    expect(body.code).toBe('COUNT_MISMATCH');
+    expect(body.cagiCount).toBe(1);
+    expect(body.satisfactionCount).toBe(0);
+    expect(body.warnings).toHaveLength(1);
+    expect(body.warnings[0]).toContain('업로드 칸');
   });
 });
 

@@ -86,6 +86,22 @@ describe('evaluateQuad', () => {
     expect(innerTable).toBeNull();
   });
 
+  it('rejects a page-sized candidate that does not reach the left page edge', () => {
+    const shiftedTable = evaluateQuad(
+      [
+        { x: 150, y: 40 },
+        { x: 590, y: 40 },
+        { x: 590, y: 760 },
+        { x: 150, y: 760 },
+      ],
+      600,
+      800,
+      656 / 474,
+    );
+
+    expect(shiftedTable).toBeNull();
+  });
+
   it('rejects a degenerate four-point candidate', () => {
     expect(evaluateQuad(
       [

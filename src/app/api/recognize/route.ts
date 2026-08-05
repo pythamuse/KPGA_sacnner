@@ -18,7 +18,7 @@ export function GET() {
 
 export async function POST(req: Request) {
   try {
-    const { jobId } = await req.json();
+    const { jobId, trustUploadedTypes = false } = await req.json();
 
     if (!jobId) {
       return NextResponse.json({ error: '필수 파라미터(jobId)가 누락되었습니다.' }, { status: 400 });
@@ -53,6 +53,7 @@ export async function POST(req: Request) {
       uploadedAs: 'cagi' | 'satisfaction';
       detectedAs: 'cagi' | 'satisfaction';
     }> = [];
+    const formTypeOverrideWarnings: string[] = [];
     const earlyInterventionFilenames = new Set<string>();
 
     await Promise.all(
@@ -72,21 +73,33 @@ export async function POST(req: Request) {
           formType === 'satisfaction' &&
           hasEarlyInterventionMarks;
 
-        if (
+        const hasFormTypeMismatch = Boolean(
           uploadedAs &&
           formType !== 'unknown' &&
           uploadedAs !== formType &&
-          !shouldKeepAsCagiWithNotice
-        ) {
+          !shouldKeepAsCagiWithNotice,
+        );
+
+        if (hasFormTypeMismatch && !trustUploadedTypes) {
           typeMismatches.push({
             filename,
-            uploadedAs,
-            detectedAs: formType,
+            uploadedAs: uploadedAs!,
+            detectedAs: formType as 'cagi' | 'satisfaction',
           });
           return;
         }
 
-        const effectiveFormType = shouldKeepAsCagiWithNotice ? 'cagi' : formType;
+        if (hasFormTypeMismatch && trustUploadedTypes) {
+          formTypeOverrideWarnings.push(
+            buildUploadedTypeOverrideWarning(filename, uploadedAs!, formType as 'cagi' | 'satisfaction'),
+          );
+        }
+
+        const effectiveFormType = shouldKeepAsCagiWithNotice
+          ? 'cagi'
+          : hasFormTypeMismatch && trustUploadedTypes
+            ? uploadedAs!
+            : formType;
 
         if (effectiveFormType === 'cagi') {
           cagiPaths.push(filePath);
@@ -106,6 +119,7 @@ export async function POST(req: Request) {
         code: 'FORM_TYPE_MISMATCH',
         recognitionPolicyVersion: FORM_CLASSIFIER_POLICY_VERSION,
         mismatches: typeMismatches,
+        canProceedWithUploadedTypes: true,
       }, { status: 400 });
     }
 
@@ -115,7 +129,9 @@ export async function POST(req: Request) {
         error: `업로드된 파일의 장수가 일치하지 않습니다. (선별검사지: ${cagiCount}장, 만족도조사: ${satisfactionCount}장). 누락된 사진이 없는지 확인해주세요.`,
         code: 'COUNT_MISMATCH',
         cagiCount,
-        satisfactionCount
+        satisfactionCount,
+        warnings: [...earlyInterventionWarnings, ...formTypeOverrideWarnings],
+        recognitionPolicyVersion: FORM_CLASSIFIER_POLICY_VERSION,
       }, { status: 400 });
     }
 
@@ -165,7 +181,7 @@ export async function POST(req: Request) {
 
     return NextResponse.json({
       studentDrafts,
-      warnings: earlyInterventionWarnings,
+      warnings: [...earlyInterventionWarnings, ...formTypeOverrideWarnings],
       recognitionPolicyVersion: FORM_CLASSIFIER_POLICY_VERSION,
     });
 
@@ -226,4 +242,15 @@ function buildFormTypeMismatchMessage(
   }
 
   return `업로드 칸과 이미지 내용이 다른 파일이 ${mismatches.length}개 있습니다. 첫 번째 문제 파일: ${first.filename} (${uploadedLabel} 칸, 실제 내용은 ${detectedLabel} 양식).`;
+}
+
+function buildUploadedTypeOverrideWarning(
+  filename: string,
+  uploadedAs: 'cagi' | 'satisfaction',
+  detectedAs: 'cagi' | 'satisfaction',
+): string {
+  const uploadedLabel = uploadedAs === 'cagi' ? '선별검사지' : '만족도조사';
+  const detectedLabel = detectedAs === 'cagi' ? '선별검사지' : '만족도조사';
+
+  return `${filename}: 자동 양식 판정(${detectedLabel}) 대신 선택한 업로드 칸(${uploadedLabel})을 적용했습니다. 검수 화면에서 원본 이미지와 인식 결과를 확인하세요.`;
 }
