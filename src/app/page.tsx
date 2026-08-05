@@ -92,7 +92,7 @@ function UploadModeSelector({ onStart }: { onStart: (mode: UploadMode) => void }
 
 function BrandHeader() {
   return (
-    <div className="brand-header">
+    <div className="brand-header" style={{ justifyContent: 'space-between' }}>
       <div className="brand-lockup" aria-label="한국도박문제예방치유원">
         <span className="brand-mark" aria-hidden="true" />
         <div>
@@ -100,6 +100,19 @@ function BrandHeader() {
           <div className="brand-subtitle">Korea Problem Gambling Agency</div>
         </div>
       </div>
+      {/* QA marker: remove this HTML block after final acceptance. */}
+      <span
+        aria-label="테스트 버전"
+        style={{
+          color: 'var(--text-muted)',
+          fontSize: 11,
+          fontWeight: 700,
+          letterSpacing: '0.08em',
+          whiteSpace: 'nowrap',
+        }}
+      >
+        테스트 버전 v2026-08-05.4
+      </span>
     </div>
   );
 }
