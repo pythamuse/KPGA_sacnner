@@ -1,6 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { withTimeout } from '@/lib/pdf/withTimeout';
-import { correctImageInWorker } from '@/lib/documentScanner/perspectiveCorrectClient';
+import {
+  correctImageInWorker,
+  correctImageInWorkerDetailed,
+  warmupPerspectiveWorker,
+} from '@/lib/documentScanner/perspectiveCorrectClient';
 import { cagiTemplate, satisfactionTemplate } from '@/lib/recognition/roiTemplates';
 
 export type UploadMode = 'sequential' | 'batch';
@@ -15,10 +19,28 @@ interface ImageUploadPanelProps {
 
 type UploadKind = 'cagi' | 'satisfaction';
 
+type BatchCorrectionWarning = {
+  type: UploadKind;
+  page: number;
+  filename?: string;
+  reason: string;
+};
+
+type BatchNormalizationResult = {
+  file: File;
+  corrected: boolean;
+  confidence: number;
+  reason?: string;
+};
+
 const MAX_UPLOAD_IMAGE_BYTES = 3.8 * 1024 * 1024;
 const PERSPECTIVE_CORRECTION_SCALE = 3;
 const MAX_DETECTION_DIMENSION = 1600;
 const PERSPECTIVE_CORRECTION_TIMEOUT_MS = 9000;
+const BATCH_DETECTION_DIMENSION = 1100;
+const BATCH_WORKER_WARMUP_TIMEOUT_MS = 9000;
+const BATCH_PAGE_CORRECTION_TIMEOUT_MS = 3000;
+const BATCH_MIN_CORRECTION_CONFIDENCE = 0.62;
 // Re-enabled: OpenCV work now runs in a dedicated Worker (see perspectiveCorrectClient.ts /
 // perspectiveCorrect.worker.ts) instead of the main thread, with a real, enforceable timeout
 // via worker.terminate(). Local verification confirmed the main thread stays fully responsive
@@ -127,6 +149,33 @@ const shrinkImageFileIfNeeded = async (file: File, maxBytes: number): Promise<Fi
   }
 };
 
+const createDetectionCanvas = async (file: File, maxDimension: number): Promise<HTMLCanvasElement> => {
+  const image = await loadImageFile(file);
+
+  try {
+    const { width: naturalWidth, height: naturalHeight } = getImageDimensions(image);
+    const longestSide = Math.max(naturalWidth, naturalHeight);
+    const detectionScale = longestSide > maxDimension ? maxDimension / longestSide : 1;
+    const width = Math.max(1, Math.round(naturalWidth * detectionScale));
+    const height = Math.max(1, Math.round(naturalHeight * detectionScale));
+    const canvas = document.createElement('canvas');
+    const context = canvas.getContext('2d');
+
+    if (!context) {
+      throw new Error('브라우저에서 이미지를 그릴 수 없습니다.');
+    }
+
+    canvas.width = width;
+    canvas.height = height;
+    context.drawImage(image, 0, 0, width, height);
+    return canvas;
+  } finally {
+    if ('close' in image) {
+      image.close();
+    }
+  }
+};
+
 export default function ImageUploadPanel({
   mode,
   jobId,
@@ -143,6 +192,7 @@ export default function ImageUploadPanel({
   const [cagiCount, setCagiCount] = useState<number>(0);
   const [satCount, setSatCount] = useState<number>(0);
   const [batchStatusMessage, setBatchStatusMessage] = useState<string>('');
+  const [batchCorrectionWarnings, setBatchCorrectionWarnings] = useState<BatchCorrectionWarning[]>([]);
   const [isBatchProcessing, setIsBatchProcessing] = useState<boolean>(false);
   const [isCameraStarting, setIsCameraStarting] = useState<boolean>(false);
   const [cameraError, setCameraError] = useState<string>('');
@@ -295,6 +345,51 @@ export default function ImageUploadPanel({
     return await res.json();
   };
 
+  const normalizeBatchFile = async (file: File, type: UploadKind): Promise<BatchNormalizationResult> => {
+    if (!PERSPECTIVE_CORRECTION_ENABLED) {
+      return { file, corrected: false, confidence: 0, reason: '보정 기능이 비활성화되어 있습니다.' };
+    }
+
+    const canvas = await createDetectionCanvas(file, BATCH_DETECTION_DIMENSION);
+    const template = type === 'cagi' ? cagiTemplate : satisfactionTemplate;
+
+    try {
+      const result = await correctImageInWorkerDetailed(
+        canvas,
+        template.baseSize.width * PERSPECTIVE_CORRECTION_SCALE,
+        template.baseSize.height * PERSPECTIVE_CORRECTION_SCALE,
+        BATCH_PAGE_CORRECTION_TIMEOUT_MS,
+        BATCH_MIN_CORRECTION_CONFIDENCE,
+      );
+
+      if (result.status === 'corrected' && result.blob) {
+        return {
+          file: new File([result.blob], toJpegFilename(file.name), { type: 'image/jpeg' }),
+          corrected: true,
+          confidence: result.confidence,
+        };
+      }
+
+      return {
+        file,
+        corrected: false,
+        confidence: result.confidence,
+        reason: result.reason,
+      };
+    } finally {
+      canvas.width = 1;
+      canvas.height = 1;
+    }
+  };
+
+  const formatCorrectionWarning = (reason?: string): string => {
+    if (reason === 'no-document') return '문서 외곽선을 찾지 못해 원본으로 업로드했습니다.';
+    if (reason === 'low-confidence') return '문서 경계 신뢰도가 낮아 원본으로 업로드했습니다.';
+    if (reason === 'timeout') return '보정 시간이 초과되어 원본으로 업로드했습니다.';
+    if (reason === 'worker-error') return '보정 엔진 오류로 원본으로 업로드했습니다.';
+    return '보정 결과를 만들지 못해 원본으로 업로드했습니다.';
+  };
+
   const setSequentialPreview = (file: File, type: UploadKind) => {
     const reader = new FileReader();
     reader.onloadend = () => {
@@ -333,47 +428,25 @@ export default function ImageUploadPanel({
     setCorrectionPreview(null);
 
     try {
-      const image = await loadImageFile(file);
+      const canvas = await createDetectionCanvas(file, MAX_DETECTION_DIMENSION);
 
-      try {
-        const { width: naturalWidth, height: naturalHeight } = getImageDimensions(image);
-        const longestSide = Math.max(naturalWidth, naturalHeight);
-        const detectionScale = longestSide > MAX_DETECTION_DIMENSION ? MAX_DETECTION_DIMENSION / longestSide : 1;
-        const width = Math.max(1, Math.round(naturalWidth * detectionScale));
-        const height = Math.max(1, Math.round(naturalHeight * detectionScale));
-        const canvas = document.createElement('canvas');
-        const context = canvas.getContext('2d');
+      if (PERSPECTIVE_CORRECTION_ENABLED) {
+        const template = type === 'cagi' ? cagiTemplate : satisfactionTemplate;
+        const correctedBlob = await correctImageInWorker(
+          canvas,
+          template.baseSize.width * PERSPECTIVE_CORRECTION_SCALE,
+          template.baseSize.height * PERSPECTIVE_CORRECTION_SCALE,
+          PERSPECTIVE_CORRECTION_TIMEOUT_MS,
+        );
 
-        if (!context) {
-          throw new Error('브라우저에서 이미지를 그릴 수 없습니다.');
-        }
-
-        canvas.width = width;
-        canvas.height = height;
-        context.drawImage(image, 0, 0, width, height);
-
-        if (PERSPECTIVE_CORRECTION_ENABLED) {
-          const template = type === 'cagi' ? cagiTemplate : satisfactionTemplate;
-          const correctedBlob = await correctImageInWorker(
-            canvas,
-            template.baseSize.width * PERSPECTIVE_CORRECTION_SCALE,
-            template.baseSize.height * PERSPECTIVE_CORRECTION_SCALE,
-            PERSPECTIVE_CORRECTION_TIMEOUT_MS,
-          );
-
-          if (correctedBlob) {
-            setCorrectionPreview({
-              blob: correctedBlob,
-              step: type,
-              previewSrc: URL.createObjectURL(correctedBlob),
-              source: 'file',
-            });
-            return;
-          }
-        }
-      } finally {
-        if ('close' in image) {
-          image.close();
+        if (correctedBlob) {
+          setCorrectionPreview({
+            blob: correctedBlob,
+            step: type,
+            previewSrc: URL.createObjectURL(correctedBlob),
+            source: 'file',
+          });
+          return;
         }
       }
     } catch {
@@ -389,8 +462,12 @@ export default function ImageUploadPanel({
 
     setIsBatchProcessing(true);
     setBatchStatusMessage('파일을 확인하고 있습니다.');
+    setBatchCorrectionWarnings((previous) => previous.filter((warning) => warning.type !== type));
 
     let filesToUpload: File[] = [];
+    const correctionWarnings: BatchCorrectionWarning[] = [];
+    let correctionEngineReady = false;
+    let correctionEngineUnavailable = false;
 
     try {
       for (let i = 0; i < files.length; i++) {
@@ -403,12 +480,73 @@ export default function ImageUploadPanel({
         }
       }
 
+      if (PERSPECTIVE_CORRECTION_ENABLED) {
+        setBatchStatusMessage('페이지 보정 엔진을 준비하고 있습니다.');
+        correctionEngineReady = await warmupPerspectiveWorker(BATCH_WORKER_WARMUP_TIMEOUT_MS);
+        correctionEngineUnavailable = !correctionEngineReady;
+      }
+
       const total = filesToUpload.length;
       let successCount = 0;
 
       for (let i = 0; i < total; i++) {
-        setBatchStatusMessage(`업로드 중입니다. (${i + 1}/${total})`);
-        await uploadSingleFile(filesToUpload[i], type);
+        const sourceFile = filesToUpload[i];
+        let fileToUpload = sourceFile;
+        let pageCorrectionWarningAdded = false;
+
+        if (PERSPECTIVE_CORRECTION_ENABLED && !correctionEngineUnavailable) {
+          if (!correctionEngineReady) {
+            setBatchStatusMessage(`페이지 보정 엔진을 다시 준비하고 있습니다. (${i + 1}/${total})`);
+            correctionEngineReady = await warmupPerspectiveWorker(BATCH_WORKER_WARMUP_TIMEOUT_MS);
+            correctionEngineUnavailable = !correctionEngineReady;
+          }
+
+          if (correctionEngineReady) {
+            setBatchStatusMessage(`페이지를 보정하고 있습니다. (${i + 1}/${total})`);
+
+            try {
+              const normalized = await normalizeBatchFile(sourceFile, type);
+              fileToUpload = normalized.file;
+
+              if (!normalized.corrected) {
+                correctionWarnings.push({
+                  type,
+                  page: i + 1,
+                  filename: sourceFile.name,
+                  reason: formatCorrectionWarning(normalized.reason),
+                });
+                pageCorrectionWarningAdded = true;
+              }
+
+              if (normalized.reason === 'timeout' || normalized.reason === 'worker-error') {
+                correctionEngineReady = false;
+                correctionEngineUnavailable = true;
+              }
+            } catch {
+              correctionWarnings.push({
+                type,
+                page: i + 1,
+                filename: sourceFile.name,
+                reason: '페이지 이미지 보정 중 오류가 발생해 원본으로 업로드했습니다.',
+              });
+              pageCorrectionWarningAdded = true;
+              correctionEngineReady = false;
+              correctionEngineUnavailable = true;
+            }
+          }
+        }
+
+        if (correctionEngineUnavailable && PERSPECTIVE_CORRECTION_ENABLED && !pageCorrectionWarningAdded) {
+          correctionWarnings.push({
+            type,
+            page: i + 1,
+            filename: sourceFile.name,
+            reason: '보정 엔진을 사용할 수 없어 원본으로 업로드했습니다.',
+          });
+        }
+
+        setBatchStatusMessage(`페이지를 업로드하고 있습니다. (${i + 1}/${total})`);
+        await uploadSingleFile(fileToUpload, type);
         successCount++;
       }
 
@@ -420,6 +558,10 @@ export default function ImageUploadPanel({
     } catch (err: any) {
       alert(`업로드 처리 중 오류가 발생했습니다: ${err.message}`);
     } finally {
+      setBatchCorrectionWarnings((previous) => [
+        ...previous.filter((warning) => warning.type !== type),
+        ...correctionWarnings,
+      ]);
       setIsBatchProcessing(false);
       setBatchStatusMessage('');
       if (e.target) e.target.value = '';
@@ -639,6 +781,7 @@ export default function ImageUploadPanel({
       setSatCount(0);
       setCagiFile(null);
       setSatFile(null);
+      setBatchCorrectionWarnings([]);
       setCameraError('');
     } catch (err: any) {
       alert(`업로드 초기화 중 오류가 발생했습니다: ${err.message}`);
@@ -957,6 +1100,18 @@ export default function ImageUploadPanel({
                 <div className="error-box">
                   장수가 일치하지 않습니다. 선별검사지 {cagiCount}장, 만족도조사 {satCount}장입니다.
                   누락되거나 초과된 사진이 있는지 확인해주세요.
+                </div>
+              )}
+              {batchCorrectionWarnings.length > 0 && (
+                <div className="notice" role="status" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  <strong>보정 확인 필요 ({batchCorrectionWarnings.length}페이지)</strong>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 14 }}>
+                    {batchCorrectionWarnings.map((warning) => (
+                      <div key={`${warning.type}-${warning.page}-${warning.filename || 'page'}`}>
+                        {warning.type === 'cagi' ? '선별검사지' : '만족도조사'} {warning.page}페이지: {warning.reason}
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
               {isBatchProcessing ? (

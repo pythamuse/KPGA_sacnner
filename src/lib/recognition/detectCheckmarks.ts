@@ -49,6 +49,11 @@ export interface RecognitionDraft {
   candidates?: {
     [key: string]: Array<{ value: number | string; score: number }>;
   };
+  warnings?: string[];
+}
+
+export interface RecognitionOptions {
+  ocrDeadlineAt?: number;
 }
 
 /**
@@ -57,7 +62,8 @@ export interface RecognitionDraft {
  */
 export async function recognizeStudentForms(
   cagiPath: string,
-  satisfactionPath: string
+  satisfactionPath: string,
+  options: RecognitionOptions = {},
 ): Promise<RecognitionDraft> {
   const isExampleImage = 
     cagiPath.includes('example') || 
@@ -97,10 +103,22 @@ export async function recognizeStudentForms(
     const cagiImage = await loadImageAnalysisData(cagiPath);
     const cagiImageBuffer = await fs.readFile(cagiPath);
     const cagiTemplate = getTemplate('cagi');
-    const cagiRowOverrides = await buildCagiRowOverrides(cagiImage, cagiImageBuffer);
+    const canAutoRecognizeCagi = cagiImage.contentBoundsConfident;
+    const cagiRowOverrides = canAutoRecognizeCagi
+      ? await buildCagiRowOverrides(cagiImage, cagiImageBuffer, toOcrOptions(options))
+      : {};
+
+    if (!canAutoRecognizeCagi) {
+      draft.warnings?.push('선별검사지의 종이 경계를 안정적으로 찾지 못해 자동 입력을 확정하지 않았습니다. 강조된 항목을 원본과 대조해 직접 확인해주세요.');
+    }
 
     for (const group of cagiTemplate.choiceGroups) {
-      const result = analyzeChoiceGroup(cagiImage, group, cagiRowOverrides[group.field]);
+      const result = analyzeChoiceGroup(
+        cagiImage,
+        group,
+        cagiRowOverrides[group.field],
+        canAutoRecognizeCagi,
+      );
       draft.confidence[result.field] = result.confidence;
       draft.candidates![result.field] = mapRecognizedCandidates(result.field, result.candidates);
 
@@ -125,10 +143,22 @@ export async function recognizeStudentForms(
     const satisfactionImage = await loadImageAnalysisData(satisfactionPath);
     const satisfactionImageBuffer = await fs.readFile(satisfactionPath);
     const satisfactionTemplate = getTemplate('satisfaction');
-    const satisfactionRowOverrides = await buildSatisfactionRowOverrides(satisfactionImage, satisfactionImageBuffer);
+    const canAutoRecognizeSatisfaction = satisfactionImage.contentBoundsConfident;
+    const satisfactionRowOverrides = canAutoRecognizeSatisfaction
+      ? await buildSatisfactionRowOverrides(satisfactionImage, satisfactionImageBuffer, toOcrOptions(options))
+      : {};
+
+    if (!canAutoRecognizeSatisfaction) {
+      draft.warnings?.push('만족도조사 이미지의 종이 경계를 안정적으로 찾지 못해 자동 입력을 확정하지 않았습니다. 강조된 항목을 원본과 대조해 직접 확인해주세요.');
+    }
 
     for (const group of satisfactionTemplate.choiceGroups) {
-      const result = analyzeChoiceGroup(satisfactionImage, group, satisfactionRowOverrides[group.field]);
+      const result = analyzeChoiceGroup(
+        satisfactionImage,
+        group,
+        satisfactionRowOverrides[group.field],
+        canAutoRecognizeSatisfaction,
+      );
       draft.confidence[result.field] = result.confidence;
       draft.candidates![result.field] = result.candidates;
 
@@ -161,7 +191,14 @@ function createEmptyDraft(): RecognitionDraft {
     satisfaction: {},
     confidence: confidenceObj,
     candidates: {},
+    warnings: [],
   };
+}
+
+function toOcrOptions(options: RecognitionOptions): { deadlineAt?: number } | undefined {
+  return options.ocrDeadlineAt === undefined
+    ? undefined
+    : { deadlineAt: options.ocrDeadlineAt };
 }
 
 function mapRecognizedSchoolType(value: number | string): string {

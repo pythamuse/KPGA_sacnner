@@ -13,7 +13,7 @@ function makeTestImage(): ImageAnalysisData {
     }
   }
 
-  return { width, height, pixels };
+  return { width, height, pixels, contentBoundsConfident: true };
 }
 
 describe('마킹 밀도 기반 선택지 분석', () => {
@@ -52,6 +52,7 @@ describe('마킹 밀도 기반 선택지 분석', () => {
       width: 10,
       height: 10,
       pixels: Buffer.alloc(100, 255),
+      contentBoundsConfident: false,
     };
     const group: ChoiceGroup = {
       field: 'cagi.q02',
@@ -65,5 +66,22 @@ describe('마킹 밀도 기반 선택지 분석', () => {
 
     expect(result.value).toBeUndefined();
     expect(result.confidence).toBe('low');
+  });
+
+  it('종이 경계가 불확실하면 후보 점수만 남기고 자동값을 확정하지 않는다', () => {
+    const image = makeTestImage();
+    const group: ChoiceGroup = {
+      field: 'cagi.q03',
+      candidates: [
+        { value: 0, rect: { x: 0.1, y: 0.1, width: 0.3, height: 0.3 } },
+        { value: 1, rect: { x: 0.6, y: 0.6, width: 0.3, height: 0.3 } },
+      ],
+    };
+
+    const result = analyzeChoiceGroup(image, group, undefined, false);
+
+    expect(result.value).toBeUndefined();
+    expect(result.confidence).toBe('low');
+    expect(result.candidates[0].value).toBe(0);
   });
 });

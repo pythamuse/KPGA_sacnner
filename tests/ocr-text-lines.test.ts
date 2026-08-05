@@ -36,6 +36,21 @@ describe('OCR text line detection', () => {
     },
     120_000,
   );
+
+  it('returns immediately when the shared recognition OCR budget has expired', async () => {
+    const lines = await detectOcrTextLines(
+      Buffer.from('not-an-image'),
+      100,
+      100,
+      10,
+      90,
+      10,
+      90,
+      { deadlineAt: Date.now() - 1 },
+    );
+
+    expect(lines).toEqual([]);
+  });
 });
 
 async function writeSyntheticKoreanText(filePath: string, baselines: number[]) {

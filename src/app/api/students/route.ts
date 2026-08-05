@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextResponse } from 'next/server';
 import { validateStudent } from '../../../lib/validation/validateStudent';
 import {
   normalizeGender,
@@ -9,7 +9,7 @@ import {
 import { generateWorkbookPair } from '../../../lib/excel/generateWorkbookPair';
 import { StudentData } from '../../../lib/validation/types';
 
-export async function POST(req: NextRequest) {
+export async function POST(req: Request) {
   try {
     const { jobId, students: rawStudents } = await req.json();
 

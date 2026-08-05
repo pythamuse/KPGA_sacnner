@@ -24,6 +24,10 @@ const earlyInterventionMarkRegions: NormalizedRect[] = [
 export async function hasCagiEarlyInterventionMarks(filePath: string): Promise<boolean> {
   try {
     const image = await loadImageAnalysisData(filePath);
+    if (!image.contentBoundsConfident) {
+      return false;
+    }
+
     return earlyInterventionMarkRegions.some((region) =>
       calculateDarkPixelDensity(image, region) >= MARK_THRESHOLD,
     );

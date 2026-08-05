@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { orderQuadPoints, type Point } from '../src/lib/documentScanner/perspectiveCorrect';
+import { evaluateQuad, orderQuadPoints, type Point } from '../src/lib/documentScanner/perspectiveCorrect';
 
 describe('orderQuadPoints', () => {
   it('orders a scrambled rectangle as top-left, top-right, bottom-right, bottom-left', () => {
@@ -54,5 +54,51 @@ describe('orderQuadPoints', () => {
       { x: 250, y: 260 },
       { x: 60, y: 240 },
     ]);
+  });
+});
+
+describe('evaluateQuad', () => {
+  it('scores a large portrait page higher than a small inner table rectangle', () => {
+    const page = evaluateQuad(
+      [
+        { x: 80, y: 40 },
+        { x: 520, y: 55 },
+        { x: 500, y: 760 },
+        { x: 60, y: 745 },
+      ],
+      600,
+      800,
+      656 / 474,
+    );
+    const innerTable = evaluateQuad(
+      [
+        { x: 160, y: 280 },
+        { x: 440, y: 290 },
+        { x: 430, y: 500 },
+        { x: 170, y: 490 },
+      ],
+      600,
+      800,
+      656 / 474,
+    );
+
+    expect(page).not.toBeNull();
+    expect(innerTable).not.toBeNull();
+    expect(page!.confidence).toBeGreaterThan(innerTable!.confidence);
+    expect(page!.areaRatio).toBeGreaterThan(innerTable!.areaRatio);
+  });
+
+  it('rejects a degenerate four-point candidate', () => {
+    expect(evaluateQuad(
+      [
+        { x: 40, y: 40 },
+        { x: 560, y: 40 },
+        { x: 40, y: 760 },
+        { x: 40, y: 760 },
+      ],
+      600,
+      800,
+      656 / 474,
+    )).toBeNull();
   });
 });

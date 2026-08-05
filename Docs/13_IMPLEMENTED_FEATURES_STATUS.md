@@ -464,6 +464,33 @@ npm.cmd run build
 
 ---
 
+### 2026-08-05 이미지 인식 안전장치 및 지연 완화
+
+관련 파일:
+
+- `src/lib/recognition/markDensity.ts`
+- `src/lib/recognition/tableRowDetection.ts`
+- `src/lib/recognition/ocrTextLines.ts`
+- `src/lib/recognition/detectCheckmarks.ts`
+- `src/components/RecognitionReview.tsx`
+
+변경 내용:
+
+- `detectFrameBounds`에 양식 전체 프레임인지 확인하는 크기·여백·종횡비 검사를 추가했다.
+- 프레임을 신뢰할 수 없는 사진은 ROI 후보 점수만 전달하고 자동값을 확정하지 않는다.
+- 이런 경우 검수 화면에 원본 대조 안내를 표시한다.
+- 문항 행 검출은 픽셀 가로선 매칭을 먼저 실행하고, 실패할 때만 OCR 앵커를 보조적으로 사용한다.
+- OCR 전체 제한 시간을 2.5초로 줄이고 같은 이미지·크롭 결과를 캐시한다.
+- 경계가 불확실하면 조기개입 서비스 ROI 감지도 건너뛰어 잘못된 노티스를 방지한다.
+
+검증:
+
+- 경계 불확실 합성 이미지에서 CAGI·만족도 자동값 생략과 경고 2건을 확인했다.
+- 기존 OCR 텍스트 위치, 동적 행 검출, 만족도 인식 테스트를 유지했다.
+- 실제 사용자의 원본 이미지에서 ROI 위치가 올바른지와 Vercel 처리 시간이 개선되는지는 배포 후 재검증이 필요하다.
+
+---
+
 ## 관련 Task 문서
 
 이 문서에 기록된 시점(2026-07-30) 이후 각 기능 영역에서 실제로 발생한 문제와 후속 작업은 아래 Task 문서에 이어져 있다. 이 문서는 "지금 무엇이 구현되어 있는가"만 유지하고, 그 이후의 조사·수정 히스토리는 옮기지 않는다:
