@@ -200,16 +200,19 @@ function detectFrameBounds(image: Pick<ImageAnalysisData, 'width' | 'height' | '
     return null;
   }
 
-  if (!isPlausibleFrameBounds(image, { left, top, right, bottom })) {
+  const bounds = { left, top, right, bottom };
+  if (!isPlausibleFrameBounds(image, bounds)) {
     return null;
   }
 
-  return {
-    left,
-    top,
-    right,
-    bottom,
-  };
+  // Long table rules can satisfy the initial row/column density thresholds.
+  // Require all four detected edges to remain sufficiently continuous so an
+  // internal form table is not promoted to the page frame.
+  if (!hasContinuousFrameEdges(image, bounds)) {
+    return null;
+  }
+
+  return bounds;
 }
 
 export function analyzeChoiceGroup(
@@ -301,4 +304,108 @@ function isPlausibleFrameBounds(
     aspectRatio >= 1.05 &&
     aspectRatio <= 1.9
   );
+}
+
+function hasContinuousFrameEdges(
+  image: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>,
+  bounds: PixelBounds,
+): boolean {
+  const frameWidth = bounds.right - bounds.left;
+  const frameHeight = bounds.bottom - bounds.top;
+  const horizontalInset = Math.max(1, Math.round(frameWidth * 0.04));
+  const verticalInset = Math.max(1, Math.round(frameHeight * 0.02));
+  const horizontalLeft = bounds.left + horizontalInset;
+  const horizontalRight = bounds.right - horizontalInset;
+  const verticalTop = bounds.top + verticalInset;
+  const verticalBottom = bounds.bottom - verticalInset;
+
+  const topRatio = darkRatioInRows(
+    image,
+    bounds.top,
+    Math.min(bounds.top + Math.max(2, Math.round(frameHeight * 0.01)), bounds.bottom),
+    horizontalLeft,
+    horizontalRight,
+  );
+  const bottomRatio = darkRatioInRows(
+    image,
+    Math.max(bounds.top, bounds.bottom - Math.max(2, Math.round(frameHeight * 0.01))),
+    bounds.bottom,
+    horizontalLeft,
+    horizontalRight,
+  );
+  const leftRatio = darkRatioInColumns(
+    image,
+    bounds.left,
+    Math.min(bounds.left + Math.max(2, Math.round(frameWidth * 0.01)), bounds.right),
+    verticalTop,
+    verticalBottom,
+  );
+  const rightRatio = darkRatioInColumns(
+    image,
+    Math.max(bounds.left, bounds.right - Math.max(2, Math.round(frameWidth * 0.01))),
+    bounds.right,
+    verticalTop,
+    verticalBottom,
+  );
+
+  return (
+    topRatio >= 0.38 &&
+    bottomRatio >= 0.38 &&
+    leftRatio >= 0.45 &&
+    rightRatio >= 0.45
+  );
+}
+
+function darkRatioInRows(
+  image: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>,
+  top: number,
+  bottom: number,
+  left: number,
+  right: number,
+): number {
+  const safeTop = clamp(Math.floor(top), 0, image.height - 1);
+  const safeBottom = clamp(Math.ceil(bottom), safeTop + 1, image.height);
+  const safeLeft = clamp(Math.floor(left), 0, image.width - 1);
+  const safeRight = clamp(Math.ceil(right), safeLeft + 1, image.width);
+  let bestRatio = 0;
+
+  for (let y = safeTop; y < safeBottom; y++) {
+    let dark = 0;
+    for (let x = safeLeft; x < safeRight; x++) {
+      if (image.pixels[y * image.width + x] < 220) {
+        dark++;
+      }
+    }
+
+    bestRatio = Math.max(bestRatio, dark / (safeRight - safeLeft));
+  }
+
+  return bestRatio;
+}
+
+function darkRatioInColumns(
+  image: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>,
+  left: number,
+  right: number,
+  top: number,
+  bottom: number,
+): number {
+  const safeLeft = clamp(Math.floor(left), 0, image.width - 1);
+  const safeRight = clamp(Math.ceil(right), safeLeft + 1, image.width);
+  const safeTop = clamp(Math.floor(top), 0, image.height - 1);
+  const safeBottom = clamp(Math.ceil(bottom), safeTop + 1, image.height);
+  let bestRatio = 0;
+
+  for (let x = safeLeft; x < safeRight; x++) {
+    let dark = 0;
+    for (let y = safeTop; y < safeBottom; y++) {
+      if (image.pixels[y * image.width + x] < 220) {
+        dark++;
+      }
+    }
+
+    bestRatio = Math.max(bestRatio, dark / (safeBottom - safeTop));
+  }
+
+  return bestRatio;
 }

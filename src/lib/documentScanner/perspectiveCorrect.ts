@@ -125,6 +125,16 @@ export function evaluateQuad(
     return null;
   }
 
+  // A form table can also produce a clean convex quadrilateral. It must be
+  // large enough to plausibly be the page before it is allowed to drive a
+  // perspective warp. Otherwise an inner table may be stretched into a
+  // page-sized image and later confuse the server-side form classifier.
+  const widthCoverage = averageWidth / imageWidth;
+  const heightCoverage = averageHeight / imageHeight;
+  if (widthCoverage < 0.55 || heightCoverage < 0.7) {
+    return null;
+  }
+
   const areaRatio = polygonArea(ordered) / (imageWidth * imageHeight);
   const aspectRatio = averageHeight / averageWidth;
   const widthConsistency = Math.min(topWidth, bottomWidth) / Math.max(topWidth, bottomWidth);

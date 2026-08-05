@@ -52,17 +52,32 @@ async function classifyByImageContent(filePath: string): Promise<ClassifiedFormT
 
     const cagiScore = scoreChoiceLayout(image, cagiTemplate.choiceGroups);
     const satisfactionScore = scoreChoiceLayout(image, getSatisfactionClassificationGroups());
-    const scoreGap = Math.abs(cagiScore - satisfactionScore);
+    const cagiSignatureScore = scoreChoiceLayout(image, getCagiSignatureGroups());
+    const satisfactionSignatureScore = scoreChoiceLayout(image, getSatisfactionSignatureGroups());
+    const cagiEvidence = combineEvidence(cagiScore, cagiSignatureScore);
+    const satisfactionEvidence = combineEvidence(satisfactionScore, satisfactionSignatureScore);
+    const scoreGap = Math.abs(cagiEvidence - satisfactionEvidence);
 
-    if (scoreGap < 0.05) {
+    // A single dense table region is not enough to identify a form. Require a
+    // form-specific anchor as well as a meaningful score gap before overriding
+    // the upload-slot filename hint.
+    if (scoreGap < 0.08) {
       return 'unknown';
     }
 
-    if (cagiScore >= 0.12 && cagiScore > satisfactionScore) {
+    if (
+      cagiEvidence >= 0.16 &&
+      cagiSignatureScore >= 0.08 &&
+      cagiEvidence > satisfactionEvidence
+    ) {
       return 'cagi';
     }
 
-    if (satisfactionScore >= 0.12 && satisfactionScore > cagiScore) {
+    if (
+      satisfactionEvidence >= 0.16 &&
+      satisfactionSignatureScore >= 0.08 &&
+      satisfactionEvidence > cagiEvidence
+    ) {
       return 'satisfaction';
     }
 
@@ -73,14 +88,22 @@ async function classifyByImageContent(filePath: string): Promise<ClassifiedFormT
 }
 
 function getSatisfactionClassificationGroups(): ChoiceGroup[] {
-  return satisfactionTemplate.choiceGroups.filter((group) => {
-    if (!group.field.startsWith('satisfaction.q')) {
-      return true;
-    }
+  return satisfactionTemplate.choiceGroups;
+}
 
+function getCagiSignatureGroups(): ChoiceGroup[] {
+  return cagiTemplate.choiceGroups.filter((group) => group.field.startsWith('basic.'));
+}
+
+function getSatisfactionSignatureGroups(): ChoiceGroup[] {
+  return satisfactionTemplate.choiceGroups.filter((group) => {
     const questionNumber = Number(group.field.replace('satisfaction.q', ''));
-    return questionNumber <= 5;
+    return questionNumber >= 7;
   });
+}
+
+function combineEvidence(layoutScore: number, signatureScore: number): number {
+  return roundScore(layoutScore * 0.65 + signatureScore * 0.35);
 }
 
 function scoreChoiceLayout(image: ImageAnalysisData, groups: ChoiceGroup[]): number {

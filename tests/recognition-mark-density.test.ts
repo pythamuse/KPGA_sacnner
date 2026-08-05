@@ -1,6 +1,17 @@
-import { describe, expect, it } from 'vitest';
-import { analyzeChoiceGroup, calculateDarkPixelDensity, ImageAnalysisData } from '../src/lib/recognition/markDensity';
+import { afterAll, describe, expect, it } from 'vitest';
+import fs from 'fs';
+import path from 'path';
+import sharp from 'sharp';
+import { analyzeChoiceGroup, calculateDarkPixelDensity, ImageAnalysisData, loadImageAnalysisData } from '../src/lib/recognition/markDensity';
 import { ChoiceGroup } from '../src/lib/recognition/roiTemplates';
+
+const fixtureDir = path.join(process.cwd(), 'tmp', 'test-mark-density');
+
+afterAll(() => {
+  if (fs.existsSync(fixtureDir)) {
+    fs.rmSync(fixtureDir, { recursive: true, force: true });
+  }
+});
 
 function makeTestImage(): ImageAnalysisData {
   const width = 10;
@@ -83,5 +94,38 @@ describe('마킹 밀도 기반 선택지 분석', () => {
     expect(result.value).toBeUndefined();
     expect(result.confidence).toBe('low');
     expect(result.candidates[0].value).toBe(0);
+  });
+
+  it('긴 내부 표 선만 있는 이미지를 문서 프레임으로 신뢰하지 않는다', async () => {
+    fs.mkdirSync(fixtureDir, { recursive: true });
+    const filePath = path.join(fixtureDir, 'broken-inner-frame.png');
+    const svg = `
+      <svg xmlns="http://www.w3.org/2000/svg" width="1000" height="1400">
+        <rect width="100%" height="100%" fill="#fff"/>
+        <path d="M100 150 H900 M100 1250 H900" fill="none" stroke="#000" stroke-width="8"/>
+        <path d="M200 400 V800 M800 400 V800" fill="none" stroke="#000" stroke-width="8"/>
+      </svg>
+    `;
+    await sharp(Buffer.from(svg)).png().toFile(filePath);
+
+    const analysis = await loadImageAnalysisData(filePath);
+
+    expect(analysis.contentBoundsConfident).toBe(false);
+  });
+
+  it('얇지만 네 변이 이어진 외곽선은 문서 프레임으로 인정한다', async () => {
+    fs.mkdirSync(fixtureDir, { recursive: true });
+    const filePath = path.join(fixtureDir, 'thin-page-frame.png');
+    const svg = `
+      <svg xmlns="http://www.w3.org/2000/svg" width="1000" height="1400">
+        <rect width="100%" height="100%" fill="#fff"/>
+        <rect x="100" y="100" width="800" height="1200" fill="none" stroke="#000" stroke-width="2"/>
+      </svg>
+    `;
+    await sharp(Buffer.from(svg)).png().toFile(filePath);
+
+    const analysis = await loadImageAnalysisData(filePath);
+
+    expect(analysis.contentBoundsConfident).toBe(true);
   });
 });

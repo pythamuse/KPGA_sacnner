@@ -8,14 +8,15 @@
 | 2 | Vercel 인스턴스 간 `/tmp` 미공유로 저장/다운로드/이미지 미리보기 404 | 해결 | [STATELESS_ARCHITECTURE_MIGRATION](../Task/STATELESS_ARCHITECTURE_MIGRATION.md) |
 | 3 | `data:` URI를 새 탭(top frame)으로 열 때 브라우저 차단 | 해결(재확인 필요) | [STATELESS_ARCHITECTURE_MIGRATION](../Task/STATELESS_ARCHITECTURE_MIGRATION.md) |
 | 4 | 성인 트랙 "연령대" crop 미리보기가 청소년 ROI 좌표 사용 | 미해결 | [STATELESS_ARCHITECTURE_MIGRATION](../Task/STATELESS_ARCHITECTURE_MIGRATION.md) |
-| 5 | 휴대폰 촬영 사진이 실제와 다른 양식으로 오판정 | 해결(실사용자 재현 파일로는 미검증) | [MOBILE_PHOTO_MISCLASSIFICATION_FIX](../Task/MOBILE_PHOTO_MISCLASSIFICATION_FIX.md) |
+| 5 | 휴대폰 촬영 사진이 실제와 다른 양식으로 오판정 | 부분 해결(2차 수정, 실사용 재검증 필요) | [MOBILE_PHOTO_MISCLASSIFICATION_FIX](../Task/MOBILE_PHOTO_MISCLASSIFICATION_FIX.md) |
 | 6 | 카메라 미리보기 검은 화면 및 촬영 버튼 무반응 | 해결(실기기 확인) | [CAMERA_UPLOAD_ROBUSTNESS_FIXES](../Task/CAMERA_UPLOAD_ROBUSTNESS_FIXES.md) |
 | 7 | 카메라/파일 업로드 경로에 용량 초과(413) 방어 누락 | 구현됨(검증 기록 없음) | [CAMERA_UPLOAD_ROBUSTNESS_FIXES](../Task/CAMERA_UPLOAD_ROBUSTNESS_FIXES.md) |
 | 8 | ROI 좌표 기반 문항 인식이 실제 사진에서 엉뚱한 행을 읽음 | 부분 해결(재검증 필요) | [MOBILE_CAPTURE_PERSPECTIVE_CORRECTION](../Task/MOBILE_CAPTURE_PERSPECTIVE_CORRECTION.md), [RECOGNITION_ACCURACY_DYNAMIC_ROW_DETECTION](../Task/RECOGNITION_ACCURACY_DYNAMIC_ROW_DETECTION.md) |
 | 9 | 파일 업로드 원근보정 도입 후 웹페이지 전체 프리징 | 해결(근본 메커니즘은 미규명) | [MOBILE_CAPTURE_PERSPECTIVE_CORRECTION](../Task/MOBILE_CAPTURE_PERSPECTIVE_CORRECTION.md) |
 | 10 | OCR 앵커 도입 후 `/api/recognize`가 184초까지 걸림 | 완화(후속 조정 완료, 실배포 재측정 필요) | [OCR_ANCHORED_ROW_DETECTION](../Task/OCR_ANCHORED_ROW_DETECTION.md) |
 | 11 | 종이 경계 검출 실패 상태에서도 ROI 후보가 자동값으로 확정될 수 있음 | 해결(경계 불확실 시 자동 확정 차단) | [OCR_ANCHORED_ROW_DETECTION](../Task/OCR_ANCHORED_ROW_DETECTION.md) |
-| 12 | 실사용 촬영 이미지에서 원근 보정 후에도 문서 좌표가 어긋남 | 분석 완료, 후속 구현 필요 | [DOCUMENT_SCAN_STRATEGY_REVIEW](../Docs/14_DOCUMENT_SCAN_STRATEGY_REVIEW.md) |
+| 12 | 실사용 촬영 이미지에서 원근 보정 후에도 문서 좌표가 어긋남 | 1차 품질 게이트 구현, 실사용 benchmark 필요 | [DOCUMENT_SCAN_STRATEGY_REVIEW](../Docs/14_DOCUMENT_SCAN_STRATEGY_REVIEW.md) |
+| 13 | 보정본이 양식 판정을 오염시켜 `FORM_TYPE_MISMATCH` 발생 | 2차 수정, 배포 재검증 필요 | [MOBILE_PHOTO_MISCLASSIFICATION_FIX](../Task/MOBILE_PHOTO_MISCLASSIFICATION_FIX.md) |
 
 ---
 
@@ -47,7 +48,7 @@
 
 **원인**: 카메라 사진의 원근왜곡으로 종이 테두리 검출(`detectFrameBounds`)이 실패하면, 내용 기반 양식판정이 신뢰할 수 없는 좌표로 점수를 매겨 파일명 힌트(사용자가 선택한 업로드 칸)를 잘못 뒤집음.
 **대응**: 테두리 검출 실패(`contentBoundsConfident === false`) 시 내용 기반 판정을 건너뛰고 파일명 힌트를 그대로 신뢰하도록 변경.
-**상태**: 해결(코드 검증 완료). 실제 문제를 일으켰던 원본 사진 파일이 보존되지 않아 그 파일로는 재검증 못함.
+**상태**: 부분 해결. 원본 경계 실패 경로는 방어했지만, 보정 Worker가 내부 표를 문서 외곽으로 잘못 선택하면 보정본에서 다시 오판정할 수 있어 2차 품질 게이트를 추가함. 실제 배포 샘플 재검증 필요.
 
 ## 6. 카메라 미리보기 검은 화면 및 촬영 버튼 무반응
 
@@ -97,3 +98,10 @@
 **대응 방향**: 문서 외곽 후보를 여러 개 생성하고 템플릿 종횡비·각도·면적·변 연속성·여백·내부 표와의 구분으로 점수화한다. 저신뢰 결과는 자동 확정하지 않고 재촬영 또는 네 모서리 수동 조정으로 보낸다. 카메라 경로에는 안정 프레임 기반 자동 촬영을 보조 기능으로 추가한다.
 
 **상태**: 원인 범주와 설계 방향 분석 완료. 후보 점수화, 품질 게이트, 수동 조정, 자동 촬영은 후속 구현 및 실사용 샘플 검증이 필요하다. 세부 내용은 [Docs/14_DOCUMENT_SCAN_STRATEGY_REVIEW.md](14_DOCUMENT_SCAN_STRATEGY_REVIEW.md)를 참고한다.
+
+## 13. 보정본이 양식 판정을 오염시켜 `FORM_TYPE_MISMATCH` 발생
+
+**재현 샘플**: 새 `만족도조사 샘플.jpg`와 `선별검사 샘플.jpg`, 만족도 칸에서 CAGI로 판정된 Vercel 화면.
+**원인**: 보정 Worker가 실제 문서 외곽과 내부 표를 기하학 점수만으로 구분하지 못했고, 서버 분류기도 표 선의 픽셀 밀도 우세만으로 업로드 칸을 뒤집을 수 있었음.
+**대응**: 보정 후보에 페이지 크기 게이트를 추가하고, 서버 프레임 검출에 네 변 연속성 검사를 추가했다. 양식별 고유 구조 점수와 최소 점수 차이를 함께 통과한 경우에만 `FORM_TYPE_MISMATCH`를 발생시킨다.
+**상태**: 코드 및 합성 회귀 테스트 완료(대상 4개 파일, 16개 테스트). 실제 Vercel 배포와 새 원본 샘플 재검증 필요.

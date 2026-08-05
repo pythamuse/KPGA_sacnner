@@ -83,9 +83,7 @@ describe('evaluateQuad', () => {
     );
 
     expect(page).not.toBeNull();
-    expect(innerTable).not.toBeNull();
-    expect(page!.confidence).toBeGreaterThan(innerTable!.confidence);
-    expect(page!.areaRatio).toBeGreaterThan(innerTable!.areaRatio);
+    expect(innerTable).toBeNull();
   });
 
   it('rejects a degenerate four-point candidate', () => {
