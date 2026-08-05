@@ -233,12 +233,41 @@ function detectFrameBounds(image: Pick<ImageAnalysisData, 'width' | 'height' | '
   return bounds;
 }
 
+/**
+ * A scanner can preserve the whole form while omitting a continuous outer
+ * border. In that case `contentBoundsConfident` remains false, but the dark
+ * content envelope is still a stable coordinate frame once a response-table
+ * grid is detected. This helper never authorizes static ROI-only answers.
+ */
+export function hasUsableFormBounds(image: Pick<ImageAnalysisData, 'width' | 'height' | 'contentBounds'>): boolean {
+  const bounds = image.contentBounds;
+  if (!bounds) {
+    return false;
+  }
+
+  const width = bounds.right - bounds.left;
+  const height = bounds.bottom - bounds.top;
+  const aspectRatio = height / width;
+
+  return (
+    width >= image.width * 0.72 &&
+    height >= image.height * 0.78 &&
+    bounds.left <= image.width * 0.16 &&
+    bounds.right >= image.width * 0.84 &&
+    bounds.top <= image.height * 0.16 &&
+    bounds.bottom >= image.height * 0.84 &&
+    aspectRatio >= 1.05 &&
+    aspectRatio <= 1.9
+  );
+}
+
 export function analyzeChoiceGroup(
   image: ImageAnalysisData,
   group: ChoiceGroup,
   yOverride?: { top: number; bottom: number },
   allowAutoValue = true,
   candidatePixelOverrides?: PixelRect[],
+  requireHighVisualConfidence = false,
 ): ChoiceGroupResult {
   const usesGridCells = candidatePixelOverrides?.length === group.candidates.length;
   const candidates = group.candidates
@@ -288,7 +317,10 @@ export function analyzeChoiceGroup(
     };
   }
 
-  if (best.score >= 0.22 && gap >= 0.06) {
+  // A verified table cell lets us use a lower medium threshold for a clear
+  // hand-drawn ring. Sensitive fields can opt out and remain manual unless
+  // the stricter high-confidence rule above is met.
+  if (!requireHighVisualConfidence && best.score >= 0.1 && gap >= 0.025) {
     return {
       field: group.field,
       value: best.value,

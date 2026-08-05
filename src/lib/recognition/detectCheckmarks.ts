@@ -1,7 +1,7 @@
-import { analyzeChoiceGroup, loadImageAnalysisData, type PixelRect } from './markDensity';
+import { analyzeChoiceGroup, hasUsableFormBounds, loadImageAnalysisData, type PixelRect } from './markDensity';
 import { getTemplate } from './roiTemplates';
 import { buildCagiRowOverrides, buildSatisfactionRowOverrides } from './tableRowDetection';
-import { buildCagiGridDetection, buildSatisfactionGridOverrides } from './tableGridDetection';
+import { buildCagiGridDetection, buildSatisfactionGridDetection } from './tableGridDetection';
 import fs from 'fs/promises';
 
 export interface RecognitionDraft {
@@ -106,13 +106,13 @@ export async function recognizeStudentForms(
     const cagiImage = await loadImageAnalysisData(cagiPath);
     const cagiImageBuffer = await fs.readFile(cagiPath);
     const cagiTemplate = getTemplate('cagi');
-    const canAutoRecognizeCagi = cagiImage.contentBoundsConfident;
+    const canAutoRecognizeCagi = hasUsableFormBounds(cagiImage);
     const cagiRowOverrides = canAutoRecognizeCagi
       ? await buildCagiRowOverrides(cagiImage, cagiImageBuffer, toOcrOptions(options))
       : {};
-    const cagiGridDetection = canAutoRecognizeCagi
-      ? buildCagiGridDetection(cagiImage)
-      : { overrides: {}, registeredFields: new Set<string>() };
+    // Grid cells remain useful review coordinates even when the outer document
+    // frame is uncertain. The confidence gate below still forbids auto values.
+    const cagiGridDetection = buildCagiGridDetection(cagiImage);
     const cagiGridOverrides = cagiGridDetection.overrides;
 
     if (!canAutoRecognizeCagi) {
@@ -125,8 +125,9 @@ export async function recognizeStudentForms(
         cagiImage,
         group,
         cagiRowOverrides[group.field],
-        canAutoRecognizeCagi && !cagiGridDetection.registeredFields.has(group.field),
+        canAutoRecognizeCagi && Boolean(gridCells) && !cagiGridDetection.registeredFields.has(group.field),
         gridCells,
+        requiresHighVisualConfidence(group.field),
       );
       draft.confidence[result.field] = result.confidence;
       draft.candidates![result.field] = mapRecognizedCandidates(result.field, result.candidates);
@@ -147,6 +148,10 @@ export async function recognizeStudentForms(
         draft.cagi[questionKey] = Number(result.value);
       }
     }
+
+    for (const [field, rect] of Object.entries(cagiGridDetection.fieldRects)) {
+      recognitionCropRects[field] = rect;
+    }
   } catch {
     // 이미지 분석 실패 시 임의값을 넣지 않고 검수 화면에서 직접 입력하도록 낮은 신뢰도로 둔다.
   }
@@ -155,13 +160,12 @@ export async function recognizeStudentForms(
     const satisfactionImage = await loadImageAnalysisData(satisfactionPath);
     const satisfactionImageBuffer = await fs.readFile(satisfactionPath);
     const satisfactionTemplate = getTemplate('satisfaction');
-    const canAutoRecognizeSatisfaction = satisfactionImage.contentBoundsConfident;
+    const canAutoRecognizeSatisfaction = hasUsableFormBounds(satisfactionImage);
     const satisfactionRowOverrides = canAutoRecognizeSatisfaction
       ? await buildSatisfactionRowOverrides(satisfactionImage, satisfactionImageBuffer, toOcrOptions(options))
       : {};
-    const satisfactionGridOverrides = canAutoRecognizeSatisfaction
-      ? buildSatisfactionGridOverrides(satisfactionImage)
-      : {};
+    const satisfactionGridDetection = buildSatisfactionGridDetection(satisfactionImage);
+    const satisfactionGridOverrides = satisfactionGridDetection.overrides;
 
     if (!canAutoRecognizeSatisfaction) {
       draft.warnings?.push('만족도조사 이미지의 종이 경계를 안정적으로 찾지 못해 자동 입력을 확정하지 않았습니다. 강조된 항목을 원본과 대조해 직접 확인해주세요.');
@@ -173,8 +177,9 @@ export async function recognizeStudentForms(
         satisfactionImage,
         group,
         satisfactionRowOverrides[group.field],
-        canAutoRecognizeSatisfaction,
+        canAutoRecognizeSatisfaction && Boolean(gridCells) && !satisfactionGridDetection.registeredFields.has(group.field),
         gridCells,
+        requiresHighVisualConfidence(group.field),
       );
       draft.confidence[result.field] = result.confidence;
       draft.candidates![result.field] = result.candidates;
@@ -186,6 +191,12 @@ export async function recognizeStudentForms(
 
       const questionKey = result.field.replace('satisfaction.', '');
       draft.satisfaction[questionKey] = Number(result.value);
+    }
+
+    for (const [field, rect] of Object.entries(satisfactionGridDetection.fieldRects)) {
+      if (!recognitionCropRects[field]) {
+        recognitionCropRects[field] = rect;
+      }
     }
   } catch {
     // Keep satisfaction fields empty so the review screen can collect them manually.
@@ -277,4 +288,17 @@ function unionPixelRects(rects: PixelRect[]): PixelRect {
     right: Math.max(...rects.map((rect) => rect.right)),
     bottom: Math.max(...rects.map((rect) => rect.bottom)),
   };
+}
+
+function requiresHighVisualConfidence(field: string): boolean {
+  return new Set([
+    'cagi.q04',
+    'cagi.q05',
+    'cagi.q08',
+    'satisfaction.q01',
+    'satisfaction.q07',
+    'satisfaction.q08',
+    'satisfaction.q09',
+    'satisfaction.q10',
+  ]).has(field);
 }

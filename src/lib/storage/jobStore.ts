@@ -13,7 +13,8 @@ export interface JobSession {
 const activeJobs = new Map<string, JobSession>();
 export const DEFAULT_JOB_TTL_MS = 24 * 60 * 60 * 1000;
 const SESSION_FILE = 'session.json';
-const JOB_ID_PATTERN = /^job_\d+$/;
+// Keep timestamp-only IDs valid so existing in-progress sessions can be reopened.
+const JOB_ID_PATTERN = /^job_\d+(?:_[a-f0-9-]{36})?$/;
 
 function getSessionPath(jobId: string): string {
   return path.join(getJobDir(jobId), SESSION_FILE);

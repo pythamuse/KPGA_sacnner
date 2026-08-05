@@ -39,28 +39,31 @@ const rect = (x: number, y: number, width: number, height: number): NormalizedRe
   height,
 });
 
-const cagiOptionXs = [0.746, 0.809, 0.876, 0.951];
-export const cagiQuestionYs = [0.36, 0.383, 0.405, 0.427, 0.449, 0.471, 0.493];
-export const cagiLateQuestionYs = [0.548, 0.57];
+// Calibrated against the official A4 form's printed table geometry. These
+// coordinates are only a search anchor; tableGridDetection must still find
+// the actual row and column rules before an answer can be confirmed.
+const cagiOptionXs = [0.742, 0.805, 0.871, 0.944];
+export const cagiQuestionYs = [0.334, 0.358, 0.383, 0.401, 0.419, 0.436, 0.455];
+export const cagiLateQuestionYs = [0.512, 0.53];
 const schoolTypeCandidates = [
-  { value: 'elementary', rect: rect(0.335, 0.177, 0.025, 0.02) },
-  { value: 'middle', rect: rect(0.512, 0.177, 0.025, 0.02) },
-  { value: 'high', rect: rect(0.335, 0.204, 0.025, 0.02) },
-  { value: 'outside', rect: rect(0.622, 0.177, 0.025, 0.02) },
+  { value: 'elementary', rect: rect(0.335, 0.164, 0.025, 0.02) },
+  { value: 'middle', rect: rect(0.512, 0.164, 0.025, 0.02) },
+  { value: 'high', rect: rect(0.335, 0.183, 0.025, 0.02) },
+  { value: 'outside', rect: rect(0.622, 0.164, 0.025, 0.02) },
 ];
 const gradeCandidates = [
-  { value: 'grade1', rect: rect(0.245, 0.231, 0.024, 0.02) },
-  { value: 'grade2', rect: rect(0.39, 0.231, 0.024, 0.02) },
-  { value: 'grade3', rect: rect(0.535, 0.231, 0.024, 0.02) },
-  { value: 'grade4', rect: rect(0.245, 0.257, 0.024, 0.02) },
-  { value: 'grade5', rect: rect(0.39, 0.257, 0.024, 0.02) },
-  { value: 'grade6', rect: rect(0.535, 0.257, 0.024, 0.02) },
+  { value: 'grade1', rect: rect(0.245, 0.198, 0.024, 0.02) },
+  { value: 'grade2', rect: rect(0.39, 0.198, 0.024, 0.02) },
+  { value: 'grade3', rect: rect(0.535, 0.198, 0.024, 0.02) },
+  { value: 'grade4', rect: rect(0.245, 0.218, 0.024, 0.02) },
+  { value: 'grade5', rect: rect(0.39, 0.218, 0.024, 0.02) },
+  { value: 'grade6', rect: rect(0.535, 0.218, 0.024, 0.02) },
 ];
-const satisfactionFrequencyXs = [0.668, 0.748, 0.827, 0.908];
-const satisfactionBinaryXs = [0.815, 0.903];
-const satisfactionScaleXs = [0.595, 0.686, 0.777, 0.866, 0.945];
-export const satisfactionBinaryYs = [0.462, 0.507, 0.552, 0.596, 0.641];
-export const satisfactionScaleYs = [0.723, 0.765, 0.806, 0.848];
+const satisfactionFrequencyXs = [0.691, 0.772, 0.852, 0.933];
+const satisfactionBinaryXs = [0.849, 0.934];
+const satisfactionScaleXs = [0.583, 0.677, 0.764, 0.849, 0.943];
+export const satisfactionBinaryYs = [0.43, 0.478, 0.526, 0.561, 0.596];
+export const satisfactionScaleYs = [0.75, 0.78, 0.811, 0.841];
 
 const makeChoiceGroup = (
   field: string,
@@ -86,8 +89,8 @@ export const cagiTemplate: FormRecognitionTemplate = {
     {
       field: 'basic.gender',
       candidates: [
-        { value: '남', rect: rect(0.748, 0.151, 0.022, 0.018) },
-        { value: '여', rect: rect(0.865, 0.151, 0.022, 0.018) },
+        { value: '남', rect: rect(0.792, 0.145, 0.022, 0.018) },
+        { value: '여', rect: rect(0.91, 0.145, 0.022, 0.018) },
       ],
     },
     {
@@ -106,7 +109,7 @@ export const cagiTemplate: FormRecognitionTemplate = {
     ),
   ],
   fieldRegions: [
-    { field: 'basic.age', rect: rect(0.795, 0.17, 0.13, 0.055) },
+    { field: 'basic.age', rect: rect(0.77, 0.163, 0.12, 0.03) },
   ],
 };
 
@@ -117,7 +120,7 @@ export const satisfactionTemplate: FormRecognitionTemplate = {
     height: 656,
   },
   choiceGroups: [
-    makeChoiceGroup('satisfaction.q01', [1, 2, 3, 4], satisfactionFrequencyXs, 0.35, 0.025),
+    makeChoiceGroup('satisfaction.q01', [1, 2, 3, 4], satisfactionFrequencyXs, 0.43, 0.025),
     ...satisfactionBinaryYs.map((y, index) =>
       makeChoiceGroup(`satisfaction.q${String(index + 2).padStart(2, '0')}`, [0, 1], satisfactionBinaryXs, y, 0.022),
     ),

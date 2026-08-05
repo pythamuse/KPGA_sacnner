@@ -8,6 +8,7 @@ node_modules/
 # Next.js build/cache output
 .next/
 out/
+*.tsbuildinfo
 
 # Local environment and secrets
 .env

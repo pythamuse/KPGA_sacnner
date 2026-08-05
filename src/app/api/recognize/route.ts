@@ -6,7 +6,7 @@ import { classifyForm, FORM_CLASSIFIER_POLICY_VERSION } from '../../../lib/recog
 import { recognizeStudentForms } from '../../../lib/recognition/detectCheckmarks';
 import { matchBatch } from '../../../lib/recognition/batchMatcher';
 import { hasJobSession } from '../../../lib/storage/jobStore';
-import { hasCagiEarlyInterventionMarks } from '../../../lib/recognition/cagiEarlyIntervention';
+import { detectCagiEarlyIntervention } from '../../../lib/recognition/cagiEarlyIntervention';
 import { buildSourcePreview } from '../../../lib/recognition/buildSourcePreview';
 
 export function GET() {
@@ -55,23 +55,28 @@ export async function POST(req: Request) {
     }> = [];
     const formTypeOverrideWarnings: string[] = [];
     const earlyInterventionFilenames = new Set<string>();
+    const earlyInterventionContactFilenames = new Set<string>();
 
     await Promise.all(
       allFiles.map(async (filename) => {
         const filePath = path.join(uploadDir, filename);
         const formType = await classifyForm(filePath);
         const uploadedAs = getUploadedFormType(filename);
-        const hasEarlyInterventionMarks = uploadedAs === 'cagi'
-          ? await hasCagiEarlyInterventionMarks(filePath)
-          : false;
+        const earlyIntervention = uploadedAs === 'cagi'
+          ? await detectCagiEarlyIntervention(filePath)
+          : { hasMarks: false, hasContactInformation: false };
+        const hasEarlyInterventionMarks = earlyIntervention.hasMarks;
 
         if (hasEarlyInterventionMarks) {
           earlyInterventionFilenames.add(filename);
         }
+        if (earlyIntervention.hasContactInformation) {
+          earlyInterventionContactFilenames.add(filename);
+        }
 
         const shouldKeepAsCagiWithNotice = uploadedAs === 'cagi' &&
           formType === 'satisfaction' &&
-          hasEarlyInterventionMarks;
+          (hasEarlyInterventionMarks || earlyIntervention.hasContactInformation);
 
         const hasFormTypeMismatch = Boolean(
           uploadedAs &&
@@ -113,7 +118,10 @@ export async function POST(req: Request) {
 
     const cagiCount = cagiPaths.length;
     const satisfactionCount = satisfactionPaths.length;
-    const earlyInterventionWarnings = buildEarlyInterventionWarnings(cagiPaths, earlyInterventionFilenames);
+    const earlyInterventionWarnings = [
+      ...buildEarlyInterventionWarnings(cagiPaths, earlyInterventionFilenames),
+      ...buildEarlyInterventionContactWarnings(cagiPaths, earlyInterventionContactFilenames),
+    ];
 
     if (typeMismatches.length > 0) {
       return NextResponse.json({
@@ -245,6 +253,29 @@ function buildFormTypeMismatchMessage(
   }
 
   return `업로드 칸과 이미지 내용이 다른 파일이 ${mismatches.length}개 있습니다. 첫 번째 문제 파일: ${first.filename} (${uploadedLabel} 칸, 실제 내용은 ${detectedLabel} 양식).`;
+}
+
+function buildEarlyInterventionContactWarnings(cagiPaths: string[], contactFilenames: Set<string>): string[] {
+  const pageNumbers = getCagiPageNumbers(cagiPaths, contactFilenames);
+  if (pageNumbers.length === 0) {
+    return [];
+  }
+
+  return [
+    `선별검사지 ${formatPageNumbers(pageNumbers)}페이지의 조기개입 서비스 영역에서 이름 및 연락처 입력 흔적이 감지되었습니다. 개인정보는 저장하지 않으며, 원본을 확인해 후속 절차를 진행하세요.`,
+  ];
+}
+
+function getCagiPageNumbers(cagiPaths: string[], filenames: Set<string>): number[] {
+  if (filenames.size === 0) {
+    return [];
+  }
+
+  return [...cagiPaths]
+    .map((filePath) => path.basename(filePath))
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }))
+    .map((filename, index) => filenames.has(filename) ? index + 1 : undefined)
+    .filter((pageNumber): pageNumber is number => pageNumber !== undefined);
 }
 
 function buildUploadedTypeOverrideWarning(

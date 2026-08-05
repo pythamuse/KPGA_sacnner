@@ -54,19 +54,17 @@ describe('table grid detection', () => {
 
     expect(overrides['satisfaction.q02']).toHaveLength(2);
     expect(overrides['satisfaction.q06'][0].top).toBeGreaterThan(overrides['satisfaction.q02'][0].top);
+    // Each printed table is an independent registration unit. A two-column
+    // table must never fabricate coordinates for the five-point table below.
     expect(overrides['satisfaction.q07']).toBeUndefined();
   });
 
-  it('falls back to printed-circle registration when tilted cells no longer share one vertical line', () => {
+  it('does not fabricate cells from dark printed content when table rules are absent', () => {
     const image = makeRegisteredCagiImage();
     const overrides = buildCagiGridOverrides(image);
-    const sourceCandidate = cagiTemplate.choiceGroups.find((group) => group.field === 'cagi.q01')!.candidates[0];
-    const expectedLeft = Math.round((0.1 + sourceCandidate.rect.x * 0.8) * image.width);
 
-    expect(overrides['cagi.q01']).toHaveLength(4);
-    expect(overrides['cagi.q07']).toHaveLength(4);
-    expect(overrides['cagi.q01'][0].left).toBeLessThanOrEqual(expectedLeft + 12);
-    expect(overrides['cagi.q01'][0].right).toBeGreaterThanOrEqual(expectedLeft - 12);
+    expect(overrides['cagi.q01']).toBeUndefined();
+    expect(overrides['cagi.q07']).toBeUndefined();
   });
 });
 

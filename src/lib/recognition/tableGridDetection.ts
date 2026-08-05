@@ -1,5 +1,5 @@
 import { type ImageAnalysisData, type PixelBounds, type PixelRect } from './markDensity';
-import { cagiTemplate, satisfactionTemplate, type ChoiceGroup } from './roiTemplates';
+import { cagiTemplate, satisfactionTemplate, type ChoiceGroup, type NormalizedRect } from './roiTemplates';
 import { detectHorizontalLines } from './tableRowDetection';
 
 export interface VerticalLine {
@@ -10,11 +10,11 @@ export type FieldCellOverrides = Record<string, PixelRect[]>;
 
 interface TableGridSpec {
   groups: ChoiceGroup[];
-  enableTemplateAlignment?: boolean;
 }
 
 export interface GridDetectionResult {
   overrides: FieldCellOverrides;
+  fieldRects: Record<string, PixelRect>;
   registeredFields: Set<string>;
 }
 
@@ -63,52 +63,68 @@ export function buildCagiGridOverrides(image: ImageAnalysisData): FieldCellOverr
 }
 
 export function buildCagiGridDetection(image: ImageAnalysisData): GridDetectionResult {
-  return mergeGridDetection(image, [
-    { groups: getGroups(cagiTemplate.choiceGroups, [
+  const primaryGroups = getGroups(cagiTemplate.choiceGroups, [
       'cagi.q01', 'cagi.q02', 'cagi.q03', 'cagi.q04', 'cagi.q05', 'cagi.q06', 'cagi.q07',
-    ]), enableTemplateAlignment: true },
-    { groups: getGroups(cagiTemplate.choiceGroups, ['cagi.q08', 'cagi.q09']), enableTemplateAlignment: true },
   ]);
+  const result = mergeGridDetection(image, [
+    { groups: primaryGroups },
+    { groups: getGroups(cagiTemplate.choiceGroups, ['cagi.q08', 'cagi.q09']) },
+  ]);
+
+  const basicGroups = getGroups(cagiTemplate.choiceGroups, [
+    'basic.gender', 'basic.schoolType', 'basic.grade',
+  ]);
+  const ageRegion = cagiTemplate.fieldRegions?.find((region) => region.field === 'basic.age');
+
+  return {
+    overrides: result.overrides,
+    fieldRects: {
+      ...result.fieldRects,
+      ...mapGroupsToUnionRects(image, basicGroups),
+      ...(ageRegion ? { [ageRegion.field]: toPixelRect(ageRegion.rect, getBounds(image)) } : {}),
+    },
+    registeredFields: result.registeredFields,
+  };
 }
 
 export function buildSatisfactionGridOverrides(image: ImageAnalysisData): FieldCellOverrides {
-  return mergeGridDetection(image, [
-    { groups: getGroups(satisfactionTemplate.choiceGroups, ['satisfaction.q01']) },
-    { groups: getGroups(satisfactionTemplate.choiceGroups, [
+  return buildSatisfactionGridDetection(image).overrides;
+}
+
+export function buildSatisfactionGridDetection(image: ImageAnalysisData): GridDetectionResult {
+  const q01Groups = getGroups(satisfactionTemplate.choiceGroups, ['satisfaction.q01']);
+  const binaryGroups = getGroups(satisfactionTemplate.choiceGroups, [
       'satisfaction.q02', 'satisfaction.q03', 'satisfaction.q04', 'satisfaction.q05', 'satisfaction.q06',
-    ]) },
-    { groups: getGroups(satisfactionTemplate.choiceGroups, [
+  ]);
+  const scaleGroups = getGroups(satisfactionTemplate.choiceGroups, [
       'satisfaction.q07', 'satisfaction.q08', 'satisfaction.q09', 'satisfaction.q10',
-    ]) },
-  ]).overrides;
+  ]);
+  const result = mergeGridDetection(image, [
+    { groups: q01Groups },
+    { groups: binaryGroups },
+    { groups: scaleGroups },
+  ]);
+
+  return {
+    overrides: result.overrides,
+    fieldRects: {
+      ...result.fieldRects,
+      ...mapGroupsToUnionRects(image, q01Groups),
+    },
+    registeredFields: result.registeredFields,
+  };
 }
 
 function mergeGridDetection(image: ImageAnalysisData, specs: TableGridSpec[]): GridDetectionResult {
-  if (!image.contentBoundsConfident) {
-    return { overrides: {}, registeredFields: new Set() };
-  }
-
   return specs.reduce<GridDetectionResult>((result, spec) => {
-    const registered = spec.enableTemplateAlignment
-      ? buildTemplateAlignedOverrides(image, spec)
-      : {};
     const exact = buildGridOverrides(image, spec);
-    const registeredFields = new Set(result.registeredFields);
-
-    for (const field of Object.keys(registered)) {
-      if (!exact[field]) {
-        registeredFields.add(field);
-      }
-    }
-    for (const field of Object.keys(exact)) {
-      registeredFields.delete(field);
-    }
 
     return {
-      overrides: { ...result.overrides, ...registered, ...exact },
-      registeredFields,
+      overrides: { ...result.overrides, ...exact },
+      fieldRects: result.fieldRects,
+      registeredFields: result.registeredFields,
     };
-  }, { overrides: {}, registeredFields: new Set() });
+  }, { overrides: {}, fieldRects: {}, registeredFields: new Set() });
 }
 
 function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): FieldCellOverrides {
@@ -179,127 +195,32 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Fiel
   return overrides;
 }
 
-/**
- * When perspective makes one table rule drift across rows, a single global
- * x/y line cannot describe every cell. Align the repeated printed response
- * circles before falling back to the static template positions.
- */
-function buildTemplateAlignedOverrides(image: ImageAnalysisData, spec: TableGridSpec): FieldCellOverrides {
-  const { groups } = spec;
-  if (groups.length < 2 || !image.contentBoundsConfident) {
-    return {};
-  }
-
+function mapGroupsToUnionRects(
+  image: ImageAnalysisData,
+  groups: ChoiceGroup[],
+): Record<string, PixelRect> {
   const bounds = getBounds(image);
-  const baseline: GridTransform = { xScale: 1, xOffset: 0, yScale: 1, yOffset: 0 };
-  let transform = baseline;
-  transform = findBestAxisTransform(image, groups, bounds, transform, 'x');
-  transform = findBestAxisTransform(image, groups, bounds, transform, 'y');
-  transform = findBestAxisTransform(image, groups, bounds, transform, 'x');
-
-  const baselineScore = scoreTransform(image, groups, bounds, baseline);
-  const score = scoreTransform(image, groups, bounds, transform);
-  if (!isRegistrationConfident(score, baselineScore, transform)) {
-    return {};
-  }
-
-  return Object.fromEntries(groups.map((group) => [
-    group.field,
-    group.candidates.map((candidate) => toPixelRect(candidate.rect, bounds, transform)),
-  ]));
-}
-
-interface GridTransform {
-  xScale: number;
-  xOffset: number;
-  yScale: number;
-  yOffset: number;
-}
-
-function findBestAxisTransform(
-  image: ImageAnalysisData,
-  groups: ChoiceGroup[],
-  bounds: PixelBounds,
-  current: GridTransform,
-  axis: 'x' | 'y',
-): GridTransform {
-  let best = current;
-  let bestScore = scoreTransform(image, groups, bounds, current);
-  const scaleValues = axis === 'x'
-    ? [0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 1, 1.05, 1.1, 1.15, 1.2]
-    : [0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 1, 1.05, 1.1, 1.15, 1.2, 1.25, 1.3];
-  const offsetValues = [-0.14, -0.12, -0.1, -0.08, -0.06, -0.04, -0.02, 0, 0.02, 0.04, 0.06, 0.08, 0.1, 0.12, 0.14, 0.16, 0.18];
-
-  for (const scale of scaleValues) {
-    for (const offset of offsetValues) {
-      const candidate = axis === 'x'
-        ? { ...current, xScale: scale, xOffset: offset }
-        : { ...current, yScale: scale, yOffset: offset };
-      const score = scoreTransform(image, groups, bounds, candidate);
-      if (score > bestScore) {
-        best = candidate;
-        bestScore = score;
-      }
-    }
-  }
-
-  return best;
-}
-
-function scoreTransform(
-  image: ImageAnalysisData,
-  groups: ChoiceGroup[],
-  bounds: PixelBounds,
-  transform: GridTransform,
-): number {
-  const scores = groups.flatMap((group) => group.candidates.map((candidate) => {
-    const rect = toPixelRect(candidate.rect, bounds, transform);
-    return isInsideBounds(rect, bounds) ? sampleDarkDensity(image, rect) : 0;
-  })).sort((left, right) => left - right);
-
-  if (scores.length === 0) {
-    return 0;
-  }
-
-  // The marked option can be much darker than the pre-printed circles. Use
-  // the middle half so registration is driven by the repeated form pattern.
-  const start = Math.floor(scores.length * 0.25);
-  const end = Math.max(start + 1, Math.ceil(scores.length * 0.75));
-  return average(scores.slice(start, end));
-}
-
-function sampleDarkDensity(image: ImageAnalysisData, rect: PixelRect): number {
-  const left = clamp(Math.floor(rect.left), 0, image.width - 1);
-  const top = clamp(Math.floor(rect.top), 0, image.height - 1);
-  const right = clamp(Math.ceil(rect.right), left + 1, image.width);
-  const bottom = clamp(Math.ceil(rect.bottom), top + 1, image.height);
-  const stride = 3;
-  let dark = 0;
-  let total = 0;
-
-  for (let y = top; y < bottom; y += stride) {
-    for (let x = left; x < right; x += stride) {
-      if (image.pixels[y * image.width + x] < 150) {
-        dark++;
-      }
-      total++;
-    }
-  }
-
-  return total === 0 ? 0 : dark / total;
+  return Object.fromEntries(groups.map((group) => {
+    const cells = group.candidates.map((candidate) => toPixelRect(candidate.rect, bounds));
+    return [group.field, {
+      left: Math.min(...cells.map((cell) => cell.left)),
+      top: Math.min(...cells.map((cell) => cell.top)),
+      right: Math.max(...cells.map((cell) => cell.right)),
+      bottom: Math.max(...cells.map((cell) => cell.bottom)),
+    }];
+  }));
 }
 
 function toPixelRect(
-  rect: { x: number; y: number; width: number; height: number },
+  rect: NormalizedRect,
   bounds: PixelBounds,
-  transform: GridTransform,
 ): PixelRect {
   const baseWidth = bounds.right - bounds.left;
   const baseHeight = bounds.bottom - bounds.top;
-  const centerX = bounds.left + (transform.xOffset + (rect.x + rect.width / 2) * transform.xScale) * baseWidth;
-  const centerY = bounds.top + (transform.yOffset + (rect.y + rect.height / 2) * transform.yScale) * baseHeight;
-  const width = Math.max(10, rect.width * baseWidth * transform.xScale * 0.9);
-  const height = Math.max(10, rect.height * baseHeight * transform.yScale * 0.9);
+  const centerX = bounds.left + (rect.x + rect.width / 2) * baseWidth;
+  const centerY = bounds.top + (rect.y + rect.height / 2) * baseHeight;
+  const width = Math.max(10, rect.width * baseWidth * 0.9);
+  const height = Math.max(10, rect.height * baseHeight * 0.9);
 
   return {
     left: Math.round(centerX - width / 2),
@@ -307,20 +228,6 @@ function toPixelRect(
     top: Math.round(centerY - height / 2),
     bottom: Math.round(centerY + height / 2),
   };
-}
-
-function isInsideBounds(rect: PixelRect, bounds: PixelBounds): boolean {
-  return rect.left >= bounds.left &&
-    rect.right <= bounds.right &&
-    rect.top >= bounds.top &&
-    rect.bottom <= bounds.bottom &&
-    rect.right - rect.left >= 10 &&
-    rect.bottom - rect.top >= 10;
-}
-
-function isRegistrationConfident(score: number, baselineScore: number, transform: GridTransform): boolean {
-  const moved = Math.abs(transform.xScale - 1) + Math.abs(transform.xOffset) + Math.abs(transform.yScale - 1) + Math.abs(transform.yOffset);
-  return score >= 0.045 && (moved < 0.02 || score >= baselineScore * 1.08);
 }
 
 function getGroups(allGroups: ChoiceGroup[], fields: string[]): ChoiceGroup[] {
@@ -334,7 +241,10 @@ function deriveCellBoundaries(centers: number[], fallbackSize: number): number[]
   }
 
   if (centers.length === 1) {
-    const halfSize = Math.max(fallbackSize * 1.6, 0.018);
+    // A choice-marker box is smaller than its enclosing one-row table cell.
+    // Using the old 1.6 multiplier caused the satisfaction Q1 search to span
+    // both the header and the answer row.
+    const halfSize = Math.max(fallbackSize * 0.75, 0.018);
     return [centers[0] - halfSize, centers[0] + halfSize];
   }
 
@@ -391,8 +301,10 @@ function hasConsistentGaps(actual: number[], expected: number[]): boolean {
 }
 
 function buildCellCenterRect(left: number, right: number, top: number, bottom: number): PixelRect {
-  const horizontalInset = (right - left) * 0.24;
-  const verticalInset = (bottom - top) * 0.2;
+  // Hand-drawn circles often surround the pre-printed option marker. Keep the
+  // outer ring inside the measured cell while still excluding table rules.
+  const horizontalInset = (right - left) * 0.13;
+  const verticalInset = (bottom - top) * 0.16;
 
   return {
     left: Math.round(left + horizontalInset),

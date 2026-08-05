@@ -49,7 +49,7 @@ describe('table row detection', () => {
   });
 
   it('builds CAGI row overrides when the detected rows match the template gap pattern', async () => {
-    const rowYs = [360, 383, 405, 427, 449, 471, 493, 548, 570];
+    const rowYs = [334, 358, 383, 401, 419, 436, 455, 512, 530];
     const filePath = path.join(fixtureDir, 'cagi-rows.png');
     await writeSyntheticRows(filePath, rowYs);
     const image = await loadImageAnalysisData(filePath);
@@ -57,9 +57,9 @@ describe('table row detection', () => {
     const overrides = buildCagiRowOverrides(image);
 
     expect(Object.keys(overrides)).toHaveLength(9);
-    expect(overrides['cagi.q01']).toEqual({ top: 349, bottom: 370 });
-    expect(overrides['cagi.q08']).toEqual({ top: 537, bottom: 558 });
-    expect(overrides['cagi.q09']).toEqual({ top: 559, bottom: 580 });
+    expect(overrides['cagi.q01']).toEqual({ top: 322, bottom: 345 });
+    expect(overrides['cagi.q08']).toEqual({ top: 503, bottom: 520 });
+    expect(overrides['cagi.q09']).toEqual({ top: 521, bottom: 538 });
   });
 
   it('returns empty CAGI overrides for images without a confident row structure', async () => {
@@ -80,7 +80,7 @@ describe('table row detection', () => {
 
   it('matches satisfaction row groups independently and skips q01', async () => {
     const filePath = path.join(fixtureDir, 'satisfaction-rows.png');
-    await writeSyntheticRows(filePath, [462, 507, 552, 596, 641, 723, 765, 806, 848]);
+    await writeSyntheticRows(filePath, [430, 478, 526, 561, 596, 750, 780, 811, 841]);
     const image = await loadImageAnalysisData(filePath);
 
     const overrides = buildSatisfactionRowOverrides(image);

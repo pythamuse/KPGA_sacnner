@@ -29,7 +29,7 @@ describe('만족도 ROI 인식', () => {
       'cagi.q07': 0,
       'cagi.q08': 0,
       'cagi.q09': 0,
-    });
+    }, true, true);
     await writeMarkedForm(satisfactionPath, satisfactionTemplate.choiceGroups, {
       'satisfaction.q01': 4,
       'satisfaction.q02': 1,
@@ -41,7 +41,7 @@ describe('만족도 ROI 인식', () => {
       'satisfaction.q08': 4,
       'satisfaction.q09': 4,
       'satisfaction.q10': 4,
-    });
+    }, true, true);
 
     const draft = await recognizeStudentForms(cagiPath, satisfactionPath);
 
@@ -88,6 +88,7 @@ async function writeMarkedForm(
   groups: ChoiceGroup[],
   selectedValues: Record<string, number | string>,
   includeFrame = true,
+  includeTableGrids = false,
 ) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
 
@@ -121,9 +122,65 @@ async function writeMarkedForm(
     <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
       <rect width="100%" height="100%" fill="#fff"/>
       ${includeFrame ? `<rect x="${bounds.left}" y="${bounds.top}" width="${bounds.width}" height="${bounds.height}" fill="none" stroke="#000" stroke-width="6"/>` : ''}
+      ${includeTableGrids ? renderResponseGrids(groups, bounds) : ''}
       ${marks.join('\n')}
     </svg>
   `;
 
   await sharp(Buffer.from(svg)).png().toFile(filePath);
+}
+
+function renderResponseGrids(
+  groups: ChoiceGroup[],
+  bounds: { left: number; top: number; width: number; height: number },
+): string {
+  const prefix = groups.some((group) => group.field.startsWith('cagi.')) ? 'cagi.' : 'satisfaction.';
+  const specs = prefix === 'cagi.'
+    ? [
+      ['cagi.q01', 'cagi.q02', 'cagi.q03', 'cagi.q04', 'cagi.q05', 'cagi.q06', 'cagi.q07'],
+      ['cagi.q08', 'cagi.q09'],
+    ]
+    : [
+      ['satisfaction.q01'],
+      ['satisfaction.q02', 'satisfaction.q03', 'satisfaction.q04', 'satisfaction.q05', 'satisfaction.q06'],
+      ['satisfaction.q07', 'satisfaction.q08', 'satisfaction.q09', 'satisfaction.q10'],
+    ];
+
+  return specs.map((fields) => {
+    const tableGroups = fields
+      .map((field) => groups.find((group) => group.field === field))
+      .filter((group): group is ChoiceGroup => Boolean(group));
+    if (tableGroups.length !== fields.length) return '';
+
+    const columnCenters = tableGroups[0].candidates.map((candidate) => candidate.rect.x + candidate.rect.width / 2);
+    const rowCenters = tableGroups.map((group) => average(group.candidates.map(
+      (candidate) => candidate.rect.y + candidate.rect.height / 2,
+    )));
+    const xLines = toPixels(deriveBoundaries(columnCenters), bounds.left, bounds.width);
+    const yLines = toPixels(deriveBoundaries(rowCenters), bounds.top, bounds.height);
+    return [
+      ...xLines.map((x) => `<line x1="${x}" y1="${yLines[0]}" x2="${x}" y2="${yLines[yLines.length - 1]}" stroke="#000" stroke-width="3"/>`),
+      ...yLines.map((y) => `<line x1="${xLines[0]}" y1="${y}" x2="${xLines[xLines.length - 1]}" y2="${y}" stroke="#000" stroke-width="3"/>`),
+    ].join('\n');
+  }).join('\n');
+}
+
+function deriveBoundaries(centers: number[]): number[] {
+  if (centers.length === 1) {
+    return [centers[0] - 0.04, centers[0] + 0.04];
+  }
+
+  return [
+    centers[0] - (centers[1] - centers[0]) / 2,
+    ...centers.slice(1).map((center, index) => (centers[index] + center) / 2),
+    centers[centers.length - 1] + (centers[centers.length - 1] - centers[centers.length - 2]) / 2,
+  ];
+}
+
+function toPixels(values: number[], offset: number, size: number): number[] {
+  return values.map((value) => Math.round(offset + value * size));
+}
+
+function average(values: number[]): number {
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
 }
