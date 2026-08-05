@@ -1,6 +1,7 @@
-import { analyzeChoiceGroup, loadImageAnalysisData } from './markDensity';
+import { analyzeChoiceGroup, loadImageAnalysisData, type PixelRect } from './markDensity';
 import { getTemplate } from './roiTemplates';
 import { buildCagiRowOverrides, buildSatisfactionRowOverrides } from './tableRowDetection';
+import { buildCagiGridDetection, buildSatisfactionGridOverrides } from './tableGridDetection';
 import fs from 'fs/promises';
 
 export interface RecognitionDraft {
@@ -49,6 +50,7 @@ export interface RecognitionDraft {
   candidates?: {
     [key: string]: Array<{ value: number | string; score: number }>;
   };
+  recognitionCropRects?: Record<string, PixelRect>;
   warnings?: string[];
 }
 
@@ -98,6 +100,7 @@ export async function recognizeStudentForms(
   }
 
   const draft = createEmptyDraft();
+  const recognitionCropRects: Record<string, PixelRect> = {};
 
   try {
     const cagiImage = await loadImageAnalysisData(cagiPath);
@@ -107,20 +110,29 @@ export async function recognizeStudentForms(
     const cagiRowOverrides = canAutoRecognizeCagi
       ? await buildCagiRowOverrides(cagiImage, cagiImageBuffer, toOcrOptions(options))
       : {};
+    const cagiGridDetection = canAutoRecognizeCagi
+      ? buildCagiGridDetection(cagiImage)
+      : { overrides: {}, registeredFields: new Set<string>() };
+    const cagiGridOverrides = cagiGridDetection.overrides;
 
     if (!canAutoRecognizeCagi) {
       draft.warnings?.push('선별검사지의 종이 경계를 안정적으로 찾지 못해 자동 입력을 확정하지 않았습니다. 강조된 항목을 원본과 대조해 직접 확인해주세요.');
     }
 
     for (const group of cagiTemplate.choiceGroups) {
+      const gridCells = cagiGridOverrides[group.field];
       const result = analyzeChoiceGroup(
         cagiImage,
         group,
         cagiRowOverrides[group.field],
-        canAutoRecognizeCagi,
+        canAutoRecognizeCagi && !cagiGridDetection.registeredFields.has(group.field),
+        gridCells,
       );
       draft.confidence[result.field] = result.confidence;
       draft.candidates![result.field] = mapRecognizedCandidates(result.field, result.candidates);
+      if (gridCells) {
+        recognitionCropRects[result.field] = unionPixelRects(gridCells);
+      }
 
       if (result.value === undefined) continue;
 
@@ -147,20 +159,28 @@ export async function recognizeStudentForms(
     const satisfactionRowOverrides = canAutoRecognizeSatisfaction
       ? await buildSatisfactionRowOverrides(satisfactionImage, satisfactionImageBuffer, toOcrOptions(options))
       : {};
+    const satisfactionGridOverrides = canAutoRecognizeSatisfaction
+      ? buildSatisfactionGridOverrides(satisfactionImage)
+      : {};
 
     if (!canAutoRecognizeSatisfaction) {
       draft.warnings?.push('만족도조사 이미지의 종이 경계를 안정적으로 찾지 못해 자동 입력을 확정하지 않았습니다. 강조된 항목을 원본과 대조해 직접 확인해주세요.');
     }
 
     for (const group of satisfactionTemplate.choiceGroups) {
+      const gridCells = satisfactionGridOverrides[group.field];
       const result = analyzeChoiceGroup(
         satisfactionImage,
         group,
         satisfactionRowOverrides[group.field],
         canAutoRecognizeSatisfaction,
+        gridCells,
       );
       draft.confidence[result.field] = result.confidence;
       draft.candidates![result.field] = result.candidates;
+      if (gridCells) {
+        recognitionCropRects[result.field] = unionPixelRects(gridCells);
+      }
 
       if (result.value === undefined) continue;
 
@@ -169,6 +189,10 @@ export async function recognizeStudentForms(
     }
   } catch {
     // Keep satisfaction fields empty so the review screen can collect them manually.
+  }
+
+  if (Object.keys(recognitionCropRects).length > 0) {
+    draft.recognitionCropRects = recognitionCropRects;
   }
 
   return draft;
@@ -244,4 +268,13 @@ function mapRecognizedCandidates(
   }
 
   return candidates;
+}
+
+function unionPixelRects(rects: PixelRect[]): PixelRect {
+  return {
+    left: Math.min(...rects.map((rect) => rect.left)),
+    top: Math.min(...rects.map((rect) => rect.top)),
+    right: Math.max(...rects.map((rect) => rect.right)),
+    bottom: Math.max(...rects.map((rect) => rect.bottom)),
+  };
 }

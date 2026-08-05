@@ -159,14 +159,15 @@ export async function POST(req: Request) {
     for (let i = 0; i < matchedPairs.length; i++) {
       const pair = matchedPairs[i];
       const draft = await recognizeStudentForms(pair.cagiPath, pair.satisfactionPath, { ocrDeadlineAt });
+      const { recognitionCropRects, ...recognizedDraft } = draft;
       
       // 개별 드래프트 객체에 이미지 정보 주입
       const cagiImageId = path.basename(pair.cagiPath).split('.')[0];
       const satisfactionImageId = path.basename(pair.satisfactionPath).split('.')[0];
-      const preview = await buildSourcePreview(pair.cagiPath, pair.satisfactionPath);
+      const preview = await buildSourcePreview(pair.cagiPath, pair.satisfactionPath, recognitionCropRects);
       
       studentDrafts.push({
-        ...draft,
+        ...recognizedDraft,
         // UI에서 저장 시 식별용으로 이미지 ID들을 source에 엮음
         source: {
           cagiImageId,

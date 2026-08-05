@@ -1,5 +1,6 @@
 import sharp from 'sharp';
 import { generateFieldCropBuffer } from './fieldCrop';
+import { type PixelRect } from './markDensity';
 import { cagiTemplate, satisfactionTemplate } from './roiTemplates';
 
 export interface SourcePreviewAssets {
@@ -9,15 +10,19 @@ export interface SourcePreviewAssets {
   cropDebugDataUrls: Record<string, string>;
 }
 
-export async function buildSourcePreview(cagiPath: string, satisfactionPath: string): Promise<SourcePreviewAssets> {
+export async function buildSourcePreview(
+  cagiPath: string,
+  satisfactionPath: string,
+  fieldCropOverrides: Record<string, PixelRect> = {},
+): Promise<SourcePreviewAssets> {
   const [cagiImageDataUrl, satisfactionImageDataUrl, cagiCrops, satisfactionCrops] = await Promise.all([
     buildImageThumbnailDataUrl(cagiPath),
     buildImageThumbnailDataUrl(satisfactionPath),
     buildFieldCropDataUrls(cagiPath, [
       ...cagiTemplate.choiceGroups.map((group) => group.field),
       ...(cagiTemplate.fieldRegions || []).map((region) => region.field),
-    ]),
-    buildFieldCropDataUrls(satisfactionPath, satisfactionTemplate.choiceGroups.map((group) => group.field)),
+    ], fieldCropOverrides),
+    buildFieldCropDataUrls(satisfactionPath, satisfactionTemplate.choiceGroups.map((group) => group.field), fieldCropOverrides),
   ]);
 
   return {
@@ -48,12 +53,13 @@ async function buildImageThumbnailDataUrl(imagePath: string): Promise<string> {
 async function buildFieldCropDataUrls(
   imagePath: string,
   fields: string[],
+  fieldCropOverrides: Record<string, PixelRect>,
 ): Promise<Pick<SourcePreviewAssets, 'cropDataUrls' | 'cropDebugDataUrls'>> {
   const entries = await Promise.all(
     fields.map(async (field) => {
       const [cropBuffer, debugCropBuffer] = await Promise.all([
-        generateFieldCropBuffer(imagePath, field, false),
-        generateFieldCropBuffer(imagePath, field, true),
+        generateFieldCropBuffer(imagePath, field, false, fieldCropOverrides[field]),
+        generateFieldCropBuffer(imagePath, field, true, fieldCropOverrides[field]),
       ]);
 
       return {

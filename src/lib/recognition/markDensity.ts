@@ -16,6 +16,13 @@ export interface PixelBounds {
   bottom: number;
 }
 
+export interface PixelRect {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
 export interface CandidateScore {
   value: number | string;
   score: number;
@@ -29,16 +36,18 @@ export interface ChoiceGroupResult {
 }
 
 export async function loadImageAnalysisData(filePath: string): Promise<ImageAnalysisData> {
-  const image = sharp(filePath).rotate().flatten({ background: '#ffffff' }).grayscale();
-  const metadata = await image.metadata();
-  const width = metadata.width || 0;
-  const height = metadata.height || 0;
+  const { data: pixels, info } = await sharp(filePath)
+    .rotate()
+    .flatten({ background: '#ffffff' })
+    .grayscale()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  const { width, height } = info;
 
   if (width <= 0 || height <= 0) {
     throw new Error('이미지 크기를 읽을 수 없습니다.');
   }
 
-  const pixels = await image.raw().toBuffer();
   const frameBounds = detectFrameBounds({ width, height, pixels });
 
   return {
@@ -55,6 +64,7 @@ export function calculateDarkPixelDensity(
   normalizedRect: NormalizedRect,
   darkThreshold = 150,
   yOverride?: { top: number; bottom: number },
+  pixelOverride?: PixelRect,
 ): number {
   const bounds = image.contentBounds || {
     left: 0,
@@ -64,15 +74,23 @@ export function calculateDarkPixelDensity(
   };
   const baseWidth = bounds.right - bounds.left;
   const baseHeight = bounds.bottom - bounds.top;
-  const left = clamp(Math.floor(bounds.left + normalizedRect.x * baseWidth), 0, image.width - 1);
+  const left = clamp(
+    Math.floor(pixelOverride ? pixelOverride.left : bounds.left + normalizedRect.x * baseWidth),
+    0,
+    image.width - 1,
+  );
   const top = clamp(
-    Math.floor(yOverride ? yOverride.top : bounds.top + normalizedRect.y * baseHeight),
+    Math.floor(pixelOverride ? pixelOverride.top : yOverride ? yOverride.top : bounds.top + normalizedRect.y * baseHeight),
     0,
     image.height - 1,
   );
-  const right = clamp(Math.ceil(bounds.left + (normalizedRect.x + normalizedRect.width) * baseWidth), left + 1, image.width);
+  const right = clamp(
+    Math.ceil(pixelOverride ? pixelOverride.right : bounds.left + (normalizedRect.x + normalizedRect.width) * baseWidth),
+    left + 1,
+    image.width,
+  );
   const bottom = clamp(
-    Math.ceil(yOverride ? yOverride.bottom : bounds.top + (normalizedRect.y + normalizedRect.height) * baseHeight),
+    Math.ceil(pixelOverride ? pixelOverride.bottom : yOverride ? yOverride.bottom : bounds.top + (normalizedRect.y + normalizedRect.height) * baseHeight),
     top + 1,
     image.height,
   );
@@ -220,11 +238,21 @@ export function analyzeChoiceGroup(
   group: ChoiceGroup,
   yOverride?: { top: number; bottom: number },
   allowAutoValue = true,
+  candidatePixelOverrides?: PixelRect[],
 ): ChoiceGroupResult {
+  const usesGridCells = candidatePixelOverrides?.length === group.candidates.length;
   const candidates = group.candidates
-    .map((candidate) => ({
+    .map((candidate, index) => ({
       value: candidate.value,
-      score: roundScore(calculateDarkPixelDensity(image, candidate.rect, 150, yOverride)),
+      score: roundScore(
+        calculateDarkPixelDensity(
+          image,
+          candidate.rect,
+          150,
+          yOverride,
+          usesGridCells ? candidatePixelOverrides[index] : undefined,
+        ),
+      ),
     }))
     .sort((a, b) => b.score - a.score);
 

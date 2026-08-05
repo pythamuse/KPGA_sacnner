@@ -79,6 +79,33 @@ describe('마킹 밀도 기반 선택지 분석', () => {
     expect(result.confidence).toBe('low');
   });
 
+  it('cell-grid pixel overrides score the actual selected cell instead of stale template coordinates', () => {
+    const width = 100;
+    const height = 60;
+    const pixels = Buffer.alloc(width * height, 255);
+    for (let y = 20; y < 40; y++) {
+      for (let x = 60; x < 80; x++) {
+        pixels[y * width + x] = 0;
+      }
+    }
+    const image: ImageAnalysisData = { width, height, pixels, contentBoundsConfident: true };
+    const group: ChoiceGroup = {
+      field: 'cagi.q04',
+      candidates: [
+        { value: 0, rect: { x: 0.7, y: 0.1, width: 0.1, height: 0.1 } },
+        { value: 1, rect: { x: 0.82, y: 0.1, width: 0.1, height: 0.1 } },
+      ],
+    };
+
+    const result = analyzeChoiceGroup(image, group, undefined, true, [
+      { left: 10, top: 20, right: 30, bottom: 40 },
+      { left: 60, top: 20, right: 80, bottom: 40 },
+    ]);
+
+    expect(result.value).toBe(1);
+    expect(result.confidence).toBe('high');
+  });
+
   it('종이 경계가 불확실하면 후보 점수만 남기고 자동값을 확정하지 않는다', () => {
     const image = makeTestImage();
     const group: ChoiceGroup = {
@@ -143,5 +170,27 @@ describe('마킹 밀도 기반 선택지 분석', () => {
     const analysis = await loadImageAnalysisData(filePath);
 
     expect(analysis.contentBoundsConfident).toBe(false);
+  });
+
+  it('uses the post-EXIF-rotation dimensions when indexing image pixels', async () => {
+    fs.mkdirSync(fixtureDir, { recursive: true });
+    const filePath = path.join(fixtureDir, 'orientation-6.jpg');
+    await sharp({
+      create: {
+        width: 80,
+        height: 120,
+        channels: 3,
+        background: '#ffffff',
+      },
+    })
+      .jpeg()
+      .withMetadata({ orientation: 6 })
+      .toFile(filePath);
+
+    const analysis = await loadImageAnalysisData(filePath);
+
+    expect(analysis.width).toBe(120);
+    expect(analysis.height).toBe(80);
+    expect(analysis.pixels).toHaveLength(120 * 80);
   });
 });

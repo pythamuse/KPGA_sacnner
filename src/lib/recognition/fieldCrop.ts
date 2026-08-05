@@ -1,5 +1,5 @@
 import sharp from 'sharp';
-import { loadImageAnalysisData } from './markDensity';
+import { loadImageAnalysisData, type PixelRect } from './markDensity';
 import { cagiTemplate, ChoiceGroup, FieldRegion, NormalizedRect, satisfactionTemplate } from './roiTemplates';
 
 export interface CropBox {
@@ -84,16 +84,56 @@ export function getCropBox(
   };
 }
 
+export function getPixelCropBox(
+  image: { width: number; height: number; contentBounds?: { left: number; top: number; right: number; bottom: number } },
+  rect: PixelRect,
+  paddingRatio: number,
+): CropBox {
+  const roiLeft = clamp(Math.floor(rect.left), 0, image.width - 1);
+  const roiTop = clamp(Math.floor(rect.top), 0, image.height - 1);
+  const roiRight = clamp(Math.ceil(rect.right), roiLeft + 1, image.width);
+  const roiBottom = clamp(Math.ceil(rect.bottom), roiTop + 1, image.height);
+  // Pixel overrides represent one detected response row, unlike normalized
+  // template regions. Their padding must track the cell itself so adjacent
+  // questions do not leak into the review crop.
+  const paddingX = Math.max(8, Math.round((roiRight - roiLeft) * paddingRatio * 6));
+  const paddingY = Math.max(8, Math.round((roiBottom - roiTop) * paddingRatio * 6));
+  const left = clamp(roiLeft - paddingX, 0, image.width - 1);
+  const top = clamp(roiTop - paddingY, 0, image.height - 1);
+  const right = clamp(roiRight + paddingX, left + 1, image.width);
+  const bottom = clamp(roiBottom + paddingY, top + 1, image.height);
+
+  return {
+    left,
+    top,
+    width: right - left,
+    height: bottom - top,
+    roi: {
+      left: roiLeft - left,
+      top: roiTop - top,
+      width: roiRight - roiLeft,
+      height: roiBottom - roiTop,
+    },
+  };
+}
+
 export function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
 }
 
-export async function generateFieldCropBuffer(imagePath: string, field: string, debug: boolean): Promise<Buffer | undefined> {
-  const cropRect = findCropRect(field);
-  if (!cropRect) return undefined;
+export async function generateFieldCropBuffer(
+  imagePath: string,
+  field: string,
+  debug: boolean,
+  pixelRect?: PixelRect,
+): Promise<Buffer | undefined> {
+  const cropRect = pixelRect ? undefined : findCropRect(field);
+  if (!cropRect && !pixelRect) return undefined;
 
   const analysis = await loadImageAnalysisData(imagePath);
-  const cropBox = getCropBox(analysis, cropRect, debug ? 0.07 : 0.022);
+  const cropBox = pixelRect
+    ? getPixelCropBox(analysis, pixelRect, debug ? 0.07 : 0.022)
+    : getCropBox(analysis, cropRect!, debug ? 0.07 : 0.022);
 
   const extracted = sharp(imagePath)
     .rotate()
@@ -107,7 +147,7 @@ export async function generateFieldCropBuffer(imagePath: string, field: string, 
     .resize({ width: 520, withoutEnlargement: true });
 
   return debug
-    ? addDebugOverlay(extracted, cropBox, `${field} ${serializeRect(cropRect)}`)
+    ? addDebugOverlay(extracted, cropBox, pixelRect ? `${field} grid-cell` : `${field} ${serializeRect(cropRect!)}`)
     : extracted.png().toBuffer();
 }
 
