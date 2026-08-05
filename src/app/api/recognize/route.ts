@@ -99,7 +99,9 @@ export async function POST(req: Request) {
           ? 'cagi'
           : hasFormTypeMismatch && trustUploadedTypes
             ? uploadedAs!
-            : formType;
+            : formType === 'unknown' && uploadedAs
+              ? uploadedAs
+              : formType;
 
         if (effectiveFormType === 'cagi') {
           cagiPaths.push(filePath);

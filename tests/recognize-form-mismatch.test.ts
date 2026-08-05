@@ -96,7 +96,42 @@ describe('인식 API 양식 칸 불일치 감지', () => {
     expect(body.warnings).toHaveLength(1);
     expect(body.warnings[0]).toContain('업로드 칸');
   });
+
+  it('keeps an unknown-content page in its selected upload bucket', async () => {
+    const jobResponse = await jobsPOST();
+    const { jobId } = await jobResponse.json();
+    const jobDir = getJobDir(jobId);
+    createdJobDirs.push(jobDir);
+
+    const uploadDir = path.join(jobDir, 'uploads');
+    fs.mkdirSync(uploadDir, { recursive: true });
+    await writeBlankPage(path.join(uploadDir, 'cagi_page_001.png'));
+    await writeBlankPage(path.join(uploadDir, 'satisfaction_page_001.png'));
+
+    const req = new Request('http://localhost/api/recognize', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jobId }),
+    });
+
+    const response = await recognizePOST(req as any);
+    expect(response.status).toBe(200);
+
+    const body = await response.json();
+    expect(body.studentDrafts).toHaveLength(1);
+  });
 });
+
+async function writeBlankPage(filePath: string) {
+  await sharp({
+    create: {
+      width: 320,
+      height: 480,
+      channels: 3,
+      background: '#ffffff',
+    },
+  }).png().toFile(filePath);
+}
 
 async function writeSyntheticForm(filePath: string, groups: ChoiceGroup[]) {
   const width = 1000;

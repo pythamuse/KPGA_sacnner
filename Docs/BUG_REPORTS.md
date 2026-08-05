@@ -18,6 +18,7 @@
 | 12 | 실사용 촬영 이미지에서 원근 보정 후에도 문서 좌표가 어긋남 | 1차 품질 게이트 구현, 실사용 benchmark 필요 | [DOCUMENT_SCAN_STRATEGY_REVIEW](../Docs/14_DOCUMENT_SCAN_STRATEGY_REVIEW.md) |
 | 13 | 보정본이 양식 판정을 오염시켜 `FORM_TYPE_MISMATCH` 발생 | 4차 수정 완료, 최신 배포 검증 필요 | [MOBILE_PHOTO_MISCLASSIFICATION_FIX](../Task/MOBILE_PHOTO_MISCLASSIFICATION_FIX.md), [FORM_TYPE_MISMATCH_DESKEW_FIX](../Task/FORM_TYPE_MISMATCH_DESKEW_FIX.md) |
 | 14 | JBIG2 스캔 PDF가 빈 캔버스로 변환되어 검수 원본과 ROI가 모두 비어 보임 | 수정 완료, 실제 19페이지 PDF 재검증 필요 | [PDF_JBIG2_WASM_RENDER_GUARD](../Task/PDF_JBIG2_WASM_RENDER_GUARD.md) |
+| 15 | 내용 분류가 `unknown`인 스캔 페이지를 목록에서 제외해 잘못된 장수 불일치 발생 | 수정 완료, 실제 19페이지 PDF 재검증 필요 | [PDF_BATCH_UNKNOWN_FORM_FALLBACK](../Task/PDF_BATCH_UNKNOWN_FORM_FALLBACK.md) |
 
 ---
 
@@ -33,6 +34,13 @@
 **원인**: PDF.js 6.1.200의 JBIG2 디코더가 필요한 WASM 경로 없이 실행되어 `wasmUrl` 및 `nulljbig2_nowasm_fallback.js` 오류가 발생함. 렌더링 완료 후 생성된 빈 캔버스를 정상 JPEG처럼 업로드한 것이 후속 증상의 직접 원인임.
 **대응**: 같은 버전의 `pdfjs-dist` WASM 경로를 명시하고, 내용 없는 캔버스를 페이지 변환 실패로 처리함. PDF에서 생성된 평면 이미지는 보정 워커를 실행하지 않아 보정 엔진 가용성과 관계없이 업로드함.
 **상태**: 코드 및 단위 테스트 완료. 실제 JBIG2 PDF로 배포 환경 재검증 필요.
+
+## 15. `unknown` 스캔 페이지의 잘못된 장수 불일치
+
+**재현**: 실제로 19페이지인 두 스캔 PDF를 업로드한 뒤, API가 선별검사지 18장·만족도조사 19장으로 계산해 `COUNT_MISMATCH`를 반환함.
+**원인**: 내용 분류 결과가 `unknown`인 파일을 선택한 업로드 칸과 관계없이 어느 묶음에도 넣지 않아, 유효한 페이지 한 장이 조용히 제외됨.
+**대응**: `unknown`은 불일치가 아닌 불확실로 취급하고 `cagi_`/`satisfaction_` 업로드 접두사를 우선 사용함. 신뢰도 있는 상반된 분류는 기존처럼 명시적 확인을 요구함.
+**상태**: 제공된 두 19페이지 PDF를 로컬에서 모두 렌더링하고 19쌍 인식까지 확인함. 배포 환경 재검증 필요.
 
 ## 2. Vercel 인스턴스 간 `/tmp` 미공유로 저장/다운로드/이미지 미리보기 404
 
