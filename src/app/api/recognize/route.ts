@@ -178,8 +178,13 @@ export async function POST(req: Request) {
     const ocrDeadlineAt = Date.now() + 2_500;
     for (const pair of matchedPairs) {
       const draft = await recognizeStudentForms(pair.cagiPath, pair.satisfactionPath, { ocrDeadlineAt });
-      const { recognitionCropRects, ...recognizedDraft } = draft;
-      const preview = await buildSourcePreview(pair.cagiPath, pair.satisfactionPath, recognitionCropRects);
+      const { recognitionCropRects, recognitionCropSource, ...recognizedDraft } = draft;
+      const preview = await buildSourcePreview(
+        pair.cagiPath,
+        pair.satisfactionPath,
+        recognitionCropRects,
+        recognitionCropSource,
+      );
 
       studentDrafts.push({
         ...recognizedDraft,
@@ -190,6 +195,7 @@ export async function POST(req: Request) {
           satisfactionImageDataUrl: preview.satisfactionImageDataUrl,
           cropDataUrls: preview.cropDataUrls,
           cropDebugDataUrls: preview.cropDebugDataUrls,
+          recognitionCropSource: preview.recognitionCropSource,
         },
       });
     }

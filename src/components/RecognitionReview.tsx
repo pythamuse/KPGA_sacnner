@@ -24,6 +24,12 @@ const confidenceRank = {
   low: 2,
 };
 
+const cropSourceLabel = {
+  grid: '격자 검출',
+  row: '행 검출',
+  fixed: '고정 좌표',
+};
+
 export default function RecognitionReview({
   draft,
   jobId,
@@ -171,6 +177,31 @@ export default function RecognitionReview({
       : draft.source?.cropDataUrls?.[key] || '';
   };
 
+  const renderCropSourceBadge = (key: string) => {
+    const source = draft.source?.recognitionCropSource?.[key];
+    if (!source) return null;
+
+    return (
+      <span
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          minHeight: 22,
+          padding: '2px 7px',
+          borderRadius: 999,
+          border: '1px solid #d8dde8',
+          color: '#4b5565',
+          background: '#f6f8fb',
+          fontSize: 11,
+          fontWeight: 800,
+          whiteSpace: 'nowrap',
+        }}
+      >
+        {cropSourceLabel[source]}
+      </span>
+    );
+  };
+
   const openDataUrlInNewTab = async (event: React.MouseEvent, dataUrl: string) => {
     event.preventDefault();
     try {
@@ -194,15 +225,16 @@ export default function RecognitionReview({
 
     const url = cropUrl(key);
     const debugUrl = cropUrl(key, true);
-    if (!url) return null;
+    const inlineUrl = debugUrl || url;
+    if (!inlineUrl) return null;
 
     return (
       <div style={{ marginTop: 8 }}>
         <a
-          href={url}
+          href={inlineUrl}
           target="_blank"
           rel="noreferrer"
-          onClick={(e) => openDataUrlInNewTab(e, url)}
+          onClick={(e) => openDataUrlInNewTab(e, inlineUrl)}
           style={{
             display: 'block',
             border: '1px solid var(--border-medium)',
@@ -212,8 +244,8 @@ export default function RecognitionReview({
           }}
         >
           <img
-            src={url}
-            alt={`${key} crop`}
+            src={inlineUrl}
+            alt={`${key} crop ROI`}
             loading="lazy"
             style={{
               width: '100%',
@@ -224,7 +256,8 @@ export default function RecognitionReview({
             }}
           />
         </a>
-        <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 5 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginTop: 5 }}>
+          {renderCropSourceBadge(key)}
           <a
             href={debugUrl}
             target="_blank"

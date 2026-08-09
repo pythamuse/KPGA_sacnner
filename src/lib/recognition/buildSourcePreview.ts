@@ -1,5 +1,6 @@
 import sharp from 'sharp';
 import { generateFieldCropBuffer } from './fieldCrop';
+import { type RecognitionCropSource } from './detectCheckmarks';
 import { type PixelRect } from './markDensity';
 import { cagiTemplate, satisfactionTemplate } from './roiTemplates';
 
@@ -8,12 +9,14 @@ export interface SourcePreviewAssets {
   satisfactionImageDataUrl: string;
   cropDataUrls: Record<string, string>;
   cropDebugDataUrls: Record<string, string>;
+  recognitionCropSource: Record<string, RecognitionCropSource>;
 }
 
 export async function buildSourcePreview(
   cagiPath: string,
   satisfactionPath: string,
   fieldCropOverrides: Record<string, PixelRect> = {},
+  recognitionCropSource: Record<string, RecognitionCropSource> = {},
 ): Promise<SourcePreviewAssets> {
   const [cagiImageDataUrl, satisfactionImageDataUrl, cagiCrops, satisfactionCrops] = await Promise.all([
     buildImageThumbnailDataUrl(cagiPath),
@@ -36,6 +39,7 @@ export async function buildSourcePreview(
       ...cagiCrops.cropDebugDataUrls,
       ...satisfactionCrops.cropDebugDataUrls,
     },
+    recognitionCropSource,
   };
 }
 

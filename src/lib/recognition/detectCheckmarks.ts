@@ -4,6 +4,8 @@ import { buildCagiRowOverrides, buildSatisfactionRowOverrides } from './tableRow
 import { buildCagiGridDetection, buildSatisfactionGridDetection } from './tableGridDetection';
 import fs from 'fs/promises';
 
+export type RecognitionCropSource = 'grid' | 'row' | 'fixed';
+
 export interface RecognitionDraft {
   source?: {
     cagiImageId?: string;
@@ -12,6 +14,7 @@ export interface RecognitionDraft {
     satisfactionImageDataUrl?: string;
     cropDataUrls?: { [field: string]: string };
     cropDebugDataUrls?: { [field: string]: string };
+    recognitionCropSource?: Record<string, RecognitionCropSource>;
   };
   basic: {
     age?: number;
@@ -51,6 +54,7 @@ export interface RecognitionDraft {
     [key: string]: Array<{ value: number | string; score: number }>;
   };
   recognitionCropRects?: Record<string, PixelRect>;
+  recognitionCropSource?: Record<string, RecognitionCropSource>;
   warnings?: string[];
 }
 
@@ -101,6 +105,7 @@ export async function recognizeStudentForms(
 
   const draft = createEmptyDraft();
   const recognitionCropRects: Record<string, PixelRect> = {};
+  const recognitionCropSource: Record<string, RecognitionCropSource> = {};
 
   try {
     const cagiImage = await loadImageAnalysisData(cagiPath);
@@ -121,10 +126,12 @@ export async function recognizeStudentForms(
 
     for (const group of cagiTemplate.choiceGroups) {
       const gridCells = cagiGridOverrides[group.field];
+      const rowOverride = cagiRowOverrides[group.field];
+      recognitionCropSource[group.field] = resolveRecognitionCropSource(gridCells, rowOverride);
       const result = analyzeChoiceGroup(
         cagiImage,
         group,
-        cagiRowOverrides[group.field],
+        rowOverride,
         canAutoRecognizeCagi && Boolean(gridCells) && !cagiGridDetection.registeredFields.has(group.field),
         gridCells,
         requiresHighVisualConfidence(group.field),
@@ -151,6 +158,7 @@ export async function recognizeStudentForms(
 
     for (const [field, rect] of Object.entries(cagiGridDetection.fieldRects)) {
       recognitionCropRects[field] = rect;
+      recognitionCropSource[field] = recognitionCropSource[field] || 'fixed';
     }
   } catch {
     // 이미지 분석 실패 시 임의값을 넣지 않고 검수 화면에서 직접 입력하도록 낮은 신뢰도로 둔다.
@@ -173,10 +181,12 @@ export async function recognizeStudentForms(
 
     for (const group of satisfactionTemplate.choiceGroups) {
       const gridCells = satisfactionGridOverrides[group.field];
+      const rowOverride = satisfactionRowOverrides[group.field];
+      recognitionCropSource[group.field] = resolveRecognitionCropSource(gridCells, rowOverride);
       const result = analyzeChoiceGroup(
         satisfactionImage,
         group,
-        satisfactionRowOverrides[group.field],
+        rowOverride,
         canAutoRecognizeSatisfaction && Boolean(gridCells) && !satisfactionGridDetection.registeredFields.has(group.field),
         gridCells,
         requiresHighVisualConfidence(group.field),
@@ -197,6 +207,7 @@ export async function recognizeStudentForms(
       if (!recognitionCropRects[field]) {
         recognitionCropRects[field] = rect;
       }
+      recognitionCropSource[field] = recognitionCropSource[field] || 'fixed';
     }
   } catch {
     // Keep satisfaction fields empty so the review screen can collect them manually.
@@ -204,6 +215,9 @@ export async function recognizeStudentForms(
 
   if (Object.keys(recognitionCropRects).length > 0) {
     draft.recognitionCropRects = recognitionCropRects;
+  }
+  if (Object.keys(recognitionCropSource).length > 0) {
+    draft.recognitionCropSource = recognitionCropSource;
   }
 
   return draft;
@@ -288,6 +302,15 @@ function unionPixelRects(rects: PixelRect[]): PixelRect {
     right: Math.max(...rects.map((rect) => rect.right)),
     bottom: Math.max(...rects.map((rect) => rect.bottom)),
   };
+}
+
+export function resolveRecognitionCropSource(
+  gridCells?: PixelRect[],
+  rowOverride?: { top: number; bottom: number },
+): RecognitionCropSource {
+  if (gridCells) return 'grid';
+  if (rowOverride) return 'row';
+  return 'fixed';
 }
 
 function requiresHighVisualConfidence(field: string): boolean {
