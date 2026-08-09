@@ -14,11 +14,17 @@ export interface HorizontalLine {
 export interface RowMatchResult {
   lineYs: number[];
   confident: boolean;
+  diagnostic?: string;
 }
 
 export interface RowYOverride {
   top: number;
   bottom: number;
+}
+
+export interface RowDetectionResult {
+  overrides: Record<string, RowYOverride>;
+  diagnostics?: Record<string, string>;
 }
 
 export function detectHorizontalLines(
@@ -83,9 +89,34 @@ export function matchRowPattern(
   expectedRelativeGaps: number[],
   toleranceRatio = 0.35,
 ): RowMatchResult | null {
+  return evaluateRowPattern(detectedLines, expectedRelativeGaps, toleranceRatio).match;
+}
+
+function evaluateRowPattern(
+  detectedLines: HorizontalLine[],
+  expectedRelativeGaps: number[],
+  toleranceRatio: number,
+): { match: RowMatchResult | null; failure?: RowPatternFailure } {
   const requiredLineCount = expectedRelativeGaps.length + 1;
-  if (requiredLineCount < 2 || detectedLines.length < requiredLineCount) {
-    return null;
+  if (requiredLineCount < 2) {
+    return {
+      match: null,
+      failure: { reason: 'lines_undetected', detail: `행 선 0/${requiredLineCount}개` },
+    };
+  }
+
+  if (detectedLines.length === 0) {
+    return {
+      match: null,
+      failure: { reason: 'lines_undetected', detail: `행 선 0/${requiredLineCount}개` },
+    };
+  }
+
+  if (detectedLines.length < requiredLineCount) {
+    return {
+      match: null,
+      failure: { reason: 'insufficient_lines', detail: `행 선 ${detectedLines.length}/${requiredLineCount}개` },
+    };
   }
 
   const sortedLines = [...detectedLines].sort((a, b) => a.y - b.y);
@@ -106,13 +137,18 @@ export function matchRowPattern(
 
     if (matched) {
       return {
-        lineYs: candidateLines.map((line) => line.y),
-        confident: true,
+        match: {
+          lineYs: candidateLines.map((line) => line.y),
+          confident: true,
+        },
       };
     }
   }
 
-  return null;
+  return {
+    match: null,
+    failure: { reason: 'gap_mismatch', detail: '행 선 간격 패턴 불일치' },
+  };
 }
 
 export function buildCagiRowOverrides(image: ImageAnalysisData): Record<string, RowYOverride>;
@@ -126,14 +162,31 @@ export function buildCagiRowOverrides(
   imageBuffer?: Buffer,
   ocrOptions?: OcrOptions,
 ): Record<string, RowYOverride> | Promise<Record<string, RowYOverride>> {
+  const detection = imageBuffer
+    ? buildCagiRowDetection(image, imageBuffer, ocrOptions)
+    : buildCagiRowDetection(image);
+  return detection instanceof Promise ? detection.then((result) => result.overrides) : detection.overrides;
+}
+
+export function buildCagiRowDetection(image: ImageAnalysisData): RowDetectionResult;
+export function buildCagiRowDetection(
+  image: ImageAnalysisData,
+  imageBuffer: Buffer,
+  ocrOptions?: OcrOptions,
+): Promise<RowDetectionResult>;
+export function buildCagiRowDetection(
+  image: ImageAnalysisData,
+  imageBuffer?: Buffer,
+  ocrOptions?: OcrOptions,
+): RowDetectionResult | Promise<RowDetectionResult> {
   const questionYs = [...cagiQuestionYs, ...cagiLateQuestionYs];
   const fields = questionYs.map((_, index) => `cagi.q${String(index + 1).padStart(2, '0')}`);
 
   if (imageBuffer) {
-    return buildRowOverridesAsync(image, imageBuffer, questionYs, fields, ocrOptions);
+    return buildRowDetectionAsync(image, imageBuffer, questionYs, fields, ocrOptions);
   }
 
-  return buildRowOverridesSync(image, questionYs, fields);
+  return buildRowDetectionSync(image, questionYs, fields);
 }
 
 export function buildSatisfactionRowOverrides(image: ImageAnalysisData): Record<string, RowYOverride>;
@@ -147,47 +200,64 @@ export function buildSatisfactionRowOverrides(
   imageBuffer?: Buffer,
   ocrOptions?: OcrOptions,
 ): Record<string, RowYOverride> | Promise<Record<string, RowYOverride>> {
-  if (imageBuffer) {
-    return buildSatisfactionRowOverridesAsync(image, imageBuffer, ocrOptions);
-  }
-
-  return {
-    ...buildSatisfactionGroupOverrides(image, satisfactionBinaryYs, 2),
-    ...buildSatisfactionGroupOverrides(image, satisfactionScaleYs, 7),
-  };
+  const detection = imageBuffer
+    ? buildSatisfactionRowDetection(image, imageBuffer, ocrOptions)
+    : buildSatisfactionRowDetection(image);
+  return detection instanceof Promise ? detection.then((result) => result.overrides) : detection.overrides;
 }
 
-async function buildSatisfactionRowOverridesAsync(
+export function buildSatisfactionRowDetection(image: ImageAnalysisData): RowDetectionResult;
+export function buildSatisfactionRowDetection(
   image: ImageAnalysisData,
   imageBuffer: Buffer,
   ocrOptions?: OcrOptions,
-): Promise<Record<string, RowYOverride>> {
-  return {
-    ...(await buildSatisfactionGroupOverridesAsync(image, imageBuffer, satisfactionBinaryYs, 2, ocrOptions)),
-    ...(await buildSatisfactionGroupOverridesAsync(image, imageBuffer, satisfactionScaleYs, 7, ocrOptions)),
-  };
+): Promise<RowDetectionResult>;
+export function buildSatisfactionRowDetection(
+  image: ImageAnalysisData,
+  imageBuffer?: Buffer,
+  ocrOptions?: OcrOptions,
+): RowDetectionResult | Promise<RowDetectionResult> {
+  if (imageBuffer) {
+    return buildSatisfactionRowDetectionAsync(image, imageBuffer, ocrOptions);
+  }
+
+  return mergeRowDetectionResults(
+    buildSatisfactionGroupDetection(image, satisfactionBinaryYs, 2),
+    buildSatisfactionGroupDetection(image, satisfactionScaleYs, 7),
+  );
 }
 
-function buildSatisfactionGroupOverrides(
+async function buildSatisfactionRowDetectionAsync(
+  image: ImageAnalysisData,
+  imageBuffer: Buffer,
+  ocrOptions?: OcrOptions,
+): Promise<RowDetectionResult> {
+  return mergeRowDetectionResults(
+    await buildSatisfactionGroupDetectionAsync(image, imageBuffer, satisfactionBinaryYs, 2, ocrOptions),
+    await buildSatisfactionGroupDetectionAsync(image, imageBuffer, satisfactionScaleYs, 7, ocrOptions),
+  );
+}
+
+function buildSatisfactionGroupDetection(
   image: ImageAnalysisData,
   rowYs: number[],
   firstQuestionNumber: number,
-): Record<string, RowYOverride> {
-  return buildRowOverridesSync(
+): RowDetectionResult {
+  return buildRowDetectionSync(
     image,
     rowYs,
     rowYs.map((_, index) => `satisfaction.q${String(firstQuestionNumber + index).padStart(2, '0')}`),
   );
 }
 
-async function buildSatisfactionGroupOverridesAsync(
+async function buildSatisfactionGroupDetectionAsync(
   image: ImageAnalysisData,
   imageBuffer: Buffer,
   rowYs: number[],
   firstQuestionNumber: number,
   ocrOptions?: OcrOptions,
-): Promise<Record<string, RowYOverride>> {
-  return buildRowOverridesAsync(
+): Promise<RowDetectionResult> {
+  return buildRowDetectionAsync(
     image,
     imageBuffer,
     rowYs,
@@ -196,50 +266,73 @@ async function buildSatisfactionGroupOverridesAsync(
   );
 }
 
-function buildRowOverridesSync(
+function buildRowDetectionSync(
   image: ImageAnalysisData,
   templateYs: number[],
   fields: string[],
-): Record<string, RowYOverride> {
+): RowDetectionResult {
   const match = findRowMatch(image, templateYs);
   if (!match?.confident) {
-    return {};
+    return match?.diagnostic
+      ? { overrides: {}, diagnostics: diagnosticsForFields(fields, match.diagnostic) }
+      : { overrides: {} };
   }
 
-  return buildOverridesFromRowCenters(match.lineYs, fields, image.height);
+  return { overrides: buildOverridesFromRowCenters(match.lineYs, fields, image.height) };
 }
 
-async function buildRowOverridesAsync(
+async function buildRowDetectionAsync(
   image: ImageAnalysisData,
   imageBuffer: Buffer,
   templateYs: number[],
   fields: string[],
   ocrOptions?: OcrOptions,
-): Promise<Record<string, RowYOverride>> {
+): Promise<RowDetectionResult> {
   const match = await findRowMatch(image, templateYs, imageBuffer, ocrOptions);
   if (!match?.confident) {
-    return {};
+    return match?.diagnostic
+      ? { overrides: {}, diagnostics: diagnosticsForFields(fields, match.diagnostic) }
+      : { overrides: {} };
   }
 
-  return buildOverridesFromRowCenters(match.lineYs, fields, image.height);
+  return { overrides: buildOverridesFromRowCenters(match.lineYs, fields, image.height) };
 }
 
-function findRowMatch(image: ImageAnalysisData, templateYs: number[]): RowMatchResult | null;
+function mergeRowDetectionResults(...results: RowDetectionResult[]): RowDetectionResult {
+  const diagnostics = results.reduce<Record<string, string>>(
+    (merged, result) => ({ ...merged, ...(result.diagnostics || {}) }),
+    {},
+  );
+
+  return {
+    overrides: results.reduce<Record<string, RowYOverride>>(
+      (merged, result) => ({ ...merged, ...result.overrides }),
+      {},
+    ),
+    ...(Object.keys(diagnostics).length > 0 ? { diagnostics } : {}),
+  };
+}
+
+function diagnosticsForFields(fields: string[], diagnostic: string): Record<string, string> {
+  return Object.fromEntries(fields.map((field) => [field, diagnostic]));
+}
+
+function findRowMatch(image: ImageAnalysisData, templateYs: number[]): RowMatchResult;
 function findRowMatch(
   image: ImageAnalysisData,
   templateYs: number[],
   imageBuffer: Buffer,
   ocrOptions?: OcrOptions,
-): Promise<RowMatchResult | null>;
+): Promise<RowMatchResult>;
 function findRowMatch(
   image: ImageAnalysisData,
   templateYs: number[],
   imageBuffer?: Buffer,
   ocrOptions?: OcrOptions,
-): RowMatchResult | null | Promise<RowMatchResult | null> {
+): RowMatchResult | Promise<RowMatchResult> {
   const expectedRelativeGaps = buildExpectedRelativeGaps(templateYs);
   if (expectedRelativeGaps.length === 0) {
-    return null;
+    return createFailureResult({ reason: 'lines_undetected', detail: '행 선 패턴 없음' }, '픽셀');
   }
 
   const bounds = image.contentBounds || {
@@ -268,8 +361,11 @@ function findRowMatch(
   }
 
   const detectedLines = detectHorizontalLines(image, searchTop, searchBottom, xLeft, xRight);
-
-  return matchRowPattern(detectedLines, expectedRelativeGaps);
+  const pixelMatch = matchRowPattern(detectedLines, expectedRelativeGaps);
+  return pixelMatch || createFailureResult(
+    classifyRowPatternFailure(detectedLines.length, expectedRelativeGaps.length + 1),
+    '픽셀',
+  );
 }
 
 async function findRowMatchWithOcrFallback(
@@ -281,12 +377,13 @@ async function findRowMatchWithOcrFallback(
   xLeft: number,
   xRight: number,
   ocrOptions?: OcrOptions,
-): Promise<RowMatchResult | null> {
+): Promise<RowMatchResult> {
   const detectedLines = detectHorizontalLines(image, searchTop, searchBottom, xLeft, xRight);
   const pixelMatch = matchRowPattern(detectedLines, expectedRelativeGaps);
   if (pixelMatch?.confident) {
     return pixelMatch;
   }
+  const pixelFailure = classifyRowPatternFailure(detectedLines.length, expectedRelativeGaps.length + 1);
 
   const ocrLines = await detectOcrTextLines(
     imageBuffer,
@@ -302,8 +399,47 @@ async function findRowMatchWithOcrFallback(
   if (ocrMatch?.confident) {
     return ocrMatch;
   }
+  const ocrFailure = classifyRowPatternFailure(ocrLines.length, expectedRelativeGaps.length + 1);
 
-  return pixelMatch;
+  return {
+    lineYs: [],
+    confident: false,
+    diagnostic: [
+      formatFailure('픽셀', pixelFailure),
+      formatFailure('OCR', ocrFailure),
+    ].join('; '),
+  };
+}
+
+type RowFailureReason = 'lines_undetected' | 'insufficient_lines' | 'gap_mismatch';
+
+interface RowPatternFailure {
+  reason: RowFailureReason;
+  detail: string;
+}
+
+function createFailureResult(failure: RowPatternFailure, source: string): RowMatchResult {
+  return {
+    lineYs: [],
+    confident: false,
+    diagnostic: formatFailure(source, failure),
+  };
+}
+
+function formatFailure(source: string, failure: RowPatternFailure): string {
+  return `행: ${source} ${failure.reason} (${failure.detail})`;
+}
+
+function classifyRowPatternFailure(found: number, required: number): RowPatternFailure {
+  if (found === 0) {
+    return { reason: 'lines_undetected', detail: `행 선 0/${required}개` };
+  }
+
+  if (found < required) {
+    return { reason: 'insufficient_lines', detail: `행 선 ${found}/${required}개` };
+  }
+
+  return { reason: 'gap_mismatch', detail: '행 선 간격 패턴 불일치' };
 }
 
 function buildExpectedRelativeGaps(ys: number[]): number[] {

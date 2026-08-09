@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { resolveRecognitionCropSource } from '../src/lib/recognition/detectCheckmarks';
+import {
+  resolveRecognitionCropDiagnostic,
+  resolveRecognitionCropSource,
+} from '../src/lib/recognition/detectCheckmarks';
 
 describe('recognition crop source provenance', () => {
   it('records grid when candidate cell overrides exist', () => {
@@ -14,5 +17,22 @@ describe('recognition crop source provenance', () => {
 
   it('records fixed when no detected crop override exists', () => {
     expect(resolveRecognitionCropSource()).toBe('fixed');
+  });
+
+  it('keeps diagnostics only for fixed crops and combines grid and row failures', () => {
+    expect(resolveRecognitionCropDiagnostic(
+      'fixed',
+      '격자: insufficient_lines (가로선 2/4개, 세로선 5/5개)',
+      '행: 픽셀 gap_mismatch (행 선 간격 패턴 불일치); OCR lines_undetected (행 선 0/9개)',
+    )).toBe('격자: insufficient_lines (가로선 2/4개, 세로선 5/5개); 행: 픽셀 gap_mismatch (행 선 간격 패턴 불일치); OCR lines_undetected (행 선 0/9개)');
+    expect(resolveRecognitionCropDiagnostic(
+      'grid',
+      '격자: gap_mismatch (감지선 간격 패턴 불일치)',
+    )).toBeUndefined();
+    expect(resolveRecognitionCropDiagnostic(
+      'row',
+      undefined,
+      '행: gap_mismatch (행 선 간격 패턴 불일치)',
+    )).toBeUndefined();
   });
 });

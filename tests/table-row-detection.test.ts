@@ -4,6 +4,7 @@ import path from 'path';
 import sharp from 'sharp';
 import { loadImageAnalysisData } from '../src/lib/recognition/markDensity';
 import {
+  buildCagiRowDetection,
   buildCagiRowOverrides,
   buildSatisfactionRowOverrides,
   detectHorizontalLines,
@@ -54,12 +55,14 @@ describe('table row detection', () => {
     await writeSyntheticRows(filePath, rowYs);
     const image = await loadImageAnalysisData(filePath);
 
-    const overrides = buildCagiRowOverrides(image);
+    const detection = buildCagiRowDetection(image);
+    const overrides = detection.overrides;
 
     expect(Object.keys(overrides)).toHaveLength(9);
     expect(overrides['cagi.q01']).toEqual({ top: 322, bottom: 345 });
     expect(overrides['cagi.q08']).toEqual({ top: 503, bottom: 520 });
     expect(overrides['cagi.q09']).toEqual({ top: 521, bottom: 538 });
+    expect(detection.diagnostics).toBeUndefined();
   });
 
   it('returns empty CAGI overrides for images without a confident row structure', async () => {
@@ -76,6 +79,44 @@ describe('table row detection', () => {
     const image = await loadImageAnalysisData(filePath);
 
     expect(buildCagiRowOverrides(image)).toEqual({});
+  });
+
+  it('reports lines_undetected for a blank row region', async () => {
+    const filePath = path.join(fixtureDir, 'blank-diagnostic.png');
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    await sharp({
+      create: {
+        width: 1000,
+        height: 1000,
+        channels: 3,
+        background: '#ffffff',
+      },
+    }).png().toFile(filePath);
+    const detection = buildCagiRowDetection(await loadImageAnalysisData(filePath));
+
+    expect(detection.overrides).toEqual({});
+    expect(detection.diagnostics?.['cagi.q01']).toContain('lines_undetected');
+    expect(detection.diagnostics?.['cagi.q01']).toContain('픽셀');
+  });
+
+  it('reports insufficient_lines with found and required counts', async () => {
+    const filePath = path.join(fixtureDir, 'insufficient-diagnostic.png');
+    await writeSyntheticRows(filePath, [400]);
+    const detection = buildCagiRowDetection(await loadImageAnalysisData(filePath));
+    const diagnostic = detection.diagnostics?.['cagi.q01'];
+
+    expect(detection.overrides).toEqual({});
+    expect(diagnostic).toContain('insufficient_lines');
+    expect(diagnostic).toContain('1/9');
+  });
+
+  it('reports gap_mismatch when enough rows have the wrong spacing pattern', async () => {
+    const filePath = path.join(fixtureDir, 'gap-mismatch-diagnostic.png');
+    await writeSyntheticRows(filePath, [200, 210, 220, 230, 240, 300, 310, 320, 330]);
+    const detection = buildCagiRowDetection(await loadImageAnalysisData(filePath));
+
+    expect(detection.overrides).toEqual({});
+    expect(detection.diagnostics?.['cagi.q01']).toContain('gap_mismatch');
   });
 
   it('matches satisfaction row groups independently and skips q01', async () => {

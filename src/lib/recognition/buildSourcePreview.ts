@@ -10,6 +10,7 @@ export interface SourcePreviewAssets {
   cropDataUrls: Record<string, string>;
   cropDebugDataUrls: Record<string, string>;
   recognitionCropSource: Record<string, RecognitionCropSource>;
+  recognitionCropDiagnostic: Record<string, string>;
 }
 
 export async function buildSourcePreview(
@@ -17,6 +18,7 @@ export async function buildSourcePreview(
   satisfactionPath: string,
   fieldCropOverrides: Record<string, PixelRect> = {},
   recognitionCropSource: Record<string, RecognitionCropSource> = {},
+  recognitionCropDiagnostic: Record<string, string> = {},
 ): Promise<SourcePreviewAssets> {
   const [cagiImageDataUrl, satisfactionImageDataUrl, cagiCrops, satisfactionCrops] = await Promise.all([
     buildImageThumbnailDataUrl(cagiPath),
@@ -40,6 +42,7 @@ export async function buildSourcePreview(
       ...satisfactionCrops.cropDebugDataUrls,
     },
     recognitionCropSource,
+    recognitionCropDiagnostic,
   };
 }
 

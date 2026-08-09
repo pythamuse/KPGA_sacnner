@@ -16,6 +16,7 @@ export interface GridDetectionResult {
   overrides: FieldCellOverrides;
   fieldRects: Record<string, PixelRect>;
   registeredFields: Set<string>;
+  diagnostics?: Record<string, string>;
 }
 
 /**
@@ -84,6 +85,7 @@ export function buildCagiGridDetection(image: ImageAnalysisData): GridDetectionR
       ...(ageRegion ? { [ageRegion.field]: toPixelRect(ageRegion.rect, getBounds(image)) } : {}),
     },
     registeredFields: result.registeredFields,
+    ...(result.diagnostics ? { diagnostics: result.diagnostics } : {}),
   };
 }
 
@@ -112,26 +114,34 @@ export function buildSatisfactionGridDetection(image: ImageAnalysisData): GridDe
       ...mapGroupsToUnionRects(image, q01Groups),
     },
     registeredFields: result.registeredFields,
+    ...(result.diagnostics ? { diagnostics: result.diagnostics } : {}),
   };
 }
 
 function mergeGridDetection(image: ImageAnalysisData, specs: TableGridSpec[]): GridDetectionResult {
   return specs.reduce<GridDetectionResult>((result, spec) => {
     const exact = buildGridOverrides(image, spec);
+    const diagnostics = { ...result.diagnostics, ...exact.diagnostics };
 
     return {
-      overrides: { ...result.overrides, ...exact },
+      overrides: { ...result.overrides, ...exact.overrides },
       fieldRects: result.fieldRects,
       registeredFields: result.registeredFields,
+      ...(Object.keys(diagnostics).length > 0 ? { diagnostics } : {}),
     };
   }, { overrides: {}, fieldRects: {}, registeredFields: new Set() });
 }
 
-function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): FieldCellOverrides {
+interface GridSpecDetectionResult {
+  overrides: FieldCellOverrides;
+  diagnostics?: Record<string, string>;
+}
+
+function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): GridSpecDetectionResult {
   const { groups } = spec;
   const firstGroup = groups[0];
   if (!firstGroup || groups.some((group) => group.candidates.length !== firstGroup.candidates.length)) {
-    return {};
+    return { overrides: {} };
   }
 
   const bounds = getBounds(image);
@@ -167,10 +177,26 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Fiel
     expectedX[expectedX.length - 1] + xTolerance,
   ).map((line) => line.x);
 
+  const lineFailure = classifyGridLineFailure(
+    horizontalLines.length,
+    expectedY.length,
+    verticalLines.length,
+    expectedX.length,
+  );
+  if (lineFailure) {
+    return {
+      overrides: {},
+      diagnostics: diagnosticsForGroups(groups, lineFailure),
+    };
+  }
+
   const matchedRows = matchExpectedLines(horizontalLines, expectedY, yTolerance);
   const matchedColumns = matchExpectedLines(verticalLines, expectedX, xTolerance);
   if (!matchedRows || !matchedColumns || !hasConsistentGaps(matchedRows, expectedY) || !hasConsistentGaps(matchedColumns, expectedX)) {
-    return {};
+    return {
+      overrides: {},
+      diagnostics: diagnosticsForGroups(groups, '격자: gap_mismatch (감지선 간격 패턴 불일치)'),
+    };
   }
 
   const overrides: FieldCellOverrides = {};
@@ -186,13 +212,37 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Fiel
     ));
 
     if (candidates.some((rect) => rect.right - rect.left < 4 || rect.bottom - rect.top < 4)) {
-      return {};
+      return {
+        overrides: {},
+        diagnostics: diagnosticsForGroups(groups, '격자: gap_mismatch (감지선 사이의 셀 크기 부족)'),
+      };
     }
 
     overrides[group.field] = candidates;
   }
 
-  return overrides;
+  return { overrides };
+}
+
+function classifyGridLineFailure(
+  horizontalFound: number,
+  horizontalRequired: number,
+  verticalFound: number,
+  verticalRequired: number,
+): string | undefined {
+  if (horizontalFound === 0 && verticalFound === 0) {
+    return `격자: lines_undetected (가로선 0/${horizontalRequired}개, 세로선 0/${verticalRequired}개)`;
+  }
+
+  if (horizontalFound < horizontalRequired || verticalFound < verticalRequired) {
+    return `격자: insufficient_lines (가로선 ${horizontalFound}/${horizontalRequired}개, 세로선 ${verticalFound}/${verticalRequired}개)`;
+  }
+
+  return undefined;
+}
+
+function diagnosticsForGroups(groups: ChoiceGroup[], diagnostic: string): Record<string, string> {
+  return Object.fromEntries(groups.map((group) => [group.field, diagnostic]));
 }
 
 function mapGroupsToUnionRects(

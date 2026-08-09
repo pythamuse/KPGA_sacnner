@@ -3,7 +3,12 @@ import fs from 'fs';
 import path from 'path';
 import sharp from 'sharp';
 import { ImageAnalysisData, loadImageAnalysisData } from '../src/lib/recognition/markDensity';
-import { buildCagiGridOverrides, buildSatisfactionGridOverrides, detectVerticalLines } from '../src/lib/recognition/tableGridDetection';
+import {
+  buildCagiGridDetection,
+  buildCagiGridOverrides,
+  buildSatisfactionGridOverrides,
+  detectVerticalLines,
+} from '../src/lib/recognition/tableGridDetection';
 import { cagiTemplate, satisfactionTemplate, type ChoiceGroup } from '../src/lib/recognition/roiTemplates';
 
 const fixtureDir = path.join(process.cwd(), 'tmp', 'test-table-grid-detection');
@@ -34,13 +39,15 @@ describe('table grid detection', () => {
     ]));
 
     const image = await loadImageAnalysisData(filePath);
-    const overrides = buildCagiGridOverrides(image);
+    const detection = buildCagiGridDetection(image);
+    const overrides = detection.overrides;
 
     expect(image.contentBoundsConfident).toBe(true);
     expect(Object.keys(overrides)).toContain('cagi.q01');
     expect(overrides['cagi.q03']).toHaveLength(4);
     expect(overrides['cagi.q03'][0].left).toBeLessThan(overrides['cagi.q03'][1].left);
     expect(overrides['cagi.q03'][0].top).toBeGreaterThan(overrides['cagi.q02'][0].top);
+    expect(detection.diagnostics?.['cagi.q03']).toBeUndefined();
   });
 
   it('maps the two-column satisfaction grid independently from the scale grid', async () => {
@@ -65,6 +72,47 @@ describe('table grid detection', () => {
 
     expect(overrides['cagi.q01']).toBeUndefined();
     expect(overrides['cagi.q07']).toBeUndefined();
+  });
+
+  it('reports lines_undetected for a blank grid region', () => {
+    const detection = buildCagiGridDetection({
+      width: 1000,
+      height: 1400,
+      pixels: Buffer.alloc(1000 * 1400, 255),
+      contentBounds: page,
+      contentBoundsConfident: true,
+    });
+
+    expect(detection.overrides['cagi.q01']).toBeUndefined();
+    expect(detection.diagnostics?.['cagi.q01']).toBe('격자: lines_undetected (가로선 0/8개, 세로선 0/5개)');
+    expect(detection.diagnostics?.['cagi.q08']).toContain('lines_undetected');
+  });
+
+  it('reports insufficient_lines with found and required counts', async () => {
+    const filePath = path.join(fixtureDir, 'cagi-grid-insufficient.png');
+    await writeGridFixture(filePath, groupsFor(cagiTemplate.choiceGroups, [
+      'cagi.q01', 'cagi.q02', 'cagi.q03', 'cagi.q04', 'cagi.q05', 'cagi.q06', 'cagi.q07',
+    ]), { horizontalLineIndexes: [0], verticalLineIndexes: [0] });
+
+    const detection = buildCagiGridDetection(await loadImageAnalysisData(filePath));
+    const diagnostic = detection.diagnostics?.['cagi.q01'];
+
+    expect(detection.overrides['cagi.q01']).toBeUndefined();
+    expect(diagnostic).toContain('insufficient_lines');
+    expect(diagnostic).toContain('1/8');
+    expect(diagnostic).toMatch(/세로선 \d+\/5개/);
+  });
+
+  it('reports gap_mismatch when enough lines have the wrong spacing pattern', async () => {
+    const filePath = path.join(fixtureDir, 'cagi-grid-gap-mismatch.png');
+    await writeGridFixture(filePath, groupsFor(cagiTemplate.choiceGroups, [
+      'cagi.q01', 'cagi.q02', 'cagi.q03', 'cagi.q04', 'cagi.q05', 'cagi.q06', 'cagi.q07',
+    ]), { horizontalLineYs: [500, 510, 520, 530, 540, 550, 560, 570] });
+
+    const detection = buildCagiGridDetection(await loadImageAnalysisData(filePath));
+
+    expect(detection.overrides['cagi.q01']).toBeUndefined();
+    expect(detection.diagnostics?.['cagi.q01']).toContain('gap_mismatch');
   });
 });
 
@@ -108,7 +156,18 @@ function groupsFor(allGroups: ChoiceGroup[], fields: string[]): ChoiceGroup[] {
   });
 }
 
-async function writeGridFixture(filePath: string, groups: ChoiceGroup[]) {
+async function writeGridFixture(
+  filePath: string,
+  groups: ChoiceGroup[],
+  options: {
+    horizontalLineIndexes?: number[];
+    verticalLineIndexes?: number[];
+    horizontalLineOffsets?: Record<number, number>;
+    verticalLineOffsets?: Record<number, number>;
+    horizontalLineYs?: number[];
+    verticalLineXs?: number[];
+  } = {},
+) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
 
   const columnCenters = groups[0].candidates.map((candidate) => candidate.rect.x + candidate.rect.width / 2);
@@ -117,9 +176,19 @@ async function writeGridFixture(filePath: string, groups: ChoiceGroup[]) {
   )));
   const xLines = toPagePixels(deriveBoundaries(columnCenters), page.left, page.right);
   const yLines = toPagePixels(deriveBoundaries(rowCenters), page.top, page.bottom);
+  const selectedVerticalIndexes = options.verticalLineIndexes || xLines.map((_, index) => index);
+  const selectedHorizontalIndexes = options.horizontalLineIndexes || yLines.map((_, index) => index);
   const lines = [
-    ...xLines.map((x) => `<line x1="${x}" y1="${yLines[0]}" x2="${x}" y2="${yLines[yLines.length - 1]}" stroke="#000" stroke-width="4"/>`),
-    ...yLines.map((y) => `<line x1="${xLines[0]}" y1="${y}" x2="${xLines[xLines.length - 1]}" y2="${y}" stroke="#000" stroke-width="4"/>`),
+    ...selectedVerticalIndexes.map((index) => {
+      const x = options.verticalLineXs?.[index]
+        || xLines[index] + (options.verticalLineOffsets?.[index] || 0);
+      return `<line x1="${x}" y1="${yLines[0]}" x2="${x}" y2="${yLines[yLines.length - 1]}" stroke="#000" stroke-width="4"/>`;
+    }),
+    ...selectedHorizontalIndexes.map((index) => {
+      const y = options.horizontalLineYs?.[index]
+        || yLines[index] + (options.horizontalLineOffsets?.[index] || 0);
+      return `<line x1="${xLines[0]}" y1="${y}" x2="${xLines[xLines.length - 1]}" y2="${y}" stroke="#000" stroke-width="4"/>`;
+    }),
   ].join('\n');
   const svg = `
     <svg xmlns="http://www.w3.org/2000/svg" width="${page.width}" height="${page.height}">

@@ -1,6 +1,10 @@
 import { analyzeChoiceGroup, hasUsableFormBounds, loadImageAnalysisData, type PixelRect } from './markDensity';
 import { getTemplate } from './roiTemplates';
-import { buildCagiRowOverrides, buildSatisfactionRowOverrides } from './tableRowDetection';
+import {
+  buildCagiRowDetection,
+  buildSatisfactionRowDetection,
+  type RowDetectionResult,
+} from './tableRowDetection';
 import { buildCagiGridDetection, buildSatisfactionGridDetection } from './tableGridDetection';
 import fs from 'fs/promises';
 
@@ -15,6 +19,7 @@ export interface RecognitionDraft {
     cropDataUrls?: { [field: string]: string };
     cropDebugDataUrls?: { [field: string]: string };
     recognitionCropSource?: Record<string, RecognitionCropSource>;
+    recognitionCropDiagnostic?: Record<string, string>;
   };
   basic: {
     age?: number;
@@ -55,6 +60,7 @@ export interface RecognitionDraft {
   };
   recognitionCropRects?: Record<string, PixelRect>;
   recognitionCropSource?: Record<string, RecognitionCropSource>;
+  recognitionCropDiagnostic?: Record<string, string>;
   warnings?: string[];
 }
 
@@ -106,15 +112,17 @@ export async function recognizeStudentForms(
   const draft = createEmptyDraft();
   const recognitionCropRects: Record<string, PixelRect> = {};
   const recognitionCropSource: Record<string, RecognitionCropSource> = {};
+  const recognitionCropDiagnostic: Record<string, string> = {};
 
   try {
     const cagiImage = await loadImageAnalysisData(cagiPath);
     const cagiImageBuffer = await fs.readFile(cagiPath);
     const cagiTemplate = getTemplate('cagi');
     const canAutoRecognizeCagi = hasUsableFormBounds(cagiImage);
-    const cagiRowOverrides = canAutoRecognizeCagi
-      ? await buildCagiRowOverrides(cagiImage, cagiImageBuffer, toOcrOptions(options))
-      : {};
+    const cagiRowDetection: RowDetectionResult = canAutoRecognizeCagi
+      ? await buildCagiRowDetection(cagiImage, cagiImageBuffer, toOcrOptions(options))
+      : { overrides: {} };
+    const cagiRowOverrides = cagiRowDetection.overrides;
     // Grid cells remain useful review coordinates even when the outer document
     // frame is uncertain. The confidence gate below still forbids auto values.
     const cagiGridDetection = buildCagiGridDetection(cagiImage);
@@ -127,7 +135,16 @@ export async function recognizeStudentForms(
     for (const group of cagiTemplate.choiceGroups) {
       const gridCells = cagiGridOverrides[group.field];
       const rowOverride = cagiRowOverrides[group.field];
-      recognitionCropSource[group.field] = resolveRecognitionCropSource(gridCells, rowOverride);
+      const cropSource = resolveRecognitionCropSource(gridCells, rowOverride);
+      recognitionCropSource[group.field] = cropSource;
+      const cropDiagnostic = resolveRecognitionCropDiagnostic(
+        cropSource,
+        cagiGridDetection.diagnostics?.[group.field],
+        cagiRowDetection.diagnostics?.[group.field],
+      );
+      if (cropDiagnostic) {
+        recognitionCropDiagnostic[group.field] = cropDiagnostic;
+      }
       const result = analyzeChoiceGroup(
         cagiImage,
         group,
@@ -169,9 +186,10 @@ export async function recognizeStudentForms(
     const satisfactionImageBuffer = await fs.readFile(satisfactionPath);
     const satisfactionTemplate = getTemplate('satisfaction');
     const canAutoRecognizeSatisfaction = hasUsableFormBounds(satisfactionImage);
-    const satisfactionRowOverrides = canAutoRecognizeSatisfaction
-      ? await buildSatisfactionRowOverrides(satisfactionImage, satisfactionImageBuffer, toOcrOptions(options))
-      : {};
+    const satisfactionRowDetection: RowDetectionResult = canAutoRecognizeSatisfaction
+      ? await buildSatisfactionRowDetection(satisfactionImage, satisfactionImageBuffer, toOcrOptions(options))
+      : { overrides: {} };
+    const satisfactionRowOverrides = satisfactionRowDetection.overrides;
     const satisfactionGridDetection = buildSatisfactionGridDetection(satisfactionImage);
     const satisfactionGridOverrides = satisfactionGridDetection.overrides;
 
@@ -182,7 +200,16 @@ export async function recognizeStudentForms(
     for (const group of satisfactionTemplate.choiceGroups) {
       const gridCells = satisfactionGridOverrides[group.field];
       const rowOverride = satisfactionRowOverrides[group.field];
-      recognitionCropSource[group.field] = resolveRecognitionCropSource(gridCells, rowOverride);
+      const cropSource = resolveRecognitionCropSource(gridCells, rowOverride);
+      recognitionCropSource[group.field] = cropSource;
+      const cropDiagnostic = resolveRecognitionCropDiagnostic(
+        cropSource,
+        satisfactionGridDetection.diagnostics?.[group.field],
+        satisfactionRowDetection.diagnostics?.[group.field],
+      );
+      if (cropDiagnostic) {
+        recognitionCropDiagnostic[group.field] = cropDiagnostic;
+      }
       const result = analyzeChoiceGroup(
         satisfactionImage,
         group,
@@ -218,6 +245,9 @@ export async function recognizeStudentForms(
   }
   if (Object.keys(recognitionCropSource).length > 0) {
     draft.recognitionCropSource = recognitionCropSource;
+  }
+  if (Object.keys(recognitionCropDiagnostic).length > 0) {
+    draft.recognitionCropDiagnostic = recognitionCropDiagnostic;
   }
 
   return draft;
@@ -311,6 +341,16 @@ export function resolveRecognitionCropSource(
   if (gridCells) return 'grid';
   if (rowOverride) return 'row';
   return 'fixed';
+}
+
+export function resolveRecognitionCropDiagnostic(
+  source: RecognitionCropSource,
+  gridDiagnostic?: string,
+  rowDiagnostic?: string,
+): string | undefined {
+  if (source !== 'fixed') return undefined;
+
+  return [gridDiagnostic, rowDiagnostic].filter((diagnostic): diagnostic is string => Boolean(diagnostic)).join('; ') || undefined;
 }
 
 function requiresHighVisualConfidence(field: string): boolean {

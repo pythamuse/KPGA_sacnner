@@ -180,24 +180,34 @@ export default function RecognitionReview({
   const renderCropSourceBadge = (key: string) => {
     const source = draft.source?.recognitionCropSource?.[key];
     if (!source) return null;
+    const diagnostic = source === 'fixed'
+      ? draft.source?.recognitionCropDiagnostic?.[key]
+      : undefined;
 
     return (
-      <span
-        style={{
-          display: 'inline-flex',
-          alignItems: 'center',
-          minHeight: 22,
-          padding: '2px 7px',
-          borderRadius: 999,
-          border: '1px solid #d8dde8',
-          color: '#4b5565',
-          background: '#f6f8fb',
-          fontSize: 11,
-          fontWeight: 800,
-          whiteSpace: 'nowrap',
-        }}
-      >
-        {cropSourceLabel[source]}
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+        <span
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            minHeight: 22,
+            padding: '2px 7px',
+            borderRadius: 999,
+            border: '1px solid #d8dde8',
+            color: '#4b5565',
+            background: '#f6f8fb',
+            fontSize: 11,
+            fontWeight: 800,
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {cropSourceLabel[source]}
+        </span>
+        {diagnostic && (
+          <span style={{ color: '#6b7280', fontSize: 11, fontWeight: 600 }}>
+            {diagnostic}
+          </span>
+        )}
       </span>
     );
   };
