@@ -114,9 +114,12 @@ describe('table row detection', () => {
     const filePath = path.join(fixtureDir, 'gap-mismatch-diagnostic.png');
     await writeSyntheticRows(filePath, [200, 210, 220, 230, 240, 300, 310, 320, 330]);
     const detection = buildCagiRowDetection(await loadImageAnalysisData(filePath));
+    const diagnostic = detection.diagnostics?.['cagi.q01'];
 
     expect(detection.overrides).toEqual({});
-    expect(detection.diagnostics?.['cagi.q01']).toContain('gap_mismatch');
+    expect(diagnostic).toContain('gap_mismatch');
+    expect(diagnostic).toMatch(/최대 편차 \d+% \(허용 35%\)/);
+    expect(Number(diagnostic?.match(/최대 편차 (\d+)%/)?.[1])).toBeGreaterThanOrEqual(0);
   });
 
   it('matches satisfaction row groups independently and skips q01', async () => {

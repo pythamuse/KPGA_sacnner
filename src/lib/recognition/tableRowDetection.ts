@@ -95,7 +95,7 @@ export function matchRowPattern(
 function evaluateRowPattern(
   detectedLines: HorizontalLine[],
   expectedRelativeGaps: number[],
-  toleranceRatio: number,
+  toleranceRatio = 0.35,
 ): { match: RowMatchResult | null; failure?: RowPatternFailure } {
   const requiredLineCount = expectedRelativeGaps.length + 1;
   if (requiredLineCount < 2) {
@@ -120,6 +120,7 @@ function evaluateRowPattern(
   }
 
   const sortedLines = [...detectedLines].sort((a, b) => a.y - b.y);
+  let bestDeviation: number | undefined;
 
   for (let start = 0; start <= sortedLines.length - requiredLineCount; start++) {
     const candidateLines = sortedLines.slice(start, start + requiredLineCount);
@@ -130,10 +131,16 @@ function evaluateRowPattern(
 
     const firstGap = gaps[0];
     const actualRelativeGaps = gaps.map((gap) => gap / firstGap);
-    const matched = actualRelativeGaps.every((gap, index) => {
+    const deviations = actualRelativeGaps.map((gap, index) => {
       const expected = expectedRelativeGaps[index];
-      return Math.abs(gap - expected) / expected <= toleranceRatio;
+      return Math.abs(gap - expected) / expected;
     });
+    const candidateDeviation = Math.max(...deviations);
+    if (bestDeviation === undefined || candidateDeviation < bestDeviation) {
+      bestDeviation = candidateDeviation;
+    }
+
+    const matched = deviations.every((deviation) => deviation <= toleranceRatio);
 
     if (matched) {
       return {
@@ -147,7 +154,12 @@ function evaluateRowPattern(
 
   return {
     match: null,
-    failure: { reason: 'gap_mismatch', detail: '행 선 간격 패턴 불일치' },
+    failure: {
+      reason: 'gap_mismatch',
+      detail: bestDeviation === undefined
+        ? '행 선 간격 패턴 불일치'
+        : `행 선 간격 패턴 불일치 (최대 편차 ${Math.round(bestDeviation * 100)}% (허용 ${Math.round(toleranceRatio * 100)}%))`,
+    },
   };
 }
 
@@ -361,9 +373,9 @@ function findRowMatch(
   }
 
   const detectedLines = detectHorizontalLines(image, searchTop, searchBottom, xLeft, xRight);
-  const pixelMatch = matchRowPattern(detectedLines, expectedRelativeGaps);
-  return pixelMatch || createFailureResult(
-    classifyRowPatternFailure(detectedLines.length, expectedRelativeGaps.length + 1),
+  const pixelEvaluation = evaluateRowPattern(detectedLines, expectedRelativeGaps);
+  return pixelEvaluation.match || createFailureResult(
+    pixelEvaluation.failure || classifyRowPatternFailure(detectedLines.length, expectedRelativeGaps.length + 1),
     '픽셀',
   );
 }
@@ -379,11 +391,12 @@ async function findRowMatchWithOcrFallback(
   ocrOptions?: OcrOptions,
 ): Promise<RowMatchResult> {
   const detectedLines = detectHorizontalLines(image, searchTop, searchBottom, xLeft, xRight);
-  const pixelMatch = matchRowPattern(detectedLines, expectedRelativeGaps);
-  if (pixelMatch?.confident) {
-    return pixelMatch;
+  const pixelEvaluation = evaluateRowPattern(detectedLines, expectedRelativeGaps);
+  if (pixelEvaluation.match?.confident) {
+    return pixelEvaluation.match;
   }
-  const pixelFailure = classifyRowPatternFailure(detectedLines.length, expectedRelativeGaps.length + 1);
+  const pixelFailure = pixelEvaluation.failure
+    || classifyRowPatternFailure(detectedLines.length, expectedRelativeGaps.length + 1);
 
   const ocrLines = await detectOcrTextLines(
     imageBuffer,
@@ -395,11 +408,12 @@ async function findRowMatchWithOcrFallback(
     xRight,
     ocrOptions,
   );
-  const ocrMatch = matchRowPattern(ocrLines, expectedRelativeGaps);
-  if (ocrMatch?.confident) {
-    return ocrMatch;
+  const ocrEvaluation = evaluateRowPattern(ocrLines, expectedRelativeGaps);
+  if (ocrEvaluation.match?.confident) {
+    return ocrEvaluation.match;
   }
-  const ocrFailure = classifyRowPatternFailure(ocrLines.length, expectedRelativeGaps.length + 1);
+  const ocrFailure = ocrEvaluation.failure
+    || classifyRowPatternFailure(ocrLines.length, expectedRelativeGaps.length + 1);
 
   return {
     lineYs: [],

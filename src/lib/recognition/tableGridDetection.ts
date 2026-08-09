@@ -192,10 +192,15 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
 
   const matchedRows = matchExpectedLines(horizontalLines, expectedY, yTolerance);
   const matchedColumns = matchExpectedLines(verticalLines, expectedX, xTolerance);
+  const rowGapDeviation = matchedRows ? getMaxGapDeviation(matchedRows, expectedY) : null;
+  const columnGapDeviation = matchedColumns ? getMaxGapDeviation(matchedColumns, expectedX) : null;
   if (!matchedRows || !matchedColumns || !hasConsistentGaps(matchedRows, expectedY) || !hasConsistentGaps(matchedColumns, expectedX)) {
     return {
       overrides: {},
-      diagnostics: diagnosticsForGroups(groups, '격자: gap_mismatch (감지선 간격 패턴 불일치)'),
+      diagnostics: diagnosticsForGroups(
+        groups,
+        formatGapMismatchDiagnostic(rowGapDeviation, columnGapDeviation),
+      ),
     };
   }
 
@@ -326,6 +331,39 @@ function matchExpectedLines(detected: number[], expected: number[], tolerance: n
   }
 
   return matched;
+}
+
+function getMaxGapDeviation(actual: number[], expected: number[]): number | null {
+  if (actual.length !== expected.length || actual.length < 2) {
+    return null;
+  }
+
+  const actualTotal = actual[actual.length - 1] - actual[0];
+  const expectedTotal = expected[expected.length - 1] - expected[0];
+  if (actualTotal <= 0 || expectedTotal <= 0) {
+    return null;
+  }
+
+  let maxDeviation = 0;
+  for (let index = 1; index < actual.length; index++) {
+    const actualGap = (actual[index] - actual[index - 1]) / actualTotal;
+    const expectedGap = (expected[index] - expected[index - 1]) / expectedTotal;
+    maxDeviation = Math.max(maxDeviation, Math.abs(actualGap - expectedGap));
+  }
+
+  return maxDeviation;
+}
+
+function formatGapMismatchDiagnostic(
+  rowGapDeviation: number | null,
+  columnGapDeviation: number | null,
+): string {
+  if (rowGapDeviation === null || columnGapDeviation === null) {
+    return '격자: gap_mismatch (감지선 간격 패턴 불일치)';
+  }
+
+  const maxDeviation = Math.max(rowGapDeviation, columnGapDeviation);
+  return `격자: gap_mismatch (감지선 간격 패턴 불일치; 최대 편차 ${Math.round(maxDeviation * 100)}% (허용 18%))`;
 }
 
 function hasConsistentGaps(actual: number[], expected: number[]): boolean {

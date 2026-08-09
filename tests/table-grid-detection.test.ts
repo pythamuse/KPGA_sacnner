@@ -107,12 +107,15 @@ describe('table grid detection', () => {
     const filePath = path.join(fixtureDir, 'cagi-grid-gap-mismatch.png');
     await writeGridFixture(filePath, groupsFor(cagiTemplate.choiceGroups, [
       'cagi.q01', 'cagi.q02', 'cagi.q03', 'cagi.q04', 'cagi.q05', 'cagi.q06', 'cagi.q07',
-    ]), { horizontalLineYs: [500, 510, 520, 530, 540, 550, 560, 570] });
+    ]), { horizontalLineYs: [500, 510, 550, 560, 620, 625, 630, 650] });
 
     const detection = buildCagiGridDetection(await loadImageAnalysisData(filePath));
+    const diagnostic = detection.diagnostics?.['cagi.q01'];
 
     expect(detection.overrides['cagi.q01']).toBeUndefined();
-    expect(detection.diagnostics?.['cagi.q01']).toContain('gap_mismatch');
+    expect(diagnostic).toContain('gap_mismatch');
+    expect(diagnostic).toMatch(/최대 편차 \d+% \(허용 18%\)/);
+    expect(Number(diagnostic?.match(/최대 편차 (\d+)%/)?.[1])).toBeGreaterThanOrEqual(0);
   });
 });
 
