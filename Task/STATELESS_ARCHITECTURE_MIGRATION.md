@@ -137,3 +137,34 @@ UI/트랙 분기 로직 자체는 정상 동작했으나, 다음 두 문제를 �
 권장안은 비공개 외부 객체 저장소에 원본 페이지와 작업별 인벤토리를 저장하는 것이다. Vercel Blob을 사용한다면 비공개 접근, 짧은 TTL, 작업 취소·완료 후 삭제, 개인정보를 포함하지 않는 난수 파일명으로 구성한다. 저장소를 쓰지 않는 대안은 페이지 쌍을 동일 요청에서 변환·인식하는 완전 무상태 API지만, 두 이미지의 요청 크기 제한과 브라우저 재시도 설계를 별도로 검증해야 한다.
 
 두 안 모두 `os.tmpdir()`는 요청 내부의 일회성 처리 공간으로만 사용할 수 있으며, 이후 API 요청에서 다시 찾아야 하는 원본·세션·인벤토리를 보관해서는 안 된다.
+
+## 사이클 7 — Vercel Blob 기반 업로드 영속화 구현 (2026-08-06~09)
+
+> 이 사이클은 별도 문서였던 `Docs/UPLOAD_PERSISTENCE_IMPLEMENTATION.md`의 내용을 이관해 통합한 것이다. 원 위치가 문서 구성 규칙(`README.md`)과 맞지 않아(구현 기록은 `Docs/`가 아니라 `Task/`에 있어야 함) 이 사이클로 옮기고 원본 파일은 삭제한다.
+
+### 작업 내용
+
+사이클 6에서 권고한 대로, 업로드 원본을 외부 영속 저장소(Vercel Blob)로 이전했다(사용자가 이 대화 밖에서 Codex를 직접 실행해 구현, 커밋 `e27138c`).
+
+- `src/lib/uploadInventory.ts`(신규): `UploadKind`, `UploadBatchReference`(`batchId`, `expectedPageCount`), `UploadInventory` 타입과 `isSafeJobId`/`isUploadBatchReference`/`isUploadInventory` 검증 함수. `batchId`는 `/^[a-zA-Z0-9_-]{8,128}$/`, `jobId`는 `/^job_[a-zA-Z0-9_-]+$/`로 검증해 Blob 경로 주입 위험을 차단.
+- `src/lib/storage/uploadStore.ts`(신규): `storeUploadPage`/`readUploadPage`/`deleteJobUploads`/`deleteUploadBatch(es)`. `usesLocalMemoryStore()`(`NODE_ENV==='test' || !process.env.VERCEL`)가 참이면 인메모리 `Map`을, Vercel 배포본에서는 실제 `@vercel/blob`의 `put`/`get`/`list`/`del`(access: `private`)을 사용. Blob 경로는 `kpga-scan/jobs/{jobId}/uploads/{type}/{batchId}/page-NNNN.jpg` 형식으로 원본 파일명·PII를 노출하지 않음.
+- `src/app/api/upload/route.ts` 재작성: `jobId`/`type`/`batchId`/`expectedPageCount`/`pageNumber`를 받아 `storeUploadPage` 성공 후에만 200을 반환. 기존 `ensureJobSession(jobId)` 검사(로컬 `jobStore` 기반)는 제거됨 — Blob 저장 자체가 성공/실패 판정 기준이 됨.
+- `src/app/api/recognize/route.ts` 재작성: `{jobId, inventory}`를 받아, 선언된 두 배치(`cagi`/`satisfaction`)의 `expectedPageCount`가 다르면 파일을 읽기 전에 즉시 `COUNT_MISMATCH`. 이후 `materializeUploadBatch`가 배치의 모든 페이지를 `Promise.all`로 병렬 `readUploadPage`해 요청 스코프 임시 디렉터리(`os.tmpdir()/kpga-scanner/recognize/{randomUUID}`)에 내려받는다. 선언된 페이지 중 일부를 Blob에서 못 찾으면(사이클 6의 근본 버그였던 "일부만 보임" 상황) `COUNT_MISMATCH`가 아니라 별도의 `UPLOAD_INTEGRITY_ERROR`(기대/실제 페이지 번호 목록 포함)로 정직하게 실패한다. 인식 성공 후에는 해당 배치를 Blob에서 삭제.
+- `src/app/api/jobs/cleanup/route.ts`: `scope=uploads`/`scope=job`이 `deleteJobUploads`(Blob, job 프리픽스 전체 삭제)를 호출하도록 배선. `scope=expired`(기존 `jobStore` TTL)는 "레거시 개발 워크스페이스 전용" 주석과 함께 유지되나, **Blob에 남은 업로드에는 적용되지 않는다** — 아래 "다음 작업 피드백" 참고.
+- `src/components/ImageUploadPanel.tsx`: 촬영/선택마다(순차 모드는 파일 1장당, 배치 모드는 PDF 전체당) `createBatchId()`로 새 `batchId`를 발급해 `uploadInventoryRef`에 누적하고, cagi/satisfaction 배치가 모두 갖춰지면 `onAnalyzeTrigger(inventory)`를 호출.
+
+### 테스트 결과
+
+- 클로드 코드가 이 대화에서 구현물을 직접 리뷰(커밋 전)하고, 커밋 후 재검증: `npm test` 17개 파일 66개 테스트, `npm run build` 통과(둘 다 이 시점 기준 최신 수치 — Blob 작업 자체가 추가한 것은 그중 `tests/integration.test.ts`/`tests/job-cleanup.test.ts` 재작성과 신규 `tests/helpers/uploadApi.ts`).
+- **중요한 한계**: `usesLocalMemoryStore()` 때문에 로컬/테스트 환경은 전부 가짜 인메모리 저장소를 쓴다. `@vercel/blob`의 실제 `put`/`get`/`list`/`del` 호출, `access: 'private'` 등 옵션, 실패 시 에러 메시지 형식은 테스트에서 단 한 번도 실행되지 않는다 — "테스트 통과"가 검증하는 것은 애플리케이션 로직뿐이고 Blob 연동 자체가 아니다.
+- 클로드 코드가 배포 전 검토에서 지적한 리스크(Vercel Blob 스토어가 실제로 프로젝트에 연결됐는지 배포 전 확인되지 않음 — 연결 안 된 채 배포되면 모든 업로드가 503으로 완전히 막힘)는, 이후 사용자가 실제 19쌍 PDF 배치([[COORDINATE_REGISTRATION_AND_RESPONSE_PRIOR_PLAN]] §10.1)로 업로드~인식까지 정상 진행되는 것을 확인하면서 **간접적으로 해소된 것으로 판단**한다(Blob이 실제로 연결되어 있지 않다면 그 테스트 자체가 503으로 막혔을 것). 다만 이는 사후 관찰이지 사전 검증은 아니었다.
+
+### 다음 작업을 위한 피드백
+
+- **[미해결, PRD 위반 가능성] 업로드 파일의 자동 만료(TTL)가 없다.** `Docs/00_PRD.md` 10장은 "파일 만료: 작업 세션 파일은 일정 시간 후 자동 삭제"를 요구하는데, Blob 업로드는 (a) 인식 성공 시 해당 배치만, (b) 사용자가 명시적으로 "초기화"를 누를 때만 삭제된다. 사용자가 사진을 올리고 탭을 닫으면 그 이미지는 Blob에 영원히 남는다.
+- **[미해결] 재촬영/재선택마다 새 `batchId`를 발급하므로, 이전 시도의 Blob 데이터가 고아로 남을 수 있다.** `/api/recognize`는 최종 배치만 삭제하고, 도중에 버려진 배치는 정리하지 않는다(같은 job에서 나중에 "초기화"를 누르면 job 프리픽스 전체가 삭제되어 함께 정리되지만, 초기화 없이 세션이 끝나면 남는다).
+- **[미해결, 테스트 커버리지 회귀] `tests/integration.test.ts` 재작성 과정에서 `/api/students`·`/api/download`(엑셀 저장·다운로드) end-to-end 검증이 통째로 빠졌다.** 이 리포지토리 어디에도 이 두 라우트를 호출하는 테스트가 남아있지 않다. 두 라우트 자체는 이번 변경 대상이 아니었지만, 앱의 핵심 기능을 지키던 회귀 방지막이 사라졌다.
+- **[낮음, 죽은 코드]** `/api/uploads/crop`, `/api/uploads/image`가 여전히 `getJobDir(jobId)/uploads`(로컬 디스크) 경로를 참조하는데, 업로드가 더 이상 로컬 디스크에 쓰이지 않으므로 이 두 라우트는 항상 실패한다. 프론트엔드는 사이클 4 이후 이미 이 라우트를 호출하지 않으므로 사용자 영향은 없지만, 정리 대상이다.
+- **[낮음, 성능 미검증]** 19쪽 배치라면 인식 요청 1회에서 최대 38개의 Blob 읽기가 동시에 발생한다(`materializeUploadBatch`의 `Promise.all`). 이번 세션에서 OCR 기능이 "로컬은 빠른데 Vercel은 느림"으로 184초까지 늘어났던 전례([[OCR_ANCHORED_ROW_DETECTION]])가 있어, 이 동시성도 별도로 실측 확인이 필요하다.
+- **[낮음]** `uploadStore.ts`의 `toStorageError`가 Blob SDK의 에러 **메시지 문자열**을 정규식으로 매칭해 "설정 안 됨" 여부를 판정한다 — SDK가 메시지 문구를 바꾸면 조용히 오분류될 수 있는 취약한 방식이다.
+- 사이클 1의 "성인 트랙 crop 오표시"는 이 사이클에서도 다루지 않았다 — 계속 미착수.
