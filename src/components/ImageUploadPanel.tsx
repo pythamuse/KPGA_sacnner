@@ -11,13 +11,14 @@ import {
   hasMeaningfulRenderedPixels,
 } from '@/lib/pdf/pdfRenderConfig';
 import { cagiTemplate, satisfactionTemplate } from '@/lib/recognition/roiTemplates';
+import type { UploadBatchReference, UploadInventory } from '@/lib/uploadInventory';
 
 export type UploadMode = 'sequential' | 'batch';
 
 interface ImageUploadPanelProps {
   mode: UploadMode;
   jobId: string;
-  onAnalyzeTrigger: () => void;
+  onAnalyzeTrigger: (inventory: UploadInventory) => void | Promise<void>;
   onUploadProgressChange?: (isProcessing: boolean) => void;
   onUploadSuccess: (type: 'cagi' | 'satisfaction', imageId: string, filename: string) => void;
 }
@@ -69,6 +70,11 @@ const IMAGE_SHRINK_OPTIONS = [
   { scale: 0.7, quality: 0.78 },
   { scale: 0.55, quality: 0.74 },
 ];
+
+const createBatchId = () => (
+  globalThis.crypto?.randomUUID?.()
+  || `batch_${Date.now()}_${Math.random().toString(36).slice(2, 12)}`
+);
 
 const canvasToBlob = (canvas: HTMLCanvasElement, mimeType: string, quality: number): Promise<Blob> => (
   new Promise((resolve, reject) => {
@@ -223,6 +229,7 @@ export default function ImageUploadPanel({
   const cameraVideoRef = useRef<HTMLVideoElement>(null);
   const cameraCanvasRef = useRef<HTMLCanvasElement>(null);
   const cameraStreamRef = useRef<MediaStream | null>(null);
+  const uploadInventoryRef = useRef<UploadInventory>({ cagi: null, satisfaction: null });
 
   useEffect(() => {
     onUploadProgressChange?.(isBatchProcessing || isCagiUploading || isSatUploading || isCameraStarting || isCapturing);
@@ -328,13 +335,20 @@ export default function ImageUploadPanel({
     };
   }, [correctionPreview]);
 
-  const uploadSingleFile = async (file: File, type: UploadKind, replaceExisting = false): Promise<any> => {
+  const uploadSingleFile = async (
+    file: File,
+    type: UploadKind,
+    batch: UploadBatchReference,
+    pageNumber: number,
+  ): Promise<any> => {
     const uploadFile = await shrinkImageFileIfNeeded(file, MAX_UPLOAD_IMAGE_BYTES);
     const formData = new FormData();
     formData.append('file', uploadFile);
     formData.append('jobId', jobId);
     formData.append('type', type);
-    formData.append('replaceExisting', replaceExisting ? 'true' : 'false');
+    formData.append('batchId', batch.batchId);
+    formData.append('expectedPageCount', String(batch.expectedPageCount));
+    formData.append('pageNumber', String(pageNumber));
 
     const res = await fetch('/api/upload', {
       method: 'POST',
@@ -426,10 +440,16 @@ export default function ImageUploadPanel({
     else setIsSatUploading(true);
 
     try {
-      const data = await uploadSingleFile(file, type, true);
+      const batch = { batchId: createBatchId(), expectedPageCount: 1 };
+      const data = await uploadSingleFile(file, type, batch, 1);
+      uploadInventoryRef.current = { ...uploadInventoryRef.current, [type]: batch };
       onUploadSuccess(type, data.imageId, data.filename);
       if (type === 'cagi') setCagiCount(1);
       else setSatCount(1);
+
+      if (uploadInventoryRef.current.cagi && uploadInventoryRef.current.satisfaction) {
+        void onAnalyzeTrigger(uploadInventoryRef.current);
+      }
       return true;
     } catch (err: any) {
       alert(`파일 업로드 실패: ${err.message}`);
@@ -507,7 +527,10 @@ export default function ImageUploadPanel({
       }
 
       const total = filesToUpload.length;
-      let successCount = 0;
+      if (total === 0) {
+        throw new Error('업로드할 이미지 파일이 없습니다.');
+      }
+      const batch = { batchId: createBatchId(), expectedPageCount: total };
 
       for (let i = 0; i < total; i++) {
         const { file: sourceFile, source } = filesToUpload[i];
@@ -567,14 +590,14 @@ export default function ImageUploadPanel({
         }
 
         setBatchStatusMessage(`페이지를 업로드하고 있습니다. (${i + 1}/${total})`);
-        await uploadSingleFile(fileToUpload, type);
-        successCount++;
+        await uploadSingleFile(fileToUpload, type, batch, i + 1);
       }
 
+      uploadInventoryRef.current = { ...uploadInventoryRef.current, [type]: batch };
       if (type === 'cagi') {
-        setCagiCount((prev) => prev + successCount);
+        setCagiCount(total);
       } else {
-        setSatCount((prev) => prev + successCount);
+        setSatCount(total);
       }
     } catch (err: any) {
       alert(`업로드 처리 중 오류가 발생했습니다: ${err.message}`);
@@ -802,6 +825,7 @@ export default function ImageUploadPanel({
       setSatCount(0);
       setCagiFile(null);
       setSatFile(null);
+      uploadInventoryRef.current = { cagi: null, satisfaction: null };
       setBatchCorrectionWarnings([]);
       setCameraError('');
     } catch (err: any) {
@@ -1142,7 +1166,12 @@ export default function ImageUploadPanel({
                 </div>
               ) : (
                 cagiCount > 0 && satCount > 0 && (
-                  <button className="btn-primary" type="button" disabled={isMismatch} onClick={onAnalyzeTrigger}>
+                  <button
+                    className="btn-primary"
+                    type="button"
+                    disabled={isMismatch}
+                    onClick={() => void onAnalyzeTrigger(uploadInventoryRef.current)}
+                  >
                     전체 설문지 인식 시작
                   </button>
                 )

@@ -2,6 +2,7 @@
 
 import React, { useState } from 'react';
 import ImageUploadPanel, { UploadMode } from '@/components/ImageUploadPanel';
+import type { UploadInventory } from '@/lib/uploadInventory';
 import RecognitionReview from '@/components/RecognitionReview';
 import StudentTable from '@/components/StudentTable';
 import ErrorSummary from '@/components/ErrorSummary';
@@ -111,7 +112,7 @@ function BrandHeader() {
           whiteSpace: 'nowrap',
         }}
       >
-        테스트 버전 v2026-08-06.1
+        테스트 버전 v2026-08-06.2
       </span>
     </div>
   );
@@ -160,7 +161,7 @@ export default function Home() {
     }
   };
 
-  const requestRecognition = async () => {
+  const requestRecognition = async (inventory: UploadInventory) => {
     if (!jobId) return;
 
     setIsRecognizing(true);
@@ -174,7 +175,7 @@ export default function Home() {
         const res = await fetch('/api/recognize', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ jobId, trustUploadedTypes }),
+          body: JSON.stringify({ jobId, inventory, trustUploadedTypes }),
         });
         const data = await res.json();
 
@@ -206,27 +207,18 @@ export default function Home() {
     }
   };
 
-  const handleSequentialUploadSuccess = async (type: 'cagi' | 'satisfaction', imageId: string) => {
-    let currentCagi = cagiImageId;
-    let currentSat = satImageId;
-
+  const handleSequentialUploadSuccess = (type: 'cagi' | 'satisfaction', imageId: string) => {
     if (type === 'cagi') {
       setCagiImageId(imageId);
-      currentCagi = imageId;
     } else {
       setSatImageId(imageId);
-      currentSat = imageId;
-    }
-
-    if (currentCagi && currentSat && jobId) {
-      await requestRecognition();
     }
   };
 
-  const handleTriggerBatchAnalysis = async () => {
+  const handleTriggerBatchAnalysis = async (inventory: UploadInventory) => {
     if (!jobId) return;
 
-    await requestRecognition();
+    await requestRecognition(inventory);
   };
 
   const handleDraftChange = (updatedDraft: RecognitionDraft) => {

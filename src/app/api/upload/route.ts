@@ -1,58 +1,48 @@
 import { NextRequest, NextResponse } from 'next/server';
-import fs from 'fs';
-import path from 'path';
-import { getJobDir } from '../../../lib/excel/templateManager';
-import { ensureJobSession } from '../../../lib/storage/jobStore';
+import { isSafeJobId, isUploadBatchReference, isUploadKind } from '../../../lib/uploadInventory';
+import { storeUploadPage, UploadStorageError } from '../../../lib/storage/uploadStore';
 
 export async function POST(req: NextRequest) {
   try {
     const formData = await req.formData();
-    const file = formData.get('file') as File;
-    const jobId = formData.get('jobId') as string;
-    const type = formData.get('type') as string;
-    const replaceExisting = formData.get('replaceExisting') === 'true';
+    const file = formData.get('file');
+    const jobId = formData.get('jobId');
+    const type = formData.get('type');
+    const batch = {
+      batchId: formData.get('batchId'),
+      expectedPageCount: Number(formData.get('expectedPageCount')),
+    };
+    const pageNumber = Number(formData.get('pageNumber'));
 
-    if (!file || !jobId || !['cagi', 'satisfaction'].includes(type)) {
-      return NextResponse.json({ error: '필수 파라미터가 누락되었습니다.' }, { status: 400 });
+    if (!(file instanceof File) || !isSafeJobId(jobId) || !isUploadKind(type) || !isUploadBatchReference(batch)) {
+      return NextResponse.json({ error: '필수 업로드 정보가 올바르지 않습니다.' }, { status: 400 });
     }
 
-    if (!ensureJobSession(jobId)) {
-      return NextResponse.json({ error: '작업 세션이 유효하지 않습니다. 새 작업을 시작해주세요.' }, { status: 404 });
+    if (!Number.isInteger(pageNumber) || pageNumber < 1 || pageNumber > batch.expectedPageCount) {
+      return NextResponse.json({ error: '페이지 번호가 업로드 묶음 정보와 일치하지 않습니다.' }, { status: 400 });
     }
 
-    const jobDir = getJobDir(jobId);
-    const uploadDir = path.join(jobDir, 'uploads');
-    
-    if (!fs.existsSync(uploadDir)) {
-      fs.mkdirSync(uploadDir, { recursive: true });
-    }
-
-    if (replaceExisting) {
-      const removablePrefix = `${type}_`;
-      fs.readdirSync(uploadDir)
-        .filter((filename) => filename.startsWith(removablePrefix))
-        .forEach((filename) => {
-          fs.unlinkSync(path.join(uploadDir, filename));
-        });
-    }
-
-    const buffer = Buffer.from(await file.arrayBuffer());
-    const fileExt = path.extname(file.name);
-    const imageId = `${type}_${Date.now()}`;
-    const filename = `${imageId}${fileExt}`;
-    const filePath = path.join(uploadDir, filename);
-
-    fs.writeFileSync(filePath, buffer);
+    const stored = await storeUploadPage({
+      jobId,
+      type,
+      batch,
+      pageNumber,
+      data: Buffer.from(await file.arrayBuffer()),
+      contentType: file.type || 'application/octet-stream',
+    });
 
     return NextResponse.json({
-      imageId,
-      filename,
-      originalName: file.name
+      imageId: stored.pathname,
+      filename: `${type}_page_${String(pageNumber).padStart(3, '0')}.jpg`,
+      pageNumber,
+      expectedPageCount: batch.expectedPageCount,
     });
-  } catch (err: any) {
-    return NextResponse.json(
-      { error: `이미지 업로드 실패: ${err.message}` },
-      { status: 500 }
-    );
+  } catch (err: unknown) {
+    if (err instanceof UploadStorageError) {
+      return NextResponse.json({ error: err.message, code: err.code }, { status: 503 });
+    }
+
+    const message = err instanceof Error ? err.message : '알 수 없는 오류';
+    return NextResponse.json({ error: `이미지 업로드 실패: ${message}` }, { status: 500 });
   }
 }

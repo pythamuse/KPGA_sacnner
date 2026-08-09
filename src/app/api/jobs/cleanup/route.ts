@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { cleanupExpiredJobs, clearJobUploads, deleteJobWorkspace, hasJobSession } from '../../../../lib/storage/jobStore';
+import { deleteJobUploads, UploadStorageError } from '../../../../lib/storage/uploadStore';
 
 export async function POST(req: NextRequest) {
   try {
@@ -8,33 +9,37 @@ export async function POST(req: NextRequest) {
     const scope = (body.scope as string | undefined) || 'uploads';
 
     if (!jobId && scope !== 'expired') {
-      return NextResponse.json({ error: '?꾩닔 ?뚮씪誘명꽣(jobId)媛 ?꾨씫?섏뿀?듬땲??' }, { status: 400 });
+      return NextResponse.json({ error: '정리할 작업 식별자(jobId)가 필요합니다.' }, { status: 400 });
     }
 
     if (scope === 'expired') {
-      const removedJobIds = cleanupExpiredJobs();
-      return NextResponse.json({ ok: true, removedJobIds });
-    }
-
-    if (!jobId || !hasJobSession(jobId)) {
-      return NextResponse.json({ error: '?묒뾽 ?몄뀡??議댁옱?섏? ?딆뒿?덈떎.' }, { status: 404 });
+      // Legacy development workspaces only. Blob uploads are removed after recognition or explicit reset.
+      return NextResponse.json({ ok: true, removedJobIds: cleanupExpiredJobs() });
     }
 
     if (scope === 'job') {
-      deleteJobWorkspace(jobId);
+      await deleteJobUploads(jobId!);
+      if (hasJobSession(jobId!)) {
+        deleteJobWorkspace(jobId!);
+      }
       return NextResponse.json({ ok: true });
     }
 
     if (scope !== 'uploads') {
-      return NextResponse.json({ error: '?뚯슜?섏? ?딅뒗 cleanup scope?낅땲??' }, { status: 400 });
+      return NextResponse.json({ error: '지원하지 않는 cleanup scope입니다.' }, { status: 400 });
     }
 
-    clearJobUploads(jobId);
+    await deleteJobUploads(jobId!);
+    if (hasJobSession(jobId!)) {
+      clearJobUploads(jobId!);
+    }
     return NextResponse.json({ ok: true });
-  } catch (err: any) {
-    return NextResponse.json(
-      { error: `?묒뾽 ?뚯씪 ?뺣━ ?ㅽ뙣: ${err.message}` },
-      { status: 500 }
-    );
+  } catch (err: unknown) {
+    if (err instanceof UploadStorageError) {
+      return NextResponse.json({ error: err.message, code: err.code }, { status: 503 });
+    }
+
+    const message = err instanceof Error ? err.message : '알 수 없는 오류';
+    return NextResponse.json({ error: `작업 정리 중 오류: ${message}` }, { status: 500 });
   }
 }

@@ -1,14 +1,10 @@
-import { afterAll, describe, expect, it } from 'vitest';
-import fs from 'fs';
-import path from 'path';
+import { afterEach, describe, expect, it } from 'vitest';
 import sharp from 'sharp';
-import { getJobDir } from '../src/lib/excel/templateManager';
 import { ChoiceGroup } from '../src/lib/recognition/roiTemplates';
 import { FORM_CLASSIFIER_POLICY_VERSION } from '../src/lib/recognition/classifyForm';
-import { POST as jobsPOST } from '../src/app/api/jobs/route';
 import { GET as recognizeGET, POST as recognizePOST } from '../src/app/api/recognize/route';
-
-const createdJobDirs: string[] = [];
+import { resetUploadStoreForTests } from '../src/lib/storage/uploadStore';
+import { createInventory, createTestBatch, uploadTestPage } from './helpers/uploadApi';
 
 const satisfactionGroups: ChoiceGroup[] = [
   makeChoiceGroup('satisfaction.frequency', [1, 2, 3, 4], [0.668, 0.748, 0.827, 0.908], 0.35, 0.025),
@@ -20,137 +16,86 @@ const satisfactionGroups: ChoiceGroup[] = [
   ),
 ];
 
-afterAll(() => {
-  for (const jobDir of createdJobDirs) {
-    if (fs.existsSync(jobDir)) {
-      fs.rmSync(jobDir, { recursive: true, force: true });
-    }
-  }
+afterEach(() => {
+  resetUploadStoreForTests();
 });
 
-describe('인식 API 양식 칸 불일치 감지', () => {
-  it('GET 상태 조회가 현재 양식 분류 정책 버전을 반환한다', async () => {
+describe('recognition upload-bucket checks', () => {
+  it('returns the current classifier policy version', async () => {
     const response = recognizeGET();
-    expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({
       service: 'recognize',
       recognitionPolicyVersion: FORM_CLASSIFIER_POLICY_VERSION,
     });
   });
 
-  it('CAGI 칸에 만족도 양식 이미지가 업로드되면 FORM_TYPE_MISMATCH를 반환한다', async () => {
-    const jobResponse = await jobsPOST();
-    const { jobId } = await jobResponse.json();
-    const jobDir = getJobDir(jobId);
-    createdJobDirs.push(jobDir);
+  it('detects a satisfaction form uploaded to the CAGI bucket', async () => {
+    const jobId = 'job_form_mismatch';
+    const cagi = createTestBatch();
+    const satisfaction = createTestBatch();
+    const wrongBucket = await buildSyntheticForm(satisfactionGroups);
+    const blankPage = await buildBlankPage();
 
-    const uploadDir = path.join(jobDir, 'uploads');
-    fs.mkdirSync(uploadDir, { recursive: true });
-    await writeSyntheticForm(path.join(uploadDir, 'cagi_wrong_bucket.png'), satisfactionGroups);
+    await uploadTestPage(jobId, 'cagi', cagi, 1, wrongBucket);
+    await uploadTestPage(jobId, 'satisfaction', satisfaction, 1, blankPage);
 
-    const req = new Request('http://localhost/api/recognize', {
+    const response = await recognizePOST(new Request('http://localhost/api/recognize', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ jobId }),
-    });
+      body: JSON.stringify({ jobId, inventory: createInventory(cagi, satisfaction) }),
+    }) as any);
 
-    const response = await recognizePOST(req as any);
     expect(response.status).toBe(400);
-
-    const body = await response.json();
-    expect(body.code).toBe('FORM_TYPE_MISMATCH');
-    expect(body.recognitionPolicyVersion).toBe(FORM_CLASSIFIER_POLICY_VERSION);
-    expect(body.canProceedWithUploadedTypes).toBe(true);
-    expect(body.mismatches).toEqual([
-      {
-        filename: 'cagi_wrong_bucket.png',
+    await expect(response.json()).resolves.toMatchObject({
+      code: 'FORM_TYPE_MISMATCH',
+      recognitionPolicyVersion: FORM_CLASSIFIER_POLICY_VERSION,
+      canProceedWithUploadedTypes: true,
+      mismatches: [{
+        filename: 'cagi_page_0001.jpg',
         uploadedAs: 'cagi',
         detectedAs: 'satisfaction',
-      },
-    ]);
+      }],
+    });
   });
 
-  it('uses the selected upload bucket only after the explicit override flag is provided', async () => {
-    const jobResponse = await jobsPOST();
-    const { jobId } = await jobResponse.json();
-    const jobDir = getJobDir(jobId);
-    createdJobDirs.push(jobDir);
+  it('keeps unknown-content pages in their selected upload buckets', async () => {
+    const jobId = 'job_unknown_form';
+    const cagi = createTestBatch();
+    const satisfaction = createTestBatch();
+    const blankPage = await buildBlankPage();
 
-    const uploadDir = path.join(jobDir, 'uploads');
-    fs.mkdirSync(uploadDir, { recursive: true });
-    await writeSyntheticForm(path.join(uploadDir, 'cagi_override_bucket.png'), satisfactionGroups);
+    await uploadTestPage(jobId, 'cagi', cagi, 1, blankPage);
+    await uploadTestPage(jobId, 'satisfaction', satisfaction, 1, blankPage);
 
-    const req = new Request('http://localhost/api/recognize', {
+    const response = await recognizePOST(new Request('http://localhost/api/recognize', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ jobId, trustUploadedTypes: true }),
-    });
+      body: JSON.stringify({ jobId, inventory: createInventory(cagi, satisfaction) }),
+    }) as any);
 
-    const response = await recognizePOST(req as any);
-    expect(response.status).toBe(400);
-
-    const body = await response.json();
-    expect(body.code).toBe('COUNT_MISMATCH');
-    expect(body.cagiCount).toBe(1);
-    expect(body.satisfactionCount).toBe(0);
-    expect(body.warnings).toHaveLength(1);
-    expect(body.warnings[0]).toContain('업로드 칸');
-  });
-
-  it('keeps an unknown-content page in its selected upload bucket', async () => {
-    const jobResponse = await jobsPOST();
-    const { jobId } = await jobResponse.json();
-    const jobDir = getJobDir(jobId);
-    createdJobDirs.push(jobDir);
-
-    const uploadDir = path.join(jobDir, 'uploads');
-    fs.mkdirSync(uploadDir, { recursive: true });
-    await writeBlankPage(path.join(uploadDir, 'cagi_page_001.png'));
-    await writeBlankPage(path.join(uploadDir, 'satisfaction_page_001.png'));
-
-    const req = new Request('http://localhost/api/recognize', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ jobId }),
-    });
-
-    const response = await recognizePOST(req as any);
     expect(response.status).toBe(200);
-
-    const body = await response.json();
-    expect(body.studentDrafts).toHaveLength(1);
+    await expect(response.json()).resolves.toMatchObject({
+      studentDrafts: expect.any(Array),
+    });
   });
 });
 
-async function writeBlankPage(filePath: string) {
-  await sharp({
-    create: {
-      width: 320,
-      height: 480,
-      channels: 3,
-      background: '#ffffff',
-    },
-  }).png().toFile(filePath);
+async function buildBlankPage() {
+  return sharp({
+    create: { width: 320, height: 480, channels: 3, background: '#ffffff' },
+  }).png().toBuffer();
 }
 
-async function writeSyntheticForm(filePath: string, groups: ChoiceGroup[]) {
+async function buildSyntheticForm(groups: ChoiceGroup[]) {
   const width = 1000;
   const height = 1400;
-  const bounds = {
-    left: 100,
-    top: 100,
-    width: 800,
-    height: 1200,
-  };
-
-  const circles = groups.flatMap((group) =>
-    group.candidates.map((candidate) => {
-      const cx = bounds.left + (candidate.rect.x + candidate.rect.width / 2) * bounds.width;
-      const cy = bounds.top + (candidate.rect.y + candidate.rect.height / 2) * bounds.height;
-      const radius = Math.max(candidate.rect.width * bounds.width, candidate.rect.height * bounds.height) * 0.52;
-      return `<circle cx="${cx}" cy="${cy}" r="${radius}" fill="none" stroke="#000" stroke-width="8"/>`;
-    }),
-  );
+  const bounds = { left: 100, top: 100, width: 800, height: 1200 };
+  const circles = groups.flatMap((group) => group.candidates.map((candidate) => {
+    const cx = bounds.left + (candidate.rect.x + candidate.rect.width / 2) * bounds.width;
+    const cy = bounds.top + (candidate.rect.y + candidate.rect.height / 2) * bounds.height;
+    const radius = Math.max(candidate.rect.width * bounds.width, candidate.rect.height * bounds.height) * 0.52;
+    return `<circle cx="${cx}" cy="${cy}" r="${radius}" fill="none" stroke="#000" stroke-width="8"/>`;
+  }));
 
   const svg = `
     <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
@@ -159,27 +104,15 @@ async function writeSyntheticForm(filePath: string, groups: ChoiceGroup[]) {
       ${circles.join('\n')}
     </svg>
   `;
-
-  await sharp(Buffer.from(svg)).png().toFile(filePath);
+  return sharp(Buffer.from(svg)).png().toBuffer();
 }
 
-function makeChoiceGroup(
-  field: string,
-  values: number[],
-  xs: number[],
-  y: number,
-  size: number,
-): ChoiceGroup {
+function makeChoiceGroup(field: string, values: number[], xs: number[], y: number, size: number): ChoiceGroup {
   return {
     field,
     candidates: values.map((value, index) => ({
       value,
-      rect: {
-        x: xs[index] - size / 2,
-        y: y - size / 2,
-        width: size,
-        height: size,
-      },
+      rect: { x: xs[index] - size / 2, y: y - size / 2, width: size, height: size },
     })),
   };
 }

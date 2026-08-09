@@ -19,6 +19,7 @@
 | 13 | 보정본이 양식 판정을 오염시켜 `FORM_TYPE_MISMATCH` 발생 | 4차 수정 완료, 최신 배포 검증 필요 | [MOBILE_PHOTO_MISCLASSIFICATION_FIX](../Task/MOBILE_PHOTO_MISCLASSIFICATION_FIX.md), [FORM_TYPE_MISMATCH_DESKEW_FIX](../Task/FORM_TYPE_MISMATCH_DESKEW_FIX.md) |
 | 14 | JBIG2 스캔 PDF가 빈 캔버스로 변환되어 검수 원본과 ROI가 모두 비어 보임 | 수정 완료, 실제 19페이지 PDF 재검증 필요 | [PDF_JBIG2_WASM_RENDER_GUARD](../Task/PDF_JBIG2_WASM_RENDER_GUARD.md) |
 | 15 | 내용 분류가 `unknown`인 스캔 페이지를 목록에서 제외해 잘못된 장수 불일치 발생 | 수정 완료, 실제 19페이지 PDF 재검증 필요 | [PDF_BATCH_UNKNOWN_FORM_FALLBACK](../Task/PDF_BATCH_UNKNOWN_FORM_FALLBACK.md) |
+| 16 | Vercel 인스턴스별 임시 디스크에 업로드를 보관해 실제 19페이지 PDF가 18/19로 집계됨 | 원인 확정, 영속 저장소 전환 필요 | [STATELESS_ARCHITECTURE_MIGRATION](../Task/STATELESS_ARCHITECTURE_MIGRATION.md) |
 
 ---
 
@@ -41,6 +42,16 @@
 **원인**: 내용 분류 결과가 `unknown`인 파일을 선택한 업로드 칸과 관계없이 어느 묶음에도 넣지 않아, 유효한 페이지 한 장이 조용히 제외됨.
 **대응**: `unknown`은 불일치가 아닌 불확실로 취급하고 `cagi_`/`satisfaction_` 업로드 접두사를 우선 사용함. 신뢰도 있는 상반된 분류는 기존처럼 명시적 확인을 요구함.
 **상태**: 제공된 두 19페이지 PDF를 로컬에서 모두 렌더링하고 19쌍 인식까지 확인함. 배포 환경 재검증 필요.
+
+## 16. Vercel 임시 디스크로 인한 잘못된 장수 불일치 재발
+
+**재현**: 운영 배포본 `v2026-08-06.1`에서 두 19페이지 스캐너 PDF를 업로드한 뒤 CAGI 18장·만족도 19장 `COUNT_MISMATCH`가 반환됨.
+
+**원인**: 페이지별 `/api/upload`와 이후 `/api/recognize`가 Vercel 서버리스 함수의 `os.tmpdir()`를 공유 저장소처럼 사용함. 요청이 다른 인스턴스로 분산되면 일부 페이지가 인식 요청에서 보이지 않는다. 현재 파일명 폴백 때문에 `unknown` 분류가 페이지를 제외하는 경로는 이번 원인이 아니다.
+
+**대응 방향**: 파일과 페이지 순번을 외부 영속 저장소의 작업 인벤토리에 기록하고, 인식 API는 그 인벤토리만 사용하도록 전환한다. 외부 저장소 전환 전에는 현재 함수에서 보이는 파일 수만으로 사용자에게 사진 누락을 안내하지 않는다.
+
+**상태**: 코드 미착수. 영속 저장소 구성 또는 동일 요청 내 페이지쌍 인식 설계 결정이 필요.
 
 ## 2. Vercel 인스턴스 간 `/tmp` 미공유로 저장/다운로드/이미지 미리보기 404
 
