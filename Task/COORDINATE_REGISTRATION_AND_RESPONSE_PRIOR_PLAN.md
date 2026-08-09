@@ -248,3 +248,46 @@ CAGI 8~9번은 1~7번과 선택지 문구 및 표 헤더가 다르므로, 하나
 - `npm run build`: Next.js 프로덕션 컴파일, 타입 검사, 정적 페이지 생성 통과.
 - 통합 테스트 중 같은 밀리초에 생성된 작업 세션의 폴더가 충돌할 수 있던 문제를 확인했다. 새 작업 ID는 `시간값 + UUID` 형식으로 생성하고, 기존 시간값만 가진 세션 ID도 계속 열 수 있도록 호환성을 유지했다.
 - OCR 엔진이 출력하는 낮은 DPI 경고는 테스트 이미지 메타데이터의 보정 경고이며, 이번 표 셀 등록 및 응답값 판정 결과와는 별개다.
+
+## 10. 2026-08-06 실배포 재현: §9.4의 "로컬 샘플 검증" 결과가 실사용 데이터에서 재현되지 않음
+
+### 10.1 관찰 (실제 배포본, 19쌍 일괄 스캔 PDF)
+
+사용자가 `kpga-sacnner.vercel.app`(커밋 `e27138c` 반영 이후)에 실제 19페이지 CAGI PDF + 19페이지 만족도 PDF를 업로드해 검수 화면 스크린샷을 제공했다. 1/19번째 학생 기준:
+
+- CAGI 01~09 전부 "낮음" 또는 "확인" 배지. 후보 점수가 0/29%, 2/12%, 1/9%처럼 근소한 차이로 흩어져 있다(§3.1이 "false positive"의 근거로 삼았던 패턴과 동일).
+- crop 이미지 다수가 **두 개 이상의 인접 행 내용이 함께 보이는 넓은 가로 스트립**이다(예: CAGI 01~09 각 카드의 crop에 원문자 두 줄이 겹쳐 보임, 만족도 문항2 crop에 "아니오/예" 헤더와 체크 표시가 함께 보임).
+- 학교유형/학년 crop은 여전히 인접 행·안내문이 섞인 넓은 블록을 보여준다(§2.2에서 지적된 것과 같은 증상).
+- 연령대는 crop에 손글씨 "14"가 선명하게 보이지만 입력값은 비어 있다(§2.2, §9.1에서 이미 "미구현"으로 확인된 내용과 일치 — 새 증상 아님).
+
+**이것은 §9.4("CAGI 7번과 9번, 만족도 7번과 8번의 검수 crop이... 해당 응답 행을 가리키는 것을 확인했다")가 주장한 로컬 검증 결과와 배치된다.** 로컬 샘플(정확한 출처 불명, 이 문서에 파일로 남아있지 않음)에서는 격자 검출이 성공했지만, 실제 사용자의 일괄 스캔 PDF에서는 (a) 격자 검출 자체가 실패해 구식 정적 템플릿 crop으로 조용히 폴백했거나, (b) 격자 검출이 "성공"으로 판정됐지만 잘못된 행/열에 매칭됐을 가능성이 있다. **현재 코드에는 이 둘을 구분할 방법이 전혀 없다** — `detectCheckmarks.ts`가 `recognitionCropRects[field]`를 격자 검출 성공 시(`if (gridCells)`)에만 채우고, 실패 시엔 `fieldCrop.ts`의 `findCropRect()`(순수 정규화 템플릿 좌표, 이번 세션 최초 원인 진단 대상이었던 바로 그 좌표계)로 조용히 넘어가는데, 이 전환이 검수 화면 어디에도 표시되지 않는다.
+
+### 10.2 코드 추적으로 확인한 사실
+
+- `src/lib/recognition/detectCheckmarks.ts`: CAGI/만족도 각 그룹마다 `cagiGridOverrides[group.field]`(격자 검출)가 있으면 그 결과로, 없으면 `cagiRowOverrides[group.field]`(OCR/픽셀 행 검출)로, 그것도 없으면 `analyzeChoiceGroup` 내부에서 정규화 템플릿 좌표로 폴백한다. `recognitionCropRects`(검수 화면 crop의 근거)는 **격자 검출 성공 시에만** 채워진다.
+- `src/lib/recognition/fieldCrop.ts`의 `generateFieldCropBuffer`는 `pixelRect`(= `recognitionCropRects[field]`)가 없으면 `findCropRect(field)`로 폴백해 **원래 문제였던 정규화 템플릿 좌표**로 crop을 만든다.
+- `src/components/RecognitionReview.tsx`의 `renderFieldCropPreview`는 기본적으로 **디버그 오버레이(빨간 ROI 박스 + 라벨)가 없는** `cropDataUrls` crop만 인라인으로 보여주고, 오버레이가 있는 버전은 별도 "ROI 확인" 링크를 새 탭으로 열어야만 볼 수 있다.
+- 결론: 지금 화면에서는 **crop이 격자 검출로 나온 것인지, 행 검출로 나온 것인지, 정규화 템플릿 폴백인지 사용자가 구분할 방법이 없고**, 어느 소스든 빨간 박스 없이 잘려서 보이므로 "이 crop 경계가 실제로 어디를 겨냥했는지"조차 클릭 한 번 더 하지 않으면 확인할 수 없다. 이게 사용자가 지적한 "잘린 부분이 맞는 부분을 제대로 인식하고 있는지 파악할 수 있게" 요구사항의 정확한 원인이다.
+
+### 10.3 작업지시서 (Codex에 위임)
+
+**중요한 범위 결정**: 이번 라운드는 격자/행 검출의 임계값을 또 조정하지 **않는다**. §3.1~§9까지 이미 여러 차례 "로컬/합성 샘플에서 확인됨 → 실사용 데이터에서 재현 안 됨"이 반복됐다(이번 §10이 그 최신 사례). 근거 없이 파라미터를 또 건드리면 같은 패턴이 반복될 뿐이다. 대신 **다음 재테스트에서 실제로 무슨 일이 일어나는지 사용자가 직접 확인할 수 있는 진단 정보를 추가**하는 것을 이번 라운드의 유일한 목표로 한다.
+
+1. **각 필드에 crop 출처(provenance)를 명시적으로 기록한다.**
+   - `src/lib/recognition/detectCheckmarks.ts`에서 `recognitionCropRects`를 채울 때, 각 필드가 격자 검출(`'grid'`)·행 검출(`'row'`)·정규화 템플릿 폴백(`'fixed'`) 중 무엇으로 결정됐는지 함께 기록한다. 예: `RecognitionDraft`에 `recognitionCropSource?: Record<string, 'grid' | 'row' | 'fixed'>` 필드를 추가하고, CAGI/만족도 각 그룹 처리 루프에서 `gridCells`가 있으면 `'grid'`, 없고 `cagiRowOverrides[group.field]`(또는 만족도 쪽)가 있으면 `'row'`, 둘 다 없으면 `'fixed'`로 기록한다.
+   - `analyzeChoiceGroup`이 실제로 어떤 좌표를 썼는지(row override 사용 여부)는 이미 `markDensity.ts` 호출부에서 알 수 있는 정보이므로, 그 판단을 다시 계산하지 말고 호출 시점의 인자로부터 그대로 도출할 것 — 별도의 재계산/재검출 로직을 새로 만들지 않는다(안전 원칙: 새 코드가 새로운 검출 시도를 하지 않고 기존 판단 결과를 기록만 하도록 최소화).
+
+2. **`recognitionCropSource`를 검수 화면 응답에 실어 보낸다.**
+   - `src/lib/recognition/buildSourcePreview.ts`와 `src/app/api/recognize/route.ts`가 `recognitionCropSource`를 `draft.source`(또는 draft 최상위)에 포함해 프론트엔드까지 전달하도록 배선한다.
+
+3. **검수 화면에서 크롭 출처와 ROI 경계를 클릭 없이 바로 보여준다.**
+   - `src/components/RecognitionReview.tsx`의 `renderFieldCropPreview`가 기본으로 보여주는 이미지를 **디버그 오버레이가 있는 버전**(`cropDebugDataUrls`, 빨간 ROI 박스 + 중심선 포함)으로 바꾼다. "ROI 확인" 링크는 그대로 두되(새 탭에서 원본 배율로 크게 보는 용도로는 여전히 유용하다), 카드 자체에 이미 경계가 보이게 한다.
+   - 각 crop 카드에 `recognitionCropSource[field]` 값을 작은 배지로 표시한다(예: "격자 검출" / "행 검출" / "고정 좌표"). 색상은 기존 confidence 배지와 겹치지 않게 회색 계열로 충분하다.
+   - 이 변경은 표시 방식만 바꾸는 것이므로 인식 로직·자동 확정 안전장치(§4, §9.2)는 전혀 건드리지 않는다.
+
+4. **PDF 배치 스캔 페이지의 해상도/DPI가 격자 검출 허용오차 상수와 실제로 맞는지 점검한다.**
+   - §9.6이 "낮은 DPI 경고는... 별개"라고 결론지었지만, 이번 §10.1 재현은 정확히 PDF 일괄 스캔 입력에서 나왔다. `tableGridDetection.ts`의 `xTolerance`/`yTolerance`(각각 `baseWidth * 0.035`, `baseHeight * 0.03`)와 `detectHorizontalLines`/`detectVerticalLines`의 `darkThreshold`/`minDarkRatio` 상수가, 로컬 테스트 픽스처(주로 어떤 해상도로 만들어졌는지)와 실제 PDF 렌더링 해상도(현재 PDF→이미지 변환 스케일/DPI 설정) 사이에 크게 다른 픽셀 스케일을 가정하고 있지 않은지 코드 읽기로 확인하고, 있다면 그 사실만 보고한다(파라미터를 바로 고치지 말고, 무엇이 왜 다른지 §10에 추가로 기록할 것 — 위 "중요한 범위 결정" 원칙 참고).
+
+5. **테스트**: 기존 전체 테스트(회귀 없이 통과)에 더해, `recognitionCropSource`가 grid/row/fixed 각 케이스에서 올바르게 기록되는지 확인하는 단위 테스트를 `tests/table-grid-detection.test.ts` 또는 `tests/recognition-mark-density.test.ts`에 추가한다. `npm test`, `npm run build` 결과를 보고할 것.
+
+이 작업이 끝나면, 사용자가 같은 19쌍 PDF로 다시 검수 화면을 열었을 때 각 필드 crop에 빨간 ROI 박스와 "격자/행/고정" 배지가 바로 보여야 한다. **다음 단계(임계값 조정 여부 포함)는 이 배지가 실제로 무엇을 보여주는지 확인한 뒤에 결정한다.**
