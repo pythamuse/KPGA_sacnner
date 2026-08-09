@@ -101,7 +101,10 @@ function BrandHeader() {
           <div className="brand-subtitle">Korea Problem Gambling Agency</div>
         </div>
       </div>
-      {/* QA marker: remove this HTML block after final acceptance. */}
+      {/* QA marker: remove this HTML block after final acceptance.
+          MUST bump on every deploy (README.md "작업 프로세스" 참고): format is
+          v{배포일 YYYY-MM-DD}.{그날 몇 번째 배포인지, 1부터}. 날짜가 바뀌면 순번은 1로
+          리셋. 코드만 바뀌고 이 줄이 그대로면 배포 자체를 빠뜨린 것으로 간주한다. */}
       <span
         aria-label="테스트 버전"
         style={{
@@ -112,7 +115,7 @@ function BrandHeader() {
           whiteSpace: 'nowrap',
         }}
       >
-        테스트 버전 v2026-08-06.2
+        테스트 버전 v2026-08-10.1
       </span>
     </div>
   );
