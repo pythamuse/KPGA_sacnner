@@ -19,6 +19,8 @@ export async function buildSourcePreview(
   fieldCropOverrides: Record<string, PixelRect> = {},
   recognitionCropSource: Record<string, RecognitionCropSource> = {},
   recognitionCropDiagnostic: Record<string, string> = {},
+  candidateCellRects: Record<string, PixelRect[]> = {},
+  rejectedCandidateCellRects: Record<string, PixelRect[]> = {},
 ): Promise<SourcePreviewAssets> {
   const [cagiImageDataUrl, satisfactionImageDataUrl, cagiCrops, satisfactionCrops] = await Promise.all([
     buildImageThumbnailDataUrl(cagiPath),
@@ -26,8 +28,15 @@ export async function buildSourcePreview(
     buildFieldCropDataUrls(cagiPath, [
       ...cagiTemplate.choiceGroups.map((group) => group.field),
       ...(cagiTemplate.fieldRegions || []).map((region) => region.field),
-    ], fieldCropOverrides),
-    buildFieldCropDataUrls(satisfactionPath, satisfactionTemplate.choiceGroups.map((group) => group.field), fieldCropOverrides),
+    ], fieldCropOverrides, candidateCellRects, recognitionCropSource, rejectedCandidateCellRects),
+    buildFieldCropDataUrls(
+      satisfactionPath,
+      satisfactionTemplate.choiceGroups.map((group) => group.field),
+      fieldCropOverrides,
+      candidateCellRects,
+      recognitionCropSource,
+      rejectedCandidateCellRects,
+    ),
   ]);
 
   return {
@@ -61,12 +70,31 @@ async function buildFieldCropDataUrls(
   imagePath: string,
   fields: string[],
   fieldCropOverrides: Record<string, PixelRect>,
+  candidateCellRects: Record<string, PixelRect[]>,
+  recognitionCropSource: Record<string, RecognitionCropSource>,
+  rejectedCandidateCellRects: Record<string, PixelRect[]>,
 ): Promise<Pick<SourcePreviewAssets, 'cropDataUrls' | 'cropDebugDataUrls'>> {
   const entries = await Promise.all(
     fields.map(async (field) => {
       const [cropBuffer, debugCropBuffer] = await Promise.all([
-        generateFieldCropBuffer(imagePath, field, false, fieldCropOverrides[field]),
-        generateFieldCropBuffer(imagePath, field, true, fieldCropOverrides[field]),
+        generateFieldCropBuffer(
+          imagePath,
+          field,
+          false,
+          fieldCropOverrides[field],
+          candidateCellRects[field],
+          recognitionCropSource[field],
+          rejectedCandidateCellRects[field],
+        ),
+        generateFieldCropBuffer(
+          imagePath,
+          field,
+          true,
+          fieldCropOverrides[field],
+          candidateCellRects[field],
+          recognitionCropSource[field],
+          rejectedCandidateCellRects[field],
+        ),
       ]);
 
       return {

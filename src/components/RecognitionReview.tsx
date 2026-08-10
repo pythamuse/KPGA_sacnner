@@ -27,8 +27,10 @@ const confidenceRank = {
 };
 
 const cropSourceLabel = {
-  grid: '격자 검출',
+  grid: '격자 검증 완료',
+  'grid-candidate': '격자 후보',
   row: '행 검출',
+  'row-fallback': '격자 후보 -> 행 폴백',
   fixed: '위치 특정 실패 (구역 전체 표시)',
 };
 
@@ -195,12 +197,18 @@ export default function RecognitionReview({
   const renderCropSourceBadge = (key: string) => {
     const source = draft.source?.recognitionCropSource?.[key];
     if (!source) return null;
-    const diagnostic = source === 'fixed'
-      ? draft.source?.recognitionCropDiagnostic?.[key]
-      : undefined;
+    const diagnostic = draft.source?.recognitionCropDiagnostic?.[key];
+    const registration = draft.source?.recognitionRegistration?.[key];
+    const registrationLabel = registration?.status === 'verified'
+      ? '좌표 검증'
+      : registration?.status === 'candidate'
+        ? '좌표 후보'
+        : registration?.status === 'failed'
+          ? '좌표 실패'
+          : undefined;
 
     return (
-      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+      <span style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 6, minWidth: 0 }}>
         <span
           style={{
             display: 'inline-flex',
@@ -218,8 +226,28 @@ export default function RecognitionReview({
         >
           {cropSourceLabel[source]}
         </span>
+        {registrationLabel && (
+          <span
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              minHeight: 22,
+              padding: '2px 7px',
+              borderRadius: 999,
+              border: registration?.status === 'verified' ? '1px solid #9fdfc5' : '1px solid #f3c38f',
+              color: registration?.status === 'verified' ? '#177245' : '#9a5a11',
+              background: registration?.status === 'verified' ? '#eefaf3' : '#fff8e7',
+              fontSize: 11,
+              fontWeight: 800,
+              whiteSpace: 'nowrap',
+            }}
+            title={registration?.tableId}
+          >
+            {registrationLabel}
+          </span>
+        )}
         {diagnostic && (
-          <span style={{ color: '#6b7280', fontSize: 11, fontWeight: 600 }}>
+          <span style={{ color: '#6b7280', fontSize: 11, fontWeight: 600, lineHeight: 1.35, overflowWrap: 'anywhere' }}>
             {diagnostic}
           </span>
         )}
@@ -398,6 +426,86 @@ export default function RecognitionReview({
     return key;
   };
 
+  const formatPercent = (value?: number) => value === undefined
+    ? '-'
+    : `${value >= 0 ? '+' : ''}${Math.round(value * 100)}%`;
+
+  const renderCoordinateDiagnostics = () => {
+    const registrations = draft.source?.recognitionRegistration;
+    if (!registrations || Object.keys(registrations).length === 0) return null;
+
+    const entries = reviewKeys
+      .filter((key) => registrations[key] || draft.source?.recognitionCropSource?.[key])
+      .map((key) => ({
+        key,
+        registration: registrations[key],
+        source: draft.source?.recognitionCropSource?.[key],
+        diagnostic: draft.source?.recognitionCropDiagnostic?.[key],
+      }));
+
+    if (entries.length === 0) return null;
+
+    return (
+      <details
+        style={{
+          border: '1px solid var(--border-medium)',
+          borderRadius: 8,
+          background: 'var(--surface-muted)',
+          padding: '10px 12px',
+        }}
+      >
+        <summary style={{ cursor: 'pointer', fontWeight: 800, fontSize: 14 }}>
+          좌표 진단 데이터 ({entries.length}개 항목)
+        </summary>
+        <div style={{ display: 'grid', gap: 8, marginTop: 12 }}>
+          {entries.map(({ key, registration, source, diagnostic }) => {
+            const horizontal = registration?.horizontalLines;
+            const vertical = registration?.verticalLines;
+            const gap = registration?.gapDeviation;
+            const residual = registration?.residualRatio;
+            const offset = registration?.candidateCenterOffset;
+            const spread = registration?.candidateCenterSpread;
+
+            return (
+              <div
+                key={key}
+                style={{
+                  border: '1px solid var(--border-subtle)',
+                  borderRadius: 6,
+                  padding: 9,
+                  background: '#ffffff',
+                  fontSize: 12,
+                  lineHeight: 1.5,
+                  overflowWrap: 'anywhere',
+                }}
+              >
+                <strong>{fieldLabel(key)}</strong>
+                <span style={{ color: 'var(--text-muted)' }}>
+                  {' '}| {source ? cropSourceLabel[source] : '좌표 정보 없음'}
+                  {registration ? ` | ${registration.tableId} / ${registration.status}` : ''}
+                </span>
+                {horizontal && vertical && (
+                  <div>
+                    감지선: 가로 {horizontal.found}/{horizontal.expected}, 세로 {vertical.found}/{vertical.expected}
+                  </div>
+                )}
+                {(gap || residual || offset || spread) && (
+                  <div>
+                    간격: Y {formatPercent(gap?.rows)}, X {formatPercent(gap?.columns)}
+                    {' | '}잔차: Y {formatPercent(residual?.rows)}, X {formatPercent(residual?.columns)}
+                    {' | '}중심 오프셋: X {formatPercent(offset?.x)}, Y {formatPercent(offset?.y)}
+                    {' | '}흩어짐: X {formatPercent(spread?.x)}, Y {formatPercent(spread?.y)}
+                  </div>
+                )}
+                {diagnostic && <div style={{ color: 'var(--text-muted)' }}>{diagnostic}</div>}
+              </div>
+            );
+          })}
+        </div>
+      </details>
+    );
+  };
+
   const saveErrorMessages = saveErrors.filter((error) => !error.field);
 
   const fieldShell = (label: string, badgeKey: string, control: React.ReactNode) => (
@@ -444,6 +552,8 @@ export default function RecognitionReview({
           <span>{warning}</span>
         </div>
       ))}
+
+      {renderCoordinateDiagnostics()}
 
       {renderSourcePreview()}
 

@@ -9,15 +9,53 @@ export interface VerticalLine {
 export type FieldCellOverrides = Record<string, PixelRect[]>;
 
 interface TableGridSpec {
+  id: string;
   groups: ChoiceGroup[];
 }
 
-const GRID_TEMPLATE_TOLERANCE_RATIO = 0.18;
+// A scan can preserve the form's row/column pattern while its outer paper
+// bounds are translated or slightly skewed. Keep the search broad enough to
+// collect that evidence; registration quality below decides whether it is safe
+// to use for automatic scoring.
+const GRID_TEMPLATE_TOLERANCE_RATIO = 0.35;
+const GRID_MAX_GAP_DEVIATION = 0.08;
+const GRID_MAX_LINE_RESIDUAL_RATIO = 0.06;
+const GRID_MAX_CROSS_TABLE_OFFSET_DELTA = 0.035;
+const GRID_MAX_CANDIDATE_CENTER_DEVIATION = 0.025;
+const GRID_MAX_UNIFORM_CANDIDATE_OFFSET_X = 0.08;
+const GRID_MAX_UNIFORM_CANDIDATE_OFFSET_Y = 0.02;
+const GRID_MAX_CANDIDATE_CENTER_SPREAD = 0.012;
+const GRID_MAX_INTRA_TABLE_OFFSET_DELTA = 0.02;
+
+export type RegistrationStatus = 'verified' | 'candidate' | 'failed';
+export type RegistrationSource = 'grid' | 'row' | 'fixed';
+
+/**
+ * A grid may be detectable without being the intended response table. Keep the
+ * evidence that made that distinction so the review screen can explain why a
+ * crop was used only as a candidate.
+ */
+export interface FieldRegistration {
+  tableId: string;
+  source: RegistrationSource;
+  status: RegistrationStatus;
+  horizontalLines?: { found: number; expected: number };
+  verticalLines?: { found: number; expected: number };
+  gapDeviation?: { rows: number; columns: number };
+  residualRatio?: { rows: number; columns: number };
+  offsetRatio?: { x: number; y: number };
+  scale?: { x: number; y: number };
+  candidateCenterDeviation?: { x: number; y: number };
+  candidateCenterOffset?: { x: number; y: number };
+  candidateCenterSpread?: { x: number; y: number };
+  qualityScore?: number;
+  diagnostic?: string;
+}
 
 export interface GridDetectionResult {
   overrides: FieldCellOverrides;
   fieldRects: Record<string, PixelRect>;
-  registeredFields: Set<string>;
+  registrations: Record<string, FieldRegistration>;
   diagnostics?: Record<string, string>;
 }
 
@@ -70,8 +108,8 @@ export function buildCagiGridDetection(image: ImageAnalysisData): GridDetectionR
       'cagi.q01', 'cagi.q02', 'cagi.q03', 'cagi.q04', 'cagi.q05', 'cagi.q06', 'cagi.q07',
   ]);
   const result = mergeGridDetection(image, [
-    { groups: primaryGroups },
-    { groups: getGroups(cagiTemplate.choiceGroups, ['cagi.q08', 'cagi.q09']) },
+    { id: 'cagi.primary', groups: primaryGroups },
+    { id: 'cagi.late', groups: getGroups(cagiTemplate.choiceGroups, ['cagi.q08', 'cagi.q09']) },
   ]);
 
   const basicGroups = getGroups(cagiTemplate.choiceGroups, [
@@ -79,7 +117,16 @@ export function buildCagiGridDetection(image: ImageAnalysisData): GridDetectionR
   ]);
   const basicRowDetection = buildCagiBasicRowDetection(image);
   const basicOverrides = buildBasicRowCellOverrides(image, basicGroups, basicRowDetection);
+  const basicRegistrations = buildBasicRowRegistrations(basicGroups, basicOverrides, basicRowDetection);
   const ageRegion = cagiTemplate.fieldRegions?.find((region) => region.field === 'basic.age');
+  const ageRegistration = ageRegion ? {
+    [ageRegion.field]: {
+      tableId: 'cagi.basic.age',
+      source: 'fixed' as const,
+      status: 'candidate' as const,
+      diagnostic: 'OCR region uses the measured template anchor; confirm the age value before saving.',
+    },
+  } : {};
 
   return {
     overrides: { ...result.overrides, ...basicOverrides },
@@ -88,9 +135,18 @@ export function buildCagiGridDetection(image: ImageAnalysisData): GridDetectionR
       ...mapGroupsToUnionRects(image, basicGroups),
       ...(ageRegion ? { [ageRegion.field]: toPixelRect(ageRegion.rect, getBounds(image)) } : {}),
     },
-    registeredFields: result.registeredFields,
-    ...((result.diagnostics || basicRowDetection.diagnostics) ? {
-      diagnostics: { ...result.diagnostics, ...basicRowDetection.diagnostics },
+    registrations: { ...result.registrations, ...basicRegistrations, ...ageRegistration },
+    ...((result.diagnostics || basicRowDetection.diagnostics || Object.keys(basicRegistrations).length > 0) ? {
+      diagnostics: {
+        ...result.diagnostics,
+        ...basicRowDetection.diagnostics,
+        ...Object.fromEntries(Object.entries(basicRegistrations)
+          .filter(([, registration]) => registration.diagnostic)
+          .map(([field, registration]) => [field, registration.diagnostic!])),
+        ...Object.fromEntries(Object.entries(ageRegistration)
+          .filter(([, registration]) => registration.diagnostic)
+          .map(([field, registration]) => [field, registration.diagnostic!])),
+      },
     } : {}),
   };
 }
@@ -126,6 +182,25 @@ function buildBasicRowCellOverrides(
       return [];
     }
     return [[group.field, cells]] as Array<[string, PixelRect[]]>;
+  }));
+}
+
+function buildBasicRowRegistrations(
+  groups: ChoiceGroup[],
+  overrides: FieldCellOverrides,
+  rowDetection: RowDetectionResult,
+): Record<string, FieldRegistration> {
+  return Object.fromEntries(groups.map((group) => {
+    const hasCandidateCells = Boolean(overrides[group.field]);
+    const rowDiagnostic = rowDetection.diagnostics?.[group.field];
+    return [group.field, {
+      tableId: 'cagi.basic',
+      source: hasCandidateCells ? 'row' : 'fixed',
+      status: hasCandidateCells ? 'candidate' : 'failed',
+      diagnostic: hasCandidateCells
+        ? 'Row candidate found, but column geometry is not independently verified. Manual confirmation is required.'
+        : rowDiagnostic || 'Response row could not be verified.',
+    } satisfies FieldRegistration];
   }));
 }
 
@@ -181,36 +256,39 @@ export function buildSatisfactionGridDetection(image: ImageAnalysisData): GridDe
       'satisfaction.q07', 'satisfaction.q08', 'satisfaction.q09', 'satisfaction.q10',
   ]);
   const result = mergeGridDetection(image, [
-    { groups: q01Groups },
-    { groups: binaryGroups },
-    { groups: scaleGroups },
+    { id: 'satisfaction.frequency', groups: q01Groups },
+    { id: 'satisfaction.binary', groups: binaryGroups },
+    { id: 'satisfaction.scale', groups: scaleGroups },
   ]);
 
   return {
     overrides: result.overrides,
     fieldRects: result.fieldRects,
-    registeredFields: result.registeredFields,
+    registrations: result.registrations,
     ...(result.diagnostics ? { diagnostics: result.diagnostics } : {}),
   };
 }
 
 function mergeGridDetection(image: ImageAnalysisData, specs: TableGridSpec[]): GridDetectionResult {
-  return specs.reduce<GridDetectionResult>((result, spec) => {
+  const merged = specs.reduce<GridDetectionResult>((result, spec) => {
     const exact = buildGridOverrides(image, spec);
     const diagnostics = { ...result.diagnostics, ...exact.diagnostics };
 
     return {
       overrides: { ...result.overrides, ...exact.overrides },
       fieldRects: { ...result.fieldRects, ...exact.fieldRects },
-      registeredFields: result.registeredFields,
+      registrations: { ...result.registrations, ...exact.registrations },
       ...(Object.keys(diagnostics).length > 0 ? { diagnostics } : {}),
     };
-  }, { overrides: {}, fieldRects: {}, registeredFields: new Set() });
+  }, { overrides: {}, fieldRects: {}, registrations: {} });
+
+  return applyCrossTableRegistrationCheck(merged);
 }
 
 interface GridSpecDetectionResult {
   overrides: FieldCellOverrides;
   fieldRects: Record<string, PixelRect>;
+  registrations: Record<string, FieldRegistration>;
   diagnostics?: Record<string, string>;
 }
 
@@ -218,7 +296,7 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
   const { groups } = spec;
   const firstGroup = groups[0];
   if (!firstGroup || groups.some((group) => group.candidates.length !== firstGroup.candidates.length)) {
-    return { overrides: {}, fieldRects: {} };
+    return { overrides: {}, fieldRects: {}, registrations: {} };
   }
 
   const bounds = getBounds(image);
@@ -241,7 +319,6 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
   // that are intentionally taller than their neighbours.
   const xTolerance = Math.max(12, Math.round(baseWidth * 0.06));
   const yTolerance = Math.max(12, Math.round(baseHeight * 0.05));
-
   const verticalLines = detectVerticalLines(
     image,
     expectedY[0] - yTolerance,
@@ -272,6 +349,13 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
     return {
       overrides: {},
       fieldRects: fallbackFieldRects,
+      registrations: registrationsForGroups(groups, spec.id, {
+        source: 'fixed',
+        status: 'failed',
+        horizontalLines: { found: horizontalLines.length, expected: expectedY.length },
+        verticalLines: { found: verticalLines.length, expected: expectedX.length },
+        diagnostic: lineFailure,
+      }),
       diagnostics: diagnosticsForGroups(groups, lineFailure),
     };
   }
@@ -280,12 +364,20 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
   const rowGapDeviation = getTemplateGapDeviation(matchedRows || horizontalLines, expectedY);
   const columnGapDeviation = getTemplateGapDeviation(matchedColumns || verticalLines, expectedX);
   if (!matchedRows || !matchedColumns) {
+    const diagnostic = formatGapMismatchDiagnostic(rowGapDeviation, columnGapDeviation);
     return {
       overrides: {},
       fieldRects: fallbackFieldRects,
+      registrations: registrationsForGroups(groups, spec.id, {
+        source: 'fixed',
+        status: 'failed',
+        horizontalLines: { found: horizontalLines.length, expected: expectedY.length },
+        verticalLines: { found: verticalLines.length, expected: expectedX.length },
+        diagnostic,
+      }),
       diagnostics: diagnosticsForGroups(
         groups,
-        formatGapMismatchDiagnostic(rowGapDeviation, columnGapDeviation),
+        diagnostic,
       ),
     };
   }
@@ -304,17 +396,33 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
     ));
 
     if (candidates.some((rect) => rect.right - rect.left < 4 || rect.bottom - rect.top < 4)) {
+      const diagnostic = 'grid: invalid_cell_size';
       return {
         overrides: {},
         fieldRects: fallbackFieldRects,
+        registrations: registrationsForGroups(groups, spec.id, {
+          source: 'fixed',
+          status: 'failed',
+          horizontalLines: { found: horizontalLines.length, expected: expectedY.length },
+          verticalLines: { found: verticalLines.length, expected: expectedX.length },
+          diagnostic,
+        }),
         diagnostics: diagnosticsForGroups(groups, '격자: gap_mismatch (감지선 사이의 셀 크기 부족)'),
       };
     }
 
     if (findDuplicateCandidateRectPair(candidates)) {
+      const diagnostic = 'grid: duplicate_candidate_rects';
       return {
         overrides: {},
         fieldRects: fallbackFieldRects,
+        registrations: registrationsForGroups(groups, spec.id, {
+          source: 'fixed',
+          status: 'failed',
+          horizontalLines: { found: horizontalLines.length, expected: expectedY.length },
+          verticalLines: { found: verticalLines.length, expected: expectedX.length },
+          diagnostic,
+        }),
         diagnostics: diagnosticsForGroups(groups, 'grid: duplicate_candidate_rects'),
       };
     }
@@ -322,7 +430,333 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
     overrides[group.field] = candidates;
   }
 
-  return { overrides, fieldRects: fallbackFieldRects };
+  const quality = calculateGridQuality(
+    matchedRows,
+    expectedY,
+    matchedColumns,
+    expectedX,
+    baseHeight,
+    baseWidth,
+  );
+  const registrations: Record<string, FieldRegistration> = Object.fromEntries(groups.map((group) => {
+    const candidateCenter = getCandidateCenterQuality(group, overrides[group.field], bounds);
+    const status: RegistrationStatus = isVerifiedGridQuality(quality, candidateCenter) ? 'verified' : 'candidate';
+    const diagnostic = status === 'candidate'
+      ? formatGridQualityDiagnostic(quality, candidateCenter)
+      : undefined;
+    return [group.field, {
+      tableId: spec.id,
+      source: 'grid',
+      status,
+      horizontalLines: { found: horizontalLines.length, expected: expectedY.length },
+      verticalLines: { found: verticalLines.length, expected: expectedX.length },
+      gapDeviation: { rows: quality.rowGapDeviation, columns: quality.columnGapDeviation },
+      residualRatio: { rows: quality.rowResidualRatio, columns: quality.columnResidualRatio },
+      offsetRatio: { x: quality.columnOffsetRatio, y: quality.rowOffsetRatio },
+      scale: { x: quality.columnScale, y: quality.rowScale },
+      candidateCenterDeviation: { x: candidateCenter.maxX, y: candidateCenter.maxY },
+      candidateCenterOffset: { x: candidateCenter.meanX, y: candidateCenter.meanY },
+      candidateCenterSpread: { x: candidateCenter.spreadX, y: candidateCenter.spreadY },
+      qualityScore: Math.max(quality.score, candidateCenter.maxX, candidateCenter.maxY),
+      diagnostic,
+    } satisfies FieldRegistration];
+  }));
+  const checkedRegistrations = applyIntraTableRegistrationCheck(registrations);
+  const diagnostics = Object.fromEntries(Object.entries(checkedRegistrations)
+    .filter(([, registration]) => registration.diagnostic)
+    .map(([field, registration]) => [field, registration.diagnostic!]));
+
+  return {
+    overrides,
+    fieldRects: fallbackFieldRects,
+    registrations: checkedRegistrations,
+    ...(Object.keys(diagnostics).length > 0 ? { diagnostics } : {}),
+  };
+}
+
+function applyIntraTableRegistrationCheck(
+  registrations: Record<string, FieldRegistration>,
+): Record<string, FieldRegistration> {
+  const verified = Object.entries(registrations)
+    .filter(([, registration]) => (
+      registration.status === 'verified' &&
+      registration.candidateCenterOffset
+    ));
+  if (verified.length < 2) {
+    return registrations;
+  }
+
+  const xOffsets = verified.map(([, registration]) => registration.candidateCenterOffset!.x);
+  const yOffsets = verified.map(([, registration]) => registration.candidateCenterOffset!.y);
+  const xRange = Math.max(...xOffsets) - Math.min(...xOffsets);
+  const yRange = Math.max(...yOffsets) - Math.min(...yOffsets);
+  if (xRange <= GRID_MAX_INTRA_TABLE_OFFSET_DELTA && yRange <= GRID_MAX_INTRA_TABLE_OFFSET_DELTA) {
+    return registrations;
+  }
+
+  return Object.fromEntries(Object.entries(registrations).map(([field, registration]) => {
+    if (registration.status !== 'verified') {
+      return [field, registration];
+    }
+
+    const diagnostic = `${formatGridQualityDiagnostic(
+      registrationToQuality(registration),
+      registrationToCandidateCenterQuality(registration),
+    )}; table offset varies across rows (x ${Math.round(xRange * 100)}%, y ${Math.round(yRange * 100)}%)`;
+    return [field, { ...registration, status: 'candidate' as const, diagnostic }];
+  }));
+}
+
+interface GridQuality {
+  rowGapDeviation: number;
+  columnGapDeviation: number;
+  rowResidualRatio: number;
+  columnResidualRatio: number;
+  rowOffsetRatio: number;
+  columnOffsetRatio: number;
+  rowScale: number;
+  columnScale: number;
+  score: number;
+}
+
+interface CandidateCenterQuality {
+  maxX: number;
+  maxY: number;
+  meanX: number;
+  meanY: number;
+  spreadX: number;
+  spreadY: number;
+}
+
+function calculateGridQuality(
+  actualRows: number[],
+  expectedRows: number[],
+  actualColumns: number[],
+  expectedColumns: number[],
+  pageHeight: number,
+  pageWidth: number,
+): GridQuality {
+  const rowFit = getLineFit(actualRows, expectedRows, pageHeight);
+  const columnFit = getLineFit(actualColumns, expectedColumns, pageWidth);
+  const rowGapDeviation = getRelativeGapDeviation(actualRows, expectedRows) ?? Number.POSITIVE_INFINITY;
+  const columnGapDeviation = getRelativeGapDeviation(actualColumns, expectedColumns) ?? Number.POSITIVE_INFINITY;
+
+  return {
+    rowGapDeviation,
+    columnGapDeviation,
+    rowResidualRatio: rowFit.residualRatio,
+    columnResidualRatio: columnFit.residualRatio,
+    rowOffsetRatio: rowFit.offsetRatio,
+    columnOffsetRatio: columnFit.offsetRatio,
+    rowScale: rowFit.scale,
+    columnScale: columnFit.scale,
+    score: Math.max(
+      rowGapDeviation,
+      columnGapDeviation,
+      rowFit.residualRatio,
+      columnFit.residualRatio,
+    ),
+  };
+}
+
+function getCandidateCenterQuality(
+  group: ChoiceGroup,
+  cells: PixelRect[],
+  bounds: PixelBounds,
+): CandidateCenterQuality {
+  const baseWidth = bounds.right - bounds.left;
+  const baseHeight = bounds.bottom - bounds.top;
+  const deltas = group.candidates.map((candidate, index) => {
+    const cell = cells[index];
+    const actualX = ((cell.left + cell.right) / 2 - bounds.left) / baseWidth;
+    const actualY = ((cell.top + cell.bottom) / 2 - bounds.top) / baseHeight;
+    const expectedX = candidate.rect.x + candidate.rect.width / 2;
+    const expectedY = candidate.rect.y + candidate.rect.height / 2;
+    return { x: actualX - expectedX, y: actualY - expectedY };
+  });
+
+  const meanX = average(deltas.map((delta) => delta.x));
+  const meanY = average(deltas.map((delta) => delta.y));
+
+  return {
+    maxX: Math.max(...deltas.map((delta) => Math.abs(delta.x))),
+    maxY: Math.max(...deltas.map((delta) => Math.abs(delta.y))),
+    meanX,
+    meanY,
+    spreadX: Math.max(...deltas.map((delta) => Math.abs(delta.x - meanX))),
+    spreadY: Math.max(...deltas.map((delta) => Math.abs(delta.y - meanY))),
+  };
+}
+
+function getLineFit(actual: number[], expected: number[], pageSize: number): {
+  residualRatio: number;
+  offsetRatio: number;
+  scale: number;
+} {
+  const expectedMean = average(expected);
+  const actualMean = average(actual);
+  const denominator = expected.reduce((sum, value) => sum + (value - expectedMean) ** 2, 0);
+  const numerator = expected.reduce(
+    (sum, value, index) => sum + (value - expectedMean) * (actual[index] - actualMean),
+    0,
+  );
+  const scale = denominator > 0 ? numerator / denominator : 1;
+  const offset = actualMean - scale * expectedMean;
+  const expectedSpan = Math.max(expected[expected.length - 1] - expected[0], 1);
+  const residualRatio = Math.max(
+    ...expected.map((value, index) => Math.abs(actual[index] - (scale * value + offset)) / expectedSpan),
+  );
+
+  return {
+    residualRatio,
+    offsetRatio: offset / Math.max(pageSize, 1),
+    scale,
+  };
+}
+
+function isVerifiedGridQuality(quality: GridQuality, candidateCenter: CandidateCenterQuality): boolean {
+  const anchoredToTemplate = (
+    candidateCenter.maxX <= GRID_MAX_CANDIDATE_CENTER_DEVIATION &&
+    candidateCenter.maxY <= GRID_MAX_CANDIDATE_CENTER_DEVIATION
+  );
+  // The source photo may have a different content-boundary crop than the
+  // blank template. A consistent translation of every option cell is still a
+  // valid local table registration, while a wrongly selected table produces
+  // option-to-option or row-to-row drift.
+  const uniformlyTranslated = (
+    Math.abs(candidateCenter.meanX) <= GRID_MAX_UNIFORM_CANDIDATE_OFFSET_X &&
+    Math.abs(candidateCenter.meanY) <= GRID_MAX_UNIFORM_CANDIDATE_OFFSET_Y &&
+    candidateCenter.spreadX <= GRID_MAX_CANDIDATE_CENTER_SPREAD &&
+    candidateCenter.spreadY <= GRID_MAX_CANDIDATE_CENTER_SPREAD
+  );
+
+  return (
+    quality.rowGapDeviation <= GRID_MAX_GAP_DEVIATION &&
+    quality.columnGapDeviation <= GRID_MAX_GAP_DEVIATION &&
+    quality.rowResidualRatio <= GRID_MAX_LINE_RESIDUAL_RATIO &&
+    quality.columnResidualRatio <= GRID_MAX_LINE_RESIDUAL_RATIO &&
+    (anchoredToTemplate || uniformlyTranslated)
+  );
+}
+
+function formatGridQualityDiagnostic(quality: GridQuality, candidateCenter?: CandidateCenterQuality): string {
+  const percent = (value: number) => `${Math.round(value * 100)}%`;
+  const signedPercent = (value: number) => `${value >= 0 ? '+' : ''}${Math.round(value * 100)}%`;
+  const centerDiagnostic = candidateCenter
+    ? `; choice center delta x ${percent(candidateCenter.maxX)}, y ${percent(candidateCenter.maxY)}; offset x ${signedPercent(candidateCenter.meanX)}, y ${signedPercent(candidateCenter.meanY)}; spread x ${percent(candidateCenter.spreadX)}, y ${percent(candidateCenter.spreadY)}`
+    : '';
+  return `grid candidate: gap rows ${percent(quality.rowGapDeviation)}, columns ${percent(quality.columnGapDeviation)}; residual rows ${percent(quality.rowResidualRatio)}, columns ${percent(quality.columnResidualRatio)}${centerDiagnostic}`;
+}
+
+function registrationsForGroups(
+  groups: ChoiceGroup[],
+  tableId: string,
+  registration: Omit<FieldRegistration, 'tableId'>,
+): Record<string, FieldRegistration> {
+  return Object.fromEntries(groups.map((group) => [group.field, {
+    tableId,
+    ...registration,
+  }]));
+}
+
+function applyCrossTableRegistrationCheck(result: GridDetectionResult): GridDetectionResult {
+  const representatives = new Map<string, FieldRegistration>();
+  for (const registration of Object.values(result.registrations)) {
+    if (registration.source === 'grid' && registration.status === 'verified' && registration.candidateCenterOffset) {
+      representatives.set(registration.tableId, registration);
+    }
+  }
+
+  const tableRegistrations = Array.from(representatives.values());
+  if (tableRegistrations.length < 2) {
+    return result;
+  }
+
+  const suspiciousTableIds = new Set<string>();
+  if (tableRegistrations.length === 2) {
+    const [first, second] = tableRegistrations;
+    const delta = getOffsetDelta(first, second);
+    if (delta > GRID_MAX_CROSS_TABLE_OFFSET_DELTA) {
+      const firstScore = first.qualityScore ?? Number.POSITIVE_INFINITY;
+      const secondScore = second.qualityScore ?? Number.POSITIVE_INFINITY;
+      suspiciousTableIds.add(firstScore <= secondScore ? second.tableId : first.tableId);
+    }
+  } else {
+    const medianX = median(tableRegistrations.map((registration) => registration.candidateCenterOffset!.x));
+    const medianY = median(tableRegistrations.map((registration) => registration.candidateCenterOffset!.y));
+    for (const registration of tableRegistrations) {
+      const delta = Math.max(
+        Math.abs(registration.candidateCenterOffset!.x - medianX),
+        Math.abs(registration.candidateCenterOffset!.y - medianY),
+      );
+      if (delta > GRID_MAX_CROSS_TABLE_OFFSET_DELTA) {
+        suspiciousTableIds.add(registration.tableId);
+      }
+    }
+  }
+
+  if (suspiciousTableIds.size === 0) {
+    return result;
+  }
+
+  const registrations: Record<string, FieldRegistration> = {};
+  const diagnostics = { ...result.diagnostics };
+  for (const [field, registration] of Object.entries(result.registrations)) {
+    if (!suspiciousTableIds.has(registration.tableId) || registration.status !== 'verified') {
+      registrations[field] = registration;
+      continue;
+    }
+
+    const diagnostic = `${formatGridQualityDiagnostic(registrationToQuality(registration), registrationToCandidateCenterQuality(registration))}; cross-table offset mismatch`;
+    registrations[field] = { ...registration, status: 'candidate', diagnostic };
+    diagnostics[field] = diagnostic;
+  }
+
+  return {
+    ...result,
+    registrations,
+    ...(Object.keys(diagnostics).length > 0 ? { diagnostics } : {}),
+  };
+}
+
+function registrationToQuality(registration: FieldRegistration): GridQuality {
+  return {
+    rowGapDeviation: registration.gapDeviation?.rows ?? 1,
+    columnGapDeviation: registration.gapDeviation?.columns ?? 1,
+    rowResidualRatio: registration.residualRatio?.rows ?? 1,
+    columnResidualRatio: registration.residualRatio?.columns ?? 1,
+    rowOffsetRatio: registration.offsetRatio?.y ?? 0,
+    columnOffsetRatio: registration.offsetRatio?.x ?? 0,
+    rowScale: registration.scale?.y ?? 1,
+    columnScale: registration.scale?.x ?? 1,
+    score: registration.qualityScore ?? 1,
+  };
+}
+
+function registrationToCandidateCenterQuality(registration: FieldRegistration): CandidateCenterQuality {
+  return {
+    maxX: registration.candidateCenterDeviation?.x ?? 1,
+    maxY: registration.candidateCenterDeviation?.y ?? 1,
+    meanX: registration.candidateCenterOffset?.x ?? 0,
+    meanY: registration.candidateCenterOffset?.y ?? 0,
+    spreadX: registration.candidateCenterSpread?.x ?? 1,
+    spreadY: registration.candidateCenterSpread?.y ?? 1,
+  };
+}
+
+function getOffsetDelta(first: FieldRegistration, second: FieldRegistration): number {
+  return Math.max(
+    Math.abs(first.candidateCenterOffset!.x - second.candidateCenterOffset!.x),
+    Math.abs(first.candidateCenterOffset!.y - second.candidateCenterOffset!.y),
+  );
+}
+
+function median(values: number[]): number {
+  const sorted = [...values].sort((first, second) => first - second);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? (sorted[middle - 1] + sorted[middle]) / 2
+    : sorted[middle];
 }
 
 function classifyGridLineFailure(

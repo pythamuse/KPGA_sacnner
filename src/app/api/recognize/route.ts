@@ -180,8 +180,11 @@ export async function POST(req: Request) {
       const draft = await recognizeStudentForms(pair.cagiPath, pair.satisfactionPath, { ocrDeadlineAt });
       const {
         recognitionCropRects,
+        recognitionCandidateRects,
         recognitionCropSource,
         recognitionCropDiagnostic,
+        recognitionRegistration,
+        recognitionRejectedCandidateRects,
         ...recognizedDraft
       } = draft;
       const preview = await buildSourcePreview(
@@ -190,6 +193,8 @@ export async function POST(req: Request) {
         recognitionCropRects,
         recognitionCropSource,
         recognitionCropDiagnostic,
+        recognitionCandidateRects,
+        recognitionRejectedCandidateRects,
       );
 
       studentDrafts.push({
@@ -203,6 +208,7 @@ export async function POST(req: Request) {
           cropDebugDataUrls: preview.cropDebugDataUrls,
           recognitionCropSource: preview.recognitionCropSource,
           recognitionCropDiagnostic: preview.recognitionCropDiagnostic,
+          recognitionRegistration,
         },
       });
     }

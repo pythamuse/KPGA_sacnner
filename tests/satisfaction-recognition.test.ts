@@ -87,6 +87,30 @@ describe('만족도 ROI 인식', () => {
     expect(fallbackRect).toEqual(draft.recognitionCropRects?.['satisfaction.q06']);
     expect((fallbackRect?.bottom || 0) - (fallbackRect?.top || 0)).toBeGreaterThan(200);
   });
+
+  it('keeps an offset grid as a review candidate and blocks automatic values', async () => {
+    const cagiPath = path.join(fixtureDir, 'cagi-offset-grid.png');
+    const satisfactionPath = path.join(fixtureDir, 'satisfaction-offset-grid.png');
+
+    await writeMarkedForm(cagiPath, cagiTemplate.choiceGroups, {
+      'cagi.q01': 0,
+      'cagi.q02': 0,
+    }, true, true, 0.035);
+    await writeMarkedForm(satisfactionPath, satisfactionTemplate.choiceGroups, {
+      'satisfaction.q01': 4,
+    }, true, true);
+
+    const draft = await recognizeStudentForms(cagiPath, satisfactionPath);
+
+    expect(draft.recognitionCropSource?.['cagi.q01']).toBe('grid-candidate');
+    expect(draft.recognitionRegistration?.['cagi.q01']).toMatchObject({
+      source: 'grid',
+      status: 'candidate',
+    });
+    expect(draft.recognitionCropDiagnostic?.['cagi.q01']).toContain('choice center delta');
+    expect(draft.recognitionCandidateRects?.['cagi.q01']).toHaveLength(4);
+    expect(draft.cagi.q01).toBeUndefined();
+  });
 });
 
 async function writeMarkedForm(
@@ -95,6 +119,7 @@ async function writeMarkedForm(
   selectedValues: Record<string, number | string>,
   includeFrame = true,
   includeTableGrids = false,
+  gridOffsetY = 0,
 ) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
 
@@ -128,7 +153,7 @@ async function writeMarkedForm(
     <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
       <rect width="100%" height="100%" fill="#fff"/>
       ${includeFrame ? `<rect x="${bounds.left}" y="${bounds.top}" width="${bounds.width}" height="${bounds.height}" fill="none" stroke="#000" stroke-width="6"/>` : ''}
-      ${includeTableGrids ? renderResponseGrids(groups, bounds) : ''}
+      ${includeTableGrids ? renderResponseGrids(groups, bounds, gridOffsetY) : ''}
       ${marks.join('\n')}
     </svg>
   `;
@@ -139,6 +164,7 @@ async function writeMarkedForm(
 function renderResponseGrids(
   groups: ChoiceGroup[],
   bounds: { left: number; top: number; width: number; height: number },
+  gridOffsetY = 0,
 ): string {
   const prefix = groups.some((group) => group.field.startsWith('cagi.')) ? 'cagi.' : 'satisfaction.';
   const specs = prefix === 'cagi.'
@@ -163,7 +189,8 @@ function renderResponseGrids(
       (candidate) => candidate.rect.y + candidate.rect.height / 2,
     )));
     const xLines = toPixels(deriveBoundaries(columnCenters), bounds.left, bounds.width);
-    const yLines = toPixels(deriveBoundaries(rowCenters), bounds.top, bounds.height);
+    const yLines = toPixels(deriveBoundaries(rowCenters), bounds.top, bounds.height)
+      .map((y) => y + Math.round(gridOffsetY * bounds.height));
     return [
       ...xLines.map((x) => `<line x1="${x}" y1="${yLines[0]}" x2="${x}" y2="${yLines[yLines.length - 1]}" stroke="#000" stroke-width="3"/>`),
       ...yLines.map((y) => `<line x1="${xLines[0]}" y1="${y}" x2="${xLines[xLines.length - 1]}" y2="${y}" stroke="#000" stroke-width="3"/>`),

@@ -1,15 +1,25 @@
-import { analyzeChoiceGroup, hasUsableFormBounds, loadImageAnalysisData, type PixelRect } from './markDensity';
-import { getTemplate } from './roiTemplates';
+import {
+  analyzeChoiceGroup,
+  hasUsableFormBounds,
+  loadImageAnalysisData,
+  type ImageAnalysisData,
+  type PixelRect,
+} from './markDensity';
+import { getTemplate, type ChoiceGroup } from './roiTemplates';
 import {
   buildCagiRowDetection,
   buildSatisfactionRowDetection,
   type RowDetectionResult,
 } from './tableRowDetection';
-import { buildCagiGridDetection, buildSatisfactionGridDetection } from './tableGridDetection';
+import {
+  buildCagiGridDetection,
+  buildSatisfactionGridDetection,
+  type FieldRegistration,
+} from './tableGridDetection';
 import { recognizeDigitsInRegion } from './ocrTextLines';
 import fs from 'fs/promises';
 
-export type RecognitionCropSource = 'grid' | 'row' | 'fixed';
+export type RecognitionCropSource = 'grid' | 'grid-candidate' | 'row' | 'row-fallback' | 'fixed';
 
 export interface RecognitionDraft {
   source?: {
@@ -21,6 +31,7 @@ export interface RecognitionDraft {
     cropDebugDataUrls?: { [field: string]: string };
     recognitionCropSource?: Record<string, RecognitionCropSource>;
     recognitionCropDiagnostic?: Record<string, string>;
+    recognitionRegistration?: Record<string, FieldRegistration>;
   };
   basic: {
     age?: number;
@@ -60,8 +71,11 @@ export interface RecognitionDraft {
     [key: string]: Array<{ value: number | string; score: number }>;
   };
   recognitionCropRects?: Record<string, PixelRect>;
+  recognitionCandidateRects?: Record<string, PixelRect[]>;
+  recognitionRejectedCandidateRects?: Record<string, PixelRect[]>;
   recognitionCropSource?: Record<string, RecognitionCropSource>;
   recognitionCropDiagnostic?: Record<string, string>;
+  recognitionRegistration?: Record<string, FieldRegistration>;
   warnings?: string[];
 }
 
@@ -112,8 +126,11 @@ export async function recognizeStudentForms(
 
   const draft = createEmptyDraft();
   const recognitionCropRects: Record<string, PixelRect> = {};
+  const recognitionCandidateRects: Record<string, PixelRect[]> = {};
+  const recognitionRejectedCandidateRects: Record<string, PixelRect[]> = {};
   const recognitionCropSource: Record<string, RecognitionCropSource> = {};
   const recognitionCropDiagnostic: Record<string, string> = {};
+  const recognitionRegistration: Record<string, FieldRegistration> = {};
 
   try {
     const cagiImage = await loadImageAnalysisData(cagiPath);
@@ -150,31 +167,49 @@ export async function recognizeStudentForms(
     for (const group of cagiTemplate.choiceGroups) {
       const gridCells = cagiGridOverrides[group.field];
       const rowOverride = cagiRowOverrides[group.field];
-      const cropSource = resolveRecognitionCropSource(gridCells, rowOverride);
+      const registration = cagiGridDetection.registrations[group.field];
+      const cropSource = resolveRecognitionCropSource(gridCells, rowOverride, registration);
       recognitionCropSource[group.field] = cropSource;
       const cropDiagnostic = resolveRecognitionCropDiagnostic(
         cropSource,
-        cagiGridDetection.diagnostics?.[group.field],
+        registration?.diagnostic || cagiGridDetection.diagnostics?.[group.field],
         cagiRowDetection.diagnostics?.[group.field],
       );
       if (cropDiagnostic) {
         recognitionCropDiagnostic[group.field] = cropDiagnostic;
       }
+      if (registration) {
+        recognitionRegistration[group.field] = registration;
+      }
+      const scoringCells = resolveScoringCells(cagiImage, group, gridCells, rowOverride, registration);
+      const displayCells = scoringCells || gridCells;
+      if (displayCells) {
+        recognitionCandidateRects[group.field] = displayCells;
+        recognitionCropRects[group.field] = unionPixelRects(displayCells);
+      }
+      if (gridCells && scoringCells && scoringCells !== gridCells) {
+        recognitionRejectedCandidateRects[group.field] = gridCells;
+      }
+
+      // A candidate grid may contribute only its observed column positions to
+      // a row fallback. It is still manual-only and remains visible as
+      // rejected evidence in the debug overlay.
+      const verifiedGridCells = isVerifiedGrid(registration) ? gridCells : undefined;
+      const analysisRowOverride = scoringCells ? undefined : rowOverride;
       const result = analyzeChoiceGroup(
         cagiImage,
         group,
-        rowOverride,
-        canAutoRecognizeCagi && Boolean(gridCells) && !cagiGridDetection.registeredFields.has(group.field),
-        gridCells,
+        analysisRowOverride,
+        canAutoRecognizeCagi && Boolean(verifiedGridCells),
+        scoringCells,
         requiresHighVisualConfidence(group.field),
       );
       draft.confidence[result.field] = result.confidence;
       draft.candidates![result.field] = mapRecognizedCandidates(result.field, result.candidates);
-      if (gridCells) {
-        recognitionCropRects[result.field] = unionPixelRects(gridCells);
-      }
 
-      if (result.value === undefined) continue;
+      // Medium confidence stays a suggestion only. Automatic values require a
+      // verified grid and the stricter high-confidence mark evidence.
+      if (result.value === undefined || result.confidence !== 'high') continue;
 
       if (result.field === 'basic.gender') {
         draft.basic.gender = String(result.value);
@@ -189,10 +224,18 @@ export async function recognizeStudentForms(
     }
 
     for (const [field, rect] of Object.entries(cagiGridDetection.fieldRects)) {
+      const registration = cagiGridDetection.registrations[field];
+      if (registration) {
+        recognitionRegistration[field] = registration;
+        if (registration.diagnostic && !recognitionCropDiagnostic[field]) {
+          recognitionCropDiagnostic[field] = registration.diagnostic;
+        }
+      }
       if (!recognitionCropRects[field] && recognitionCropSource[field] === 'fixed') {
         recognitionCropRects[field] = rect;
       }
-      recognitionCropSource[field] = recognitionCropSource[field] || 'fixed';
+      recognitionCropSource[field] = recognitionCropSource[field]
+        || (registration?.source === 'row' ? 'row' : 'fixed');
     }
   } catch {
     // 이미지 분석 실패 시 임의값을 넣지 않고 검수 화면에서 직접 입력하도록 낮은 신뢰도로 둔다.
@@ -217,41 +260,62 @@ export async function recognizeStudentForms(
     for (const group of satisfactionTemplate.choiceGroups) {
       const gridCells = satisfactionGridOverrides[group.field];
       const rowOverride = satisfactionRowOverrides[group.field];
-      const cropSource = resolveRecognitionCropSource(gridCells, rowOverride);
+      const registration = satisfactionGridDetection.registrations[group.field];
+      const cropSource = resolveRecognitionCropSource(gridCells, rowOverride, registration);
       recognitionCropSource[group.field] = cropSource;
       const cropDiagnostic = resolveRecognitionCropDiagnostic(
         cropSource,
-        satisfactionGridDetection.diagnostics?.[group.field],
+        registration?.diagnostic || satisfactionGridDetection.diagnostics?.[group.field],
         satisfactionRowDetection.diagnostics?.[group.field],
       );
       if (cropDiagnostic) {
         recognitionCropDiagnostic[group.field] = cropDiagnostic;
       }
+      if (registration) {
+        recognitionRegistration[group.field] = registration;
+      }
+      const scoringCells = resolveScoringCells(satisfactionImage, group, gridCells, rowOverride, registration);
+      const displayCells = scoringCells || gridCells;
+      if (displayCells) {
+        recognitionCandidateRects[group.field] = displayCells;
+        recognitionCropRects[group.field] = unionPixelRects(displayCells);
+      }
+      if (gridCells && scoringCells && scoringCells !== gridCells) {
+        recognitionRejectedCandidateRects[group.field] = gridCells;
+      }
+
+      const verifiedGridCells = isVerifiedGrid(registration) ? gridCells : undefined;
+      const analysisRowOverride = scoringCells ? undefined : rowOverride;
       const result = analyzeChoiceGroup(
         satisfactionImage,
         group,
-        rowOverride,
-        canAutoRecognizeSatisfaction && Boolean(gridCells) && !satisfactionGridDetection.registeredFields.has(group.field),
-        gridCells,
+        analysisRowOverride,
+        canAutoRecognizeSatisfaction && Boolean(verifiedGridCells),
+        scoringCells,
         requiresHighVisualConfidence(group.field),
       );
       draft.confidence[result.field] = result.confidence;
       draft.candidates![result.field] = result.candidates;
-      if (gridCells) {
-        recognitionCropRects[result.field] = unionPixelRects(gridCells);
-      }
 
-      if (result.value === undefined) continue;
+      if (result.value === undefined || result.confidence !== 'high') continue;
 
       const questionKey = result.field.replace('satisfaction.', '');
       draft.satisfaction[questionKey] = Number(result.value);
     }
 
     for (const [field, rect] of Object.entries(satisfactionGridDetection.fieldRects)) {
+      const registration = satisfactionGridDetection.registrations[field];
+      if (registration) {
+        recognitionRegistration[field] = registration;
+        if (registration.diagnostic && !recognitionCropDiagnostic[field]) {
+          recognitionCropDiagnostic[field] = registration.diagnostic;
+        }
+      }
       if (!recognitionCropRects[field] && recognitionCropSource[field] === 'fixed') {
         recognitionCropRects[field] = rect;
       }
-      recognitionCropSource[field] = recognitionCropSource[field] || 'fixed';
+      recognitionCropSource[field] = recognitionCropSource[field]
+        || (registration?.source === 'row' ? 'row' : 'fixed');
     }
   } catch {
     // Keep satisfaction fields empty so the review screen can collect them manually.
@@ -260,11 +324,20 @@ export async function recognizeStudentForms(
   if (Object.keys(recognitionCropRects).length > 0) {
     draft.recognitionCropRects = recognitionCropRects;
   }
+  if (Object.keys(recognitionCandidateRects).length > 0) {
+    draft.recognitionCandidateRects = recognitionCandidateRects;
+  }
+  if (Object.keys(recognitionRejectedCandidateRects).length > 0) {
+    draft.recognitionRejectedCandidateRects = recognitionRejectedCandidateRects;
+  }
   if (Object.keys(recognitionCropSource).length > 0) {
     draft.recognitionCropSource = recognitionCropSource;
   }
   if (Object.keys(recognitionCropDiagnostic).length > 0) {
     draft.recognitionCropDiagnostic = recognitionCropDiagnostic;
+  }
+  if (Object.keys(recognitionRegistration).length > 0) {
+    draft.recognitionRegistration = recognitionRegistration;
   }
 
   return draft;
@@ -369,9 +442,13 @@ function getAgeDigitsRect(rect: PixelRect): PixelRect {
 export function resolveRecognitionCropSource(
   gridCells?: PixelRect[],
   rowOverride?: { top: number; bottom: number },
+  registration?: FieldRegistration,
 ): RecognitionCropSource {
-  if (gridCells) return 'grid';
-  if (rowOverride) return 'row';
+  if (isVerifiedGrid(registration) && gridCells) return 'grid';
+  if (registration?.source === 'row' && gridCells) return 'row';
+  if (hasStableCandidateGridRows(gridCells, registration)) return 'grid-candidate';
+  if (rowOverride) return gridCells ? 'row-fallback' : 'row';
+  if (gridCells) return 'grid-candidate';
   return 'fixed';
 }
 
@@ -380,9 +457,106 @@ export function resolveRecognitionCropDiagnostic(
   gridDiagnostic?: string,
   rowDiagnostic?: string,
 ): string | undefined {
-  if (source !== 'fixed') return undefined;
+  if (source === 'grid') return gridDiagnostic;
+  if (source === 'grid-candidate') {
+    return gridDiagnostic || 'Grid candidate is not registered; values remain manual.';
+  }
+  if (source === 'row-fallback') {
+    const details = [gridDiagnostic, rowDiagnostic].filter((diagnostic): diagnostic is string => Boolean(diagnostic));
+    return details.length > 0
+      ? `Grid candidate rejected; row fallback used. ${details.join('; ')}`
+      : 'Grid candidate rejected; row fallback used.';
+  }
+  if (source === 'row') return rowDiagnostic || gridDiagnostic;
 
   return [gridDiagnostic, rowDiagnostic].filter((diagnostic): diagnostic is string => Boolean(diagnostic)).join('; ') || undefined;
+}
+
+function isVerifiedGrid(registration?: FieldRegistration): boolean {
+  return registration?.source === 'grid' && registration.status === 'verified';
+}
+
+function hasStableCandidateGridRows(
+  gridCells?: PixelRect[],
+  registration?: FieldRegistration,
+): boolean {
+  if (!gridCells || registration?.source !== 'grid' || registration.status !== 'candidate') {
+    return false;
+  }
+
+  const rowGapDeviation = registration.gapDeviation?.rows;
+  const rowResidualRatio = registration.residualRatio?.rows;
+  const rowCenterDeviation = registration.candidateCenterDeviation?.y;
+  return (
+    rowGapDeviation !== undefined
+    && rowResidualRatio !== undefined
+    && rowCenterDeviation !== undefined
+    && rowGapDeviation <= 0.1
+    && rowResidualRatio <= 0.07
+    && rowCenterDeviation <= 0.025
+  );
+}
+
+/**
+ * Keeps score calculation, inline ROI, and the debug overlay on the same
+ * geometry. A rejected grid is evidence only; a detected response row is a
+ * better fallback than returning to the full-page normalized template.
+ */
+export function resolveScoringCells(
+  image: Pick<ImageAnalysisData, 'width' | 'height' | 'contentBounds'>,
+  group: ChoiceGroup,
+  gridCells?: PixelRect[],
+  rowOverride?: { top: number; bottom: number },
+  registration?: FieldRegistration,
+): PixelRect[] | undefined {
+  if (isVerifiedGrid(registration) && gridCells) return gridCells;
+  if (registration?.source === 'row' && gridCells) return gridCells;
+  if (hasStableCandidateGridRows(gridCells, registration)) return gridCells;
+  if (rowOverride) return buildRowFallbackCandidateRects(image, group, rowOverride, gridCells);
+  // Candidate geometry is valuable as a manual suggestion only. The caller
+  // keeps automatic confirmation disabled unless the grid is verified.
+  if (gridCells) return gridCells;
+  return undefined;
+}
+
+export function buildRowFallbackCandidateRects(
+  image: Pick<ImageAnalysisData, 'width' | 'height' | 'contentBounds'>,
+  group: ChoiceGroup,
+  rowOverride: { top: number; bottom: number },
+  xReferenceCells?: PixelRect[],
+): PixelRect[] {
+  const bounds = image.contentBounds || {
+    left: 0,
+    top: 0,
+    right: image.width,
+    bottom: image.height,
+  };
+  const baseWidth = bounds.right - bounds.left;
+  const rowHeight = Math.max(rowOverride.bottom - rowOverride.top, 1);
+  const verticalInset = Math.min(Math.max(1, Math.round(rowHeight * 0.15)), Math.floor(rowHeight / 3));
+  const top = rowOverride.top + verticalInset;
+  const bottom = Math.max(top + 1, rowOverride.bottom - verticalInset);
+  const canUseDetectedColumns = xReferenceCells?.length === group.candidates.length
+    && xReferenceCells.every((cell) => cell.right > cell.left);
+
+  return group.candidates.map((candidate, index) => ({
+    left: canUseDetectedColumns
+      ? clampPixel(xReferenceCells![index].left, 0, image.width - 1)
+      : clampPixel(Math.round(bounds.left + candidate.rect.x * baseWidth), 0, image.width - 1),
+    right: canUseDetectedColumns
+      ? clampPixel(xReferenceCells![index].right, 1, image.width)
+      : clampPixel(Math.round(bounds.left + (candidate.rect.x + candidate.rect.width) * baseWidth), 1, image.width),
+    top: clampPixel(top, 0, image.height - 1),
+    bottom: clampPixel(bottom, 1, image.height),
+  })).map((rect) => ({
+    ...rect,
+    right: Math.max(rect.left + 1, rect.right),
+    bottom: Math.max(rect.top + 1, rect.bottom),
+  }));
+}
+
+function clampPixel(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
 }
 
 function requiresHighVisualConfidence(field: string): boolean {

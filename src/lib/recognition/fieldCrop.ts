@@ -1,6 +1,7 @@
 import sharp from 'sharp';
 import { loadImageAnalysisData, type PixelRect } from './markDensity';
 import { cagiTemplate, ChoiceGroup, FieldRegion, NormalizedRect, satisfactionTemplate } from './roiTemplates';
+import { type RecognitionCropSource } from './detectCheckmarks';
 
 export interface CropBox {
   left: number;
@@ -126,6 +127,9 @@ export async function generateFieldCropBuffer(
   field: string,
   debug: boolean,
   pixelRect?: PixelRect,
+  candidatePixelRects?: PixelRect[],
+  cropSource?: RecognitionCropSource,
+  rejectedCandidatePixelRects?: PixelRect[],
 ): Promise<Buffer | undefined> {
   const cropRect = pixelRect ? undefined : findCropRect(field);
   if (!cropRect && !pixelRect) return undefined;
@@ -147,7 +151,14 @@ export async function generateFieldCropBuffer(
     .resize({ width: 520, withoutEnlargement: true });
 
   return debug
-    ? addDebugOverlay(extracted, cropBox, pixelRect ? `${field} grid-cell` : `${field} ${serializeRect(cropRect!)}`)
+    ? addDebugOverlay(
+      extracted,
+      cropBox,
+      pixelRect ? `${field} ${cropSource || 'detected cells'}` : `${field} ${serializeRect(cropRect!)}`,
+      candidatePixelRects,
+      findChoiceGroup(field)?.candidates.map((candidate) => String(candidate.value)),
+      rejectedCandidatePixelRects,
+    )
     : extracted.png().toBuffer();
 }
 
@@ -155,6 +166,9 @@ export async function addDebugOverlay(
   image: sharp.Sharp,
   cropBox: CropBox,
   label?: string,
+  candidatePixelRects?: PixelRect[],
+  candidateLabels?: string[],
+  rejectedCandidatePixelRects?: PixelRect[],
 ): Promise<Buffer> {
   const { data, info } = await image.png().toBuffer({ resolveWithObject: true });
   const width = info.width || cropBox.width;
@@ -170,12 +184,31 @@ export async function addDebugOverlay(
   const centerX = roi.left + roi.width / 2;
   const centerY = roi.top + roi.height / 2;
   const labelText = escapeSvgText(label || '');
+  const candidateOverlay = (candidatePixelRects || []).map((rect, index) => {
+    const left = (rect.left - cropBox.left) * scaleX;
+    const top = (rect.top - cropBox.top) * scaleY;
+    const candidateWidth = (rect.right - rect.left) * scaleX;
+    const candidateHeight = (rect.bottom - rect.top) * scaleY;
+    const color = ['#0f766e', '#2563eb', '#9333ea', '#c2410c', '#be123c'][index % 5];
+    const labelY = Math.max(12, top + 12);
+    const candidateLabel = escapeSvgText(candidateLabels?.[index] || String(index));
+    return `<rect x="${left}" y="${top}" width="${candidateWidth}" height="${candidateHeight}" fill="none" stroke="${color}" stroke-width="2"/><text x="${left + 3}" y="${labelY}" fill="${color}" font-family="Arial, sans-serif" font-size="11" font-weight="700">${candidateLabel}</text>`;
+  }).join('');
+  const rejectedCandidateOverlay = (rejectedCandidatePixelRects || []).map((rect, index) => {
+    const left = (rect.left - cropBox.left) * scaleX;
+    const top = (rect.top - cropBox.top) * scaleY;
+    const candidateWidth = (rect.right - rect.left) * scaleX;
+    const candidateHeight = (rect.bottom - rect.top) * scaleY;
+    return `<rect x="${left}" y="${top}" width="${candidateWidth}" height="${candidateHeight}" fill="none" stroke="#ea580c" stroke-width="2" stroke-dasharray="5 3"/><text x="${left + 3}" y="${Math.max(12, top + 12)}" fill="#ea580c" font-family="Arial, sans-serif" font-size="11" font-weight="700">x${index}</text>`;
+  }).join('');
   const overlay = Buffer.from(`
     <svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">
       <rect x="0.5" y="0.5" width="${width - 1}" height="${height - 1}" fill="none" stroke="#6855a0" stroke-width="2"/>
       <rect x="${roi.left}" y="${roi.top}" width="${roi.width}" height="${roi.height}" fill="none" stroke="#d83024" stroke-width="3"/>
       <line x1="${centerX}" y1="${Math.max(0, centerY - 9)}" x2="${centerX}" y2="${Math.min(height, centerY + 9)}" stroke="#d83024" stroke-width="2"/>
       <line x1="${Math.max(0, centerX - 9)}" y1="${centerY}" x2="${Math.min(width, centerX + 9)}" y2="${centerY}" stroke="#d83024" stroke-width="2"/>
+      ${candidateOverlay}
+      ${rejectedCandidateOverlay}
       ${labelText ? `<rect x="8" y="8" width="${Math.min(width - 16, Math.max(180, labelText.length * 7 + 18))}" height="24" rx="4" fill="rgba(255,255,255,0.92)" stroke="#6855a0" stroke-width="1"/><text x="17" y="25" fill="#55438a" font-family="Arial, sans-serif" font-size="12" font-weight="700">${labelText}</text>` : ''}
     </svg>
   `);

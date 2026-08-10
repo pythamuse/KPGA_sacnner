@@ -50,6 +50,23 @@ describe('table grid detection', () => {
     expect(detection.diagnostics?.['cagi.q03']).toBeUndefined();
   });
 
+  it('accepts a uniformly translated CAGI grid when the local geometry is valid', async () => {
+    const filePath = path.join(fixtureDir, 'cagi-grid-uniform-x-offset.png');
+    await writeGridFixture(filePath, groupsFor(cagiTemplate.choiceGroups, [
+      'cagi.q01', 'cagi.q02', 'cagi.q03', 'cagi.q04', 'cagi.q05', 'cagi.q06', 'cagi.q07',
+    ]), {
+      verticalLineOffsets: { 0: -32, 1: -32, 2: -32, 3: -32, 4: -32 },
+    });
+
+    const detection = buildCagiGridDetection(await loadImageAnalysisData(filePath));
+    const registration = detection.registrations['cagi.q01'];
+
+    expect(registration).toMatchObject({ source: 'grid', status: 'verified' });
+    expect(registration.candidateCenterOffset?.x).toBeLessThan(-0.03);
+    expect(registration.candidateCenterSpread?.x).toBeLessThan(0.01);
+    expect(detection.overrides['cagi.q01']).toHaveLength(4);
+  });
+
   it('maps the two-column satisfaction grid independently from the scale grid', async () => {
     const filePath = path.join(fixtureDir, 'satisfaction-grid.png');
     await writeGridFixture(filePath, groupsFor(satisfactionTemplate.choiceGroups, [
@@ -103,7 +120,7 @@ describe('table grid detection', () => {
     expect(diagnostic).toMatch(/세로선 \d+\/5개/);
   });
 
-  it('reports gap_mismatch when enough lines have the wrong spacing pattern', async () => {
+  it('keeps a heavily mismatched grid as a review candidate instead of auto-registering it', async () => {
     const filePath = path.join(fixtureDir, 'cagi-grid-gap-mismatch.png');
     await writeGridFixture(filePath, groupsFor(cagiTemplate.choiceGroups, [
       'cagi.q01', 'cagi.q02', 'cagi.q03', 'cagi.q04', 'cagi.q05', 'cagi.q06', 'cagi.q07',
@@ -112,10 +129,13 @@ describe('table grid detection', () => {
     const detection = buildCagiGridDetection(await loadImageAnalysisData(filePath));
     const diagnostic = detection.diagnostics?.['cagi.q01'];
 
-    expect(detection.overrides['cagi.q01']).toBeUndefined();
-    expect(diagnostic).toContain('gap_mismatch');
-    expect(diagnostic).toMatch(/최대 편차 \d+% \(허용 18%\)/);
-    expect(Number(diagnostic?.match(/최대 편차 (\d+)%/)?.[1])).toBeGreaterThanOrEqual(0);
+    expect(detection.overrides['cagi.q01']).toHaveLength(4);
+    expect(detection.registrations['cagi.q01']).toMatchObject({
+      source: 'grid',
+      status: 'candidate',
+    });
+    expect(diagnostic).toContain('grid candidate');
+    expect(detection.registrations['cagi.q01'].gapDeviation?.rows).toBeGreaterThan(0.08);
   });
 });
 

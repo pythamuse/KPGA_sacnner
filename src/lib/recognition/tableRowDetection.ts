@@ -1,4 +1,4 @@
-import { ImageAnalysisData } from './markDensity';
+import { hasUsableFormBounds, ImageAnalysisData } from './markDensity';
 import {
   cagiTemplate,
   cagiLateQuestionYs,
@@ -45,6 +45,14 @@ const BASIC_CAGI_FIELDS = ['basic.gender', 'basic.schoolType', 'basic.grade'];
 // questions). Match the measured template gap pattern instead of assuming all
 // table rules are evenly spaced.
 export const ROW_PATTERN_TOLERANCE_RATIO = 0.35;
+
+interface RowAnchorOptions {
+  expectedLineYs: number[];
+  maxMeanOffsetPx: number;
+  maxResidualPx: number;
+  minSpanRatio: number;
+  maxSpanRatio: number;
+}
 
 export function detectHorizontalLines(
   image: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>,
@@ -119,6 +127,7 @@ function evaluateRowPattern(
   detectedLines: HorizontalLine[],
   expectedRelativeGaps: number[],
   toleranceRatio = ROW_PATTERN_TOLERANCE_RATIO,
+  anchor?: RowAnchorOptions,
 ): { match: RowMatchResult | null; failure?: RowPatternFailure } {
   const requiredLineCount = expectedRelativeGaps.length + 1;
   if (requiredLineCount < 2) {
@@ -144,6 +153,8 @@ function evaluateRowPattern(
 
   const sortedLines = [...detectedLines].sort((a, b) => a.y - b.y);
   let bestDeviation: number | undefined;
+  let bestAnchoredMatch: { result: RowMatchResult; score: number } | undefined;
+  let bestAnchorFailure: { score: number; detail: string } | undefined;
 
   for (let start = 0; start <= sortedLines.length - requiredLineCount; start++) {
     const candidateLines = sortedLines.slice(start, start + requiredLineCount);
@@ -163,7 +174,11 @@ function evaluateRowPattern(
       bestDeviation = candidateDeviation;
     }
 
-    if (deviations.every((deviation) => deviation <= toleranceRatio)) {
+    if (!deviations.every((deviation) => deviation <= toleranceRatio)) {
+      continue;
+    }
+
+    if (!anchor) {
       return {
         match: {
           lineYs: candidateLines.map((line) => line.y),
@@ -171,6 +186,42 @@ function evaluateRowPattern(
         },
       };
     }
+
+    const anchored = evaluateRowAnchor(candidateLines.map((line) => line.y), anchor);
+    if (!anchored.valid) {
+      if (!bestAnchorFailure || anchored.score < bestAnchorFailure.score) {
+        bestAnchorFailure = {
+          score: anchored.score,
+          detail: anchored.detail,
+        };
+      }
+      continue;
+    }
+
+    const score = candidateDeviation + anchored.score;
+    if (!bestAnchoredMatch || score < bestAnchoredMatch.score) {
+      bestAnchoredMatch = {
+        score,
+        result: {
+          lineYs: candidateLines.map((line) => line.y),
+          confident: true,
+        },
+      };
+    }
+  }
+
+  if (bestAnchoredMatch) {
+    return { match: bestAnchoredMatch.result };
+  }
+
+  if (bestAnchorFailure) {
+    return {
+      match: null,
+      failure: {
+        reason: 'anchor_mismatch',
+        detail: bestAnchorFailure.detail,
+      },
+    };
   }
 
   return {
@@ -181,6 +232,51 @@ function evaluateRowPattern(
         ? '행 선 간격 패턴 불일치'
         : `행 선 간격 패턴 불일치 (최대 편차 ${Math.round(bestDeviation * 100)}% (허용 ${Math.round(toleranceRatio * 100)}%))`,
     },
+  };
+}
+
+function evaluateRowAnchor(lineYs: number[], anchor: RowAnchorOptions): {
+  valid: boolean;
+  score: number;
+  detail: string;
+} {
+  if (lineYs.length !== anchor.expectedLineYs.length || lineYs.length < 2) {
+    return {
+      valid: false,
+      score: Number.POSITIVE_INFINITY,
+      detail: 'expected row anchor count mismatch',
+    };
+  }
+
+  const expectedSpan = anchor.expectedLineYs[anchor.expectedLineYs.length - 1] - anchor.expectedLineYs[0];
+  const observedSpan = lineYs[lineYs.length - 1] - lineYs[0];
+  if (expectedSpan <= 0 || observedSpan <= 0) {
+    return {
+      valid: false,
+      score: Number.POSITIVE_INFINITY,
+      detail: 'invalid row anchor span',
+    };
+  }
+
+  const spanRatio = observedSpan / expectedSpan;
+  const offsets = lineYs.map((lineY, index) => lineY - anchor.expectedLineYs[index]);
+  const meanOffset = average(offsets);
+  const maxResidual = Math.max(...offsets.map((offset) => Math.abs(offset - meanOffset)));
+  const spanPenalty = Math.abs(1 - spanRatio);
+  const score = spanPenalty
+    + Math.abs(meanOffset) / Math.max(anchor.maxMeanOffsetPx, 1)
+    + maxResidual / Math.max(anchor.maxResidualPx, 1);
+  const valid = (
+    spanRatio >= anchor.minSpanRatio
+    && spanRatio <= anchor.maxSpanRatio
+    && Math.abs(meanOffset) <= anchor.maxMeanOffsetPx
+    && maxResidual <= anchor.maxResidualPx
+  );
+
+  return {
+    valid,
+    score,
+    detail: `row anchor offset ${Math.round(meanOffset)}px (limit ${anchor.maxMeanOffsetPx}px), residual ${Math.round(maxResidual)}px (limit ${anchor.maxResidualPx}px), span ${Math.round(spanRatio * 100)}%`,
   };
 }
 
@@ -621,15 +717,29 @@ function findRowMatch(
     bottom: image.height,
   };
   const baseWidth = bounds.right - bounds.left;
-  // A non-confident content bound can be just the dark answer lines rather
-  // than the page frame. In that case template Ys still refer to full-page
-  // coordinates, so use the image itself as the broad search anchor.
-  const yReference = image.contentBoundsConfident ? bounds : {
+  // A scanner can omit a continuous outer page border while still yielding a
+  // stable, full-form content envelope. Treat that usable envelope as the
+  // template frame; falling back to the full bitmap shifts every expected row
+  // upward by the scan's top margin and lets an earlier table satisfy a later
+  // row pattern.
+  const yReference = hasUsableFormBounds(image) ? bounds : {
     top: 0,
     bottom: image.height,
   };
   const templateTop = yReference.top + Math.min(...templateYs) * (yReference.bottom - yReference.top);
   const templateBottom = yReference.top + Math.max(...templateYs) * (yReference.bottom - yReference.top);
+  const expectedLineYs = templateYs.map((y) => yReference.top + y * (yReference.bottom - yReference.top));
+  const referenceHeight = yReference.bottom - yReference.top;
+  const anchor: RowAnchorOptions = {
+    expectedLineYs,
+    // Template Ys are response centers while pixel detection finds printed
+    // rules. Permit one consistent row-scale translation, but reject a short
+    // pair from an earlier table that merely has the same relative gap.
+    maxMeanOffsetPx: Math.max(20, Math.round(referenceHeight * 0.02)),
+    maxResidualPx: Math.max(8, Math.round(referenceHeight * 0.018)),
+    minSpanRatio: 0.55,
+    maxSpanRatio: 1.6,
+  };
   const searchPadding = Math.max(24, Math.round((yReference.bottom - yReference.top) * 0.04));
   const searchTop = clamp(templateTop - searchPadding, 0, image.height - 1);
   const searchBottom = clamp(templateBottom + searchPadding, searchTop + 1, image.height);
@@ -641,6 +751,7 @@ function findRowMatch(
       image,
       imageBuffer,
       expectedRelativeGaps,
+      anchor,
       searchTop,
       searchBottom,
       xLeft,
@@ -650,7 +761,7 @@ function findRowMatch(
   }
 
   const detectedLines = detectHorizontalLines(image, searchTop, searchBottom, xLeft, xRight, 0.3);
-  const pixelEvaluation = evaluateRowPattern(detectedLines, expectedRelativeGaps);
+  const pixelEvaluation = evaluateRowPattern(detectedLines, expectedRelativeGaps, ROW_PATTERN_TOLERANCE_RATIO, anchor);
   return pixelEvaluation.match || createFailureResult(
     pixelEvaluation.failure || classifyRowPatternFailure(detectedLines.length, expectedRelativeGaps.length + 1),
     '픽셀',
@@ -661,6 +772,7 @@ async function findRowMatchWithOcrFallback(
   image: ImageAnalysisData,
   imageBuffer: Buffer,
   expectedRelativeGaps: number[],
+  anchor: RowAnchorOptions,
   searchTop: number,
   searchBottom: number,
   xLeft: number,
@@ -668,7 +780,7 @@ async function findRowMatchWithOcrFallback(
   ocrOptions?: OcrOptions,
 ): Promise<RowMatchResult> {
   const detectedLines = detectHorizontalLines(image, searchTop, searchBottom, xLeft, xRight, 0.3);
-  const pixelEvaluation = evaluateRowPattern(detectedLines, expectedRelativeGaps);
+  const pixelEvaluation = evaluateRowPattern(detectedLines, expectedRelativeGaps, ROW_PATTERN_TOLERANCE_RATIO, anchor);
   if (pixelEvaluation.match?.confident) {
     return pixelEvaluation.match;
   }
@@ -685,7 +797,7 @@ async function findRowMatchWithOcrFallback(
     xRight,
     ocrOptions,
   );
-  const ocrEvaluation = evaluateRowPattern(ocrLines, expectedRelativeGaps);
+  const ocrEvaluation = evaluateRowPattern(ocrLines, expectedRelativeGaps, ROW_PATTERN_TOLERANCE_RATIO, anchor);
   if (ocrEvaluation.match?.confident) {
     return ocrEvaluation.match;
   }
@@ -702,7 +814,7 @@ async function findRowMatchWithOcrFallback(
   };
 }
 
-type RowFailureReason = 'lines_undetected' | 'insufficient_lines' | 'gap_mismatch';
+type RowFailureReason = 'lines_undetected' | 'insufficient_lines' | 'gap_mismatch' | 'anchor_mismatch';
 
 interface RowPatternFailure {
   reason: RowFailureReason;

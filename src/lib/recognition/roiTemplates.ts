@@ -42,7 +42,11 @@ const rect = (x: number, y: number, width: number, height: number): NormalizedRe
 // Calibrated against the official A4 form's printed table geometry. These
 // coordinates are only a search anchor; tableGridDetection must still find
 // the actual row and column rules before an answer can be confirmed.
-const cagiOptionXs = [0.742, 0.805, 0.871, 0.944];
+// Measured from the committed blank CAGI form. The primary and late question
+// tables have slightly different printed column geometry, so they must not
+// share one approximate X-axis anchor.
+const cagiPrimaryOptionXs = [0.6898, 0.7468, 0.8092, 0.8805];
+const cagiLateOptionXs = [0.6901, 0.7471, 0.8092, 0.8771];
 export const cagiQuestionYs = [0.334, 0.358, 0.383, 0.401, 0.419, 0.436, 0.455];
 export const cagiLateQuestionYs = [0.512, 0.53];
 const schoolTypeCandidates = [
@@ -102,10 +106,10 @@ export const cagiTemplate: FormRecognitionTemplate = {
       candidates: gradeCandidates,
     },
     ...cagiQuestionYs.map((y, index) =>
-      makeChoiceGroup(`cagi.q${String(index + 1).padStart(2, '0')}`, [0, 1, 2, 3], cagiOptionXs, y),
+      makeChoiceGroup(`cagi.q${String(index + 1).padStart(2, '0')}`, [0, 1, 2, 3], cagiPrimaryOptionXs, y),
     ),
     ...cagiLateQuestionYs.map((y, index) =>
-      makeChoiceGroup(`cagi.q${String(index + 8).padStart(2, '0')}`, [0, 1, 2, 3], cagiOptionXs, y),
+      makeChoiceGroup(`cagi.q${String(index + 8).padStart(2, '0')}`, [0, 1, 2, 3], cagiLateOptionXs, y),
     ),
   ],
   fieldRegions: [

@@ -74,6 +74,24 @@ describe('table row detection', () => {
     expect(detection.diagnostics).toBeUndefined();
   });
 
+  it('anchors two-row CAGI groups to a usable content envelope even without a frame', async () => {
+    const filePath = path.join(fixtureDir, 'cagi-late-anchor.png');
+    await writeSyntheticRows(filePath, [845, 858, 890, 913], {
+      width: 1000,
+      height: 1600,
+      left: 200,
+      right: 860,
+    });
+    const image = await loadImageAnalysisData(filePath);
+    image.contentBounds = { left: 120, top: 250, right: 880, bottom: 1500 };
+    image.contentBoundsConfident = false;
+
+    const overrides = buildCagiRowDetection(image).overrides;
+
+    expect(overrides['cagi.q08']?.top).toBeGreaterThanOrEqual(875);
+    expect(overrides['cagi.q09']?.top).toBeGreaterThanOrEqual(902);
+  });
+
   it('returns empty CAGI overrides for images without a confident row structure', async () => {
     const filePath = path.join(fixtureDir, 'blank.png');
     fs.mkdirSync(path.dirname(filePath), { recursive: true });

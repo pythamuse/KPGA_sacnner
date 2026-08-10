@@ -26,6 +26,8 @@ const basicFields = ['basic.gender', 'basic.schoolType', 'basic.grade'];
 // Measured against the committed blank-form fixture. These are intentionally
 // independent from the old template anchors so a wrong-table match fails.
 const measuredCagiYs = [0.3335, 0.3592, 0.3848, 0.4018, 0.4189, 0.4360, 0.4531, 0.5120, 0.5300];
+const measuredCagiPrimaryXs = [0.6898, 0.7468, 0.8092, 0.8805];
+const measuredCagiLateXs = [0.6901, 0.7471, 0.8092, 0.8771];
 const measuredSatisfactionYs = [0.2852, 0.4293, 0.4775, 0.5257, 0.5610, 0.5968, 0.7510, 0.7815, 0.8120, 0.8420];
 const measuredBasicYs = [0.1540, 0.1788, 0.2180];
 const measuredSatisfactionQ01Xs = [0.6911, 0.7712, 0.8515, 0.9419];
@@ -83,6 +85,8 @@ describe('real blank-form detection', () => {
       ['satisfaction.q01'],
       measuredSatisfactionQ01Xs,
     );
+    expectGridXCentres(cagiImage, cagiGrid.overrides, ['cagi.q01'], measuredCagiPrimaryXs);
+    expectGridXCentres(cagiImage, cagiGrid.overrides, ['cagi.q08'], measuredCagiLateXs);
     expectTemplateXCentres(cagiImage, cagiGrid.overrides, basicFields);
 
     const basicCandidateCoordinates = [
