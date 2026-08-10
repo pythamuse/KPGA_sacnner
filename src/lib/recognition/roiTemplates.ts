@@ -59,7 +59,7 @@ const gradeCandidates = [
   { value: 'grade5', rect: rect(0.39, 0.218, 0.024, 0.02) },
   { value: 'grade6', rect: rect(0.535, 0.218, 0.024, 0.02) },
 ];
-const satisfactionFrequencyXs = [0.691, 0.772, 0.852, 0.933];
+export const satisfactionFrequencyXs = [0.691, 0.772, 0.852, 0.9419];
 const satisfactionBinaryXs = [0.849, 0.934];
 const satisfactionScaleXs = [0.583, 0.677, 0.764, 0.849, 0.943];
 export const satisfactionBinaryYs = [0.43, 0.478, 0.526, 0.561, 0.596];
@@ -120,7 +120,7 @@ export const satisfactionTemplate: FormRecognitionTemplate = {
     height: 656,
   },
   choiceGroups: [
-    makeChoiceGroup('satisfaction.q01', [1, 2, 3, 4], satisfactionFrequencyXs, 0.43, 0.025),
+    makeChoiceGroup('satisfaction.q01', [1, 2, 3, 4], satisfactionFrequencyXs, 0.2852, 0.025),
     ...satisfactionBinaryYs.map((y, index) =>
       makeChoiceGroup(`satisfaction.q${String(index + 2).padStart(2, '0')}`, [0, 1], satisfactionBinaryXs, y, 0.022),
     ),

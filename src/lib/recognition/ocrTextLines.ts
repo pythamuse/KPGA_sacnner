@@ -2,6 +2,7 @@ import sharp from 'sharp';
 import os from 'os';
 import path from 'path';
 import { createWorker, OEM, PSM, type Worker } from 'tesseract.js';
+import type { PixelRect } from './markDensity';
 
 export interface OcrTextLine {
   y: number;
@@ -11,6 +12,8 @@ export interface OcrTextLine {
 export interface OcrOptions {
   deadlineAt?: number;
 }
+
+export interface DigitOcrOptions extends OcrOptions {}
 
 const MIN_CONFIDENCE = 30;
 const MIN_LINE_HEIGHT = 6;
@@ -88,6 +91,62 @@ export async function detectOcrTextLines(
   }
 }
 
+/**
+ * Reads the small CAGI age box without allowing OCR to invent a value. The
+ * shared worker and deadline are intentional: age OCR is optional enrichment
+ * and must never extend the request budget.
+ */
+export async function recognizeDigitsInRegion(
+  imageBuffer: Buffer,
+  imageWidth: number,
+  imageHeight: number,
+  rect: PixelRect,
+  options?: DigitOcrOptions,
+): Promise<number | undefined> {
+  try {
+    if (!Buffer.isBuffer(imageBuffer) || imageWidth <= 0 || imageHeight <= 0) {
+      return undefined;
+    }
+
+    if (workerPromise && !workerReady) {
+      return undefined;
+    }
+
+    const remainingMs = options?.deadlineAt
+      ? Math.min(OCR_TOTAL_TIMEOUT_MS, options.deadlineAt - Date.now())
+      : OCR_TOTAL_TIMEOUT_MS;
+    if (remainingMs <= 0) {
+      return undefined;
+    }
+
+    const crop = buildPixelCropBounds(imageWidth, imageHeight, rect);
+    if (!crop) {
+      return undefined;
+    }
+
+    return await withTimeout(
+      recognizeDigitsCrop(imageBuffer, crop),
+      remainingMs,
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+export function parseAgeOcrText(text: unknown): number | undefined {
+  if (typeof text !== 'string') {
+    return undefined;
+  }
+
+  const normalized = text.replace(/\s/g, '');
+  if (!/^\d{1,2}$/.test(normalized)) {
+    return undefined;
+  }
+
+  const age = Number.parseInt(normalized, 10);
+  return Number.isInteger(age) && age >= 1 && age <= 20 ? age : undefined;
+}
+
 async function recognizeCrop(
   imageBuffer: Buffer,
   crop: { left: number; top: number; width: number; height: number },
@@ -119,6 +178,49 @@ async function recognizeCrop(
     return groupNearbyLines(lines);
   } catch {
     return [];
+  }
+}
+
+async function recognizeDigitsCrop(
+  imageBuffer: Buffer,
+  crop: { left: number; top: number; width: number; height: number },
+): Promise<number | undefined> {
+  let parametersApplied = false;
+
+  try {
+    const croppedBuffer = await sharp(imageBuffer)
+      .rotate()
+      .extract(crop)
+      .flatten({ background: '#ffffff' })
+      .grayscale()
+      .png()
+      .toBuffer();
+
+    const worker = await getWorker();
+    await worker.setParameters({
+      tessedit_char_whitelist: '0123456789',
+      tessedit_pageseg_mode: PSM.SINGLE_WORD,
+      preserve_interword_spaces: '0',
+    });
+    parametersApplied = true;
+
+    const result = await worker.recognize(croppedBuffer, {}, { text: true });
+    return parseAgeOcrText(result.data.text);
+  } catch {
+    return undefined;
+  } finally {
+    if (parametersApplied) {
+      try {
+        const worker = await getWorker();
+        await worker.setParameters({
+          tessedit_char_whitelist: '',
+          tessedit_pageseg_mode: PSM.SPARSE_TEXT,
+          preserve_interword_spaces: '1',
+        });
+      } catch {
+        // OCR is optional; a failed parameter reset must not escape this path.
+      }
+    }
   }
 }
 
@@ -162,6 +264,21 @@ function buildCropBounds(
   }
 
   return { left, top, width, height };
+}
+
+function buildPixelCropBounds(
+  imageWidth: number,
+  imageHeight: number,
+  rect: PixelRect,
+): { left: number; top: number; width: number; height: number } | null {
+  const left = clamp(Math.floor(rect.left), 0, imageWidth - 1);
+  const top = clamp(Math.floor(rect.top), 0, imageHeight - 1);
+  const right = clamp(Math.ceil(rect.right), left + 1, imageWidth);
+  const bottom = clamp(Math.ceil(rect.bottom), top + 1, imageHeight);
+  const width = right - left;
+  const height = bottom - top;
+
+  return width > 0 && height > 0 ? { left, top, width, height } : null;
 }
 
 function groupNearbyLines(lines: Array<OcrTextLine & { height: number }>): OcrTextLine[] {

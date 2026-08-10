@@ -6,6 +6,7 @@ import {
   type RowDetectionResult,
 } from './tableRowDetection';
 import { buildCagiGridDetection, buildSatisfactionGridDetection } from './tableGridDetection';
+import { recognizeDigitsInRegion } from './ocrTextLines';
 import fs from 'fs/promises';
 
 export type RecognitionCropSource = 'grid' | 'row' | 'fixed';
@@ -127,6 +128,20 @@ export async function recognizeStudentForms(
     // frame is uncertain. The confidence gate below still forbids auto values.
     const cagiGridDetection = buildCagiGridDetection(cagiImage);
     const cagiGridOverrides = cagiGridDetection.overrides;
+
+    const ageRect = cagiGridDetection.fieldRects['basic.age'];
+    if (canAutoRecognizeCagi && ageRect) {
+      const age = await recognizeDigitsInRegion(
+        cagiImageBuffer,
+        cagiImage.width,
+        cagiImage.height,
+        getAgeDigitsRect(ageRect),
+        toOcrOptions(options),
+      );
+      if (age !== undefined) {
+        draft.basic.age = age;
+      }
+    }
 
     if (!canAutoRecognizeCagi) {
       draft.warnings?.push('선별검사지의 종이 경계를 안정적으로 찾지 못해 자동 입력을 확정하지 않았습니다. 강조된 항목을 원본과 대조해 직접 확인해주세요.');
@@ -333,6 +348,21 @@ function unionPixelRects(rects: PixelRect[]): PixelRect {
     top: Math.min(...rects.map((rect) => rect.top)),
     right: Math.max(...rects.map((rect) => rect.right)),
     bottom: Math.max(...rects.map((rect) => rect.bottom)),
+  };
+}
+
+function getAgeDigitsRect(rect: PixelRect): PixelRect {
+  const width = rect.right - rect.left;
+  const height = rect.bottom - rect.top;
+
+  // The field preview intentionally includes "만 [ ] 세". OCR must receive
+  // only the inner number box so the printed borders and the Korean suffix
+  // cannot be mistaken for a digit.
+  return {
+    left: Math.round(rect.left + width * 0.04),
+    right: Math.round(rect.left + width * 0.47),
+    top: Math.round(rect.top + height * 0.08),
+    bottom: Math.round(rect.top + height * 0.65),
   };
 }
 

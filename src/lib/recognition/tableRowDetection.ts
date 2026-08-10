@@ -1,10 +1,12 @@
 import { ImageAnalysisData } from './markDensity';
 import {
+  cagiTemplate,
   cagiLateQuestionYs,
   cagiQuestionYs,
   satisfactionBinaryYs,
   satisfactionScaleYs,
   satisfactionTemplate,
+  type ChoiceGroup,
 } from './roiTemplates';
 import { detectOcrTextLines, type OcrOptions } from './ocrTextLines';
 
@@ -27,6 +29,8 @@ export interface RowDetectionResult {
   overrides: Record<string, RowYOverride>;
   diagnostics?: Record<string, string>;
 }
+
+const BASIC_CAGI_FIELDS = ['basic.gender', 'basic.schoolType', 'basic.grade'];
 
 // The printed form contains intentionally uneven rows (for example, two-line
 // questions). Match the measured template gap pattern instead of assuming all
@@ -215,6 +219,103 @@ export function buildCagiRowDetection(
   );
 }
 
+/**
+ * The CAGI basic-information table is a three-row, non-uniform layout. It
+ * cannot be registered as an N-by-M grid, but its row rules still provide a
+ * reliable vertical anchor. The caller keeps every candidate's template X
+ * coordinate and only consumes these Y bounds.
+ */
+export function buildCagiBasicRowDetection(image: ImageAnalysisData): RowDetectionResult {
+  const overrides: Record<string, RowYOverride> = {};
+  const diagnostics: Record<string, string> = {};
+  const groups = BASIC_CAGI_FIELDS
+    .map((field) => cagiTemplate.choiceGroups.find((group) => group.field === field))
+    .filter((group): group is ChoiceGroup => Boolean(group));
+
+  for (const group of groups) {
+    const result = findBasicGroupRow(image, group);
+    if (result.override) {
+      overrides[group.field] = result.override;
+    } else if (result.diagnostic) {
+      diagnostics[group.field] = result.diagnostic;
+    }
+  }
+
+  return {
+    overrides,
+    ...(Object.keys(diagnostics).length > 0 ? { diagnostics } : {}),
+  };
+}
+
+function findBasicGroupRow(
+  image: ImageAnalysisData,
+  group: ChoiceGroup,
+): { override?: RowYOverride; diagnostic?: string } {
+  const bounds = image.contentBounds || {
+    left: 0,
+    top: 0,
+    right: image.width,
+    bottom: image.height,
+  };
+  const baseWidth = bounds.right - bounds.left;
+  const baseHeight = bounds.bottom - bounds.top;
+  const candidateCenters = group.candidates.map((candidate) => candidate.rect.y + candidate.rect.height / 2);
+  const expectedCenter = average(candidateCenters);
+  const candidateTop = Math.min(...group.candidates.map((candidate) => candidate.rect.y));
+  const candidateBottom = Math.max(...group.candidates.map((candidate) => candidate.rect.y + candidate.rect.height));
+  const searchPadding = Math.max(24, Math.round(baseHeight * 0.026));
+  const xPadding = Math.max(12, Math.round(baseWidth * 0.035));
+  const searchTop = bounds.top + candidateTop * baseHeight - searchPadding;
+  const searchBottom = bounds.top + candidateBottom * baseHeight + searchPadding;
+  const answerLeft = Math.min(...group.candidates.map((candidate) => candidate.rect.x));
+  const answerRight = Math.max(...group.candidates.map((candidate) => candidate.rect.x + candidate.rect.width));
+  const lines = detectHorizontalLines(
+    image,
+    searchTop,
+    searchBottom,
+    bounds.left + answerLeft * baseWidth - xPadding,
+    bounds.left + answerRight * baseWidth + xPadding,
+    0.15,
+  ).map((line) => line.y).sort((a, b) => a - b);
+
+  const centerY = bounds.top + expectedCenter * baseHeight;
+  const minRowHeight = Math.max(
+    20,
+    Math.round(average(group.candidates.map((candidate) => candidate.rect.height)) * baseHeight * 0.75),
+  );
+  let bestPair: [number, number] | undefined;
+  let bestDistance = Number.POSITIVE_INFINITY;
+
+  for (let first = 0; first < lines.length - 1; first++) {
+    for (let second = first + 1; second < lines.length; second++) {
+      const top = lines[first];
+      const bottom = lines[second];
+      if (top >= centerY || bottom <= centerY || bottom - top < minRowHeight) {
+        continue;
+      }
+
+      const distance = Math.abs((top + bottom) / 2 - centerY);
+      if (distance < bestDistance) {
+        bestPair = [top, bottom];
+        bestDistance = distance;
+      }
+    }
+  }
+
+  if (!bestPair) {
+    return {
+      diagnostic: `행: insufficient_lines (기본정보 ${lines.length}/2개; ${group.field})`,
+    };
+  }
+
+  return {
+    override: {
+      top: clamp(Math.floor(bestPair[0]), 0, image.height - 1),
+      bottom: clamp(Math.ceil(bestPair[1]), 1, image.height),
+    },
+  };
+}
+
 export function buildSatisfactionRowOverrides(image: ImageAnalysisData): Record<string, RowYOverride>;
 export function buildSatisfactionRowOverrides(
   image: ImageAnalysisData,
@@ -268,7 +369,7 @@ async function buildSatisfactionRowDetectionAsync(
 
 function buildSatisfactionQuestionOneDetection(image: ImageAnalysisData): RowDetectionResult {
   const group = satisfactionTemplate.choiceGroups.find((item) => item.field === 'satisfaction.q01');
-  if (!group) {
+  if (!group || !image.contentBoundsConfident) {
     return { overrides: {} };
   }
 
@@ -615,4 +716,10 @@ function buildExpectedRelativeGaps(ys: number[]): number[] {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
+}
+
+function average(values: number[]): number {
+  return values.length === 0
+    ? 0
+    : values.reduce((sum, value) => sum + value, 0) / values.length;
 }

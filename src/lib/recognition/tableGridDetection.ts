@@ -1,6 +1,6 @@
 import { type ImageAnalysisData, type PixelBounds, type PixelRect } from './markDensity';
 import { cagiTemplate, satisfactionTemplate, type ChoiceGroup, type NormalizedRect } from './roiTemplates';
-import { detectHorizontalLines } from './tableRowDetection';
+import { buildCagiBasicRowDetection, detectHorizontalLines } from './tableRowDetection';
 
 export interface VerticalLine {
   x: number;
@@ -77,18 +77,46 @@ export function buildCagiGridDetection(image: ImageAnalysisData): GridDetectionR
   const basicGroups = getGroups(cagiTemplate.choiceGroups, [
     'basic.gender', 'basic.schoolType', 'basic.grade',
   ]);
+  const basicRowDetection = buildCagiBasicRowDetection(image);
+  const basicOverrides = buildBasicRowCellOverrides(image, basicGroups, basicRowDetection.overrides);
   const ageRegion = cagiTemplate.fieldRegions?.find((region) => region.field === 'basic.age');
 
   return {
-    overrides: result.overrides,
+    overrides: { ...result.overrides, ...basicOverrides },
     fieldRects: {
       ...result.fieldRects,
       ...mapGroupsToUnionRects(image, basicGroups),
       ...(ageRegion ? { [ageRegion.field]: toPixelRect(ageRegion.rect, getBounds(image)) } : {}),
     },
     registeredFields: result.registeredFields,
-    ...(result.diagnostics ? { diagnostics: result.diagnostics } : {}),
+    ...((result.diagnostics || basicRowDetection.diagnostics) ? {
+      diagnostics: { ...result.diagnostics, ...basicRowDetection.diagnostics },
+    } : {}),
   };
+}
+
+function buildBasicRowCellOverrides(
+  image: ImageAnalysisData,
+  groups: ChoiceGroup[],
+  rowOverrides: Record<string, { top: number; bottom: number }>,
+): FieldCellOverrides {
+  const bounds = getBounds(image);
+  const baseWidth = bounds.right - bounds.left;
+
+  return Object.fromEntries(groups.flatMap((group) => {
+    const row = rowOverrides[group.field];
+    if (!row) {
+      return [];
+    }
+
+    const cells = group.candidates.map((candidate) => ({
+      left: Math.round(bounds.left + candidate.rect.x * baseWidth),
+      right: Math.round(bounds.left + (candidate.rect.x + candidate.rect.width) * baseWidth),
+      top: row.top,
+      bottom: row.bottom,
+    }));
+    return [[group.field, cells]] as Array<[string, PixelRect[]]>;
+  }));
 }
 
 export function buildSatisfactionGridOverrides(image: ImageAnalysisData): FieldCellOverrides {
@@ -223,6 +251,7 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
       matchedColumns[columnIndex + 1],
       top,
       bottom,
+      group.field === 'satisfaction.q01',
     ));
 
     if (candidates.some((rect) => rect.right - rect.left < 4 || rect.bottom - rect.top < 4)) {
@@ -467,11 +496,17 @@ function getPositiveGaps(values: number[]): number[] | null {
   return gaps;
 }
 
-function buildCellCenterRect(left: number, right: number, top: number, bottom: number): PixelRect {
+function buildCellCenterRect(
+  left: number,
+  right: number,
+  top: number,
+  bottom: number,
+  isSingleRowSensitiveField = false,
+): PixelRect {
   // Hand-drawn circles often surround the pre-printed option marker. Keep the
   // outer ring inside the measured cell while still excluding table rules.
-  const horizontalInset = (right - left) * 0.13;
-  const verticalInset = (bottom - top) * 0.16;
+  const horizontalInset = (right - left) * (isSingleRowSensitiveField ? 0.24 : 0.13);
+  const verticalInset = (bottom - top) * (isSingleRowSensitiveField ? 0.24 : 0.16);
 
   return {
     left: Math.round(left + horizontalInset),
