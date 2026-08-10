@@ -1,6 +1,11 @@
 import { type ImageAnalysisData, type PixelBounds, type PixelRect } from './markDensity';
 import { cagiTemplate, satisfactionTemplate, type ChoiceGroup, type NormalizedRect } from './roiTemplates';
-import { detectHorizontalLines } from './tableRowDetection';
+import {
+  detectHorizontalLines,
+  EVEN_SPACING_CV_THRESHOLD,
+  getLineSpacingCoefficientOfVariation,
+  hasEvenSpacing,
+} from './tableRowDetection';
 
 export interface VerticalLine {
   x: number;
@@ -109,10 +114,7 @@ export function buildSatisfactionGridDetection(image: ImageAnalysisData): GridDe
 
   return {
     overrides: result.overrides,
-    fieldRects: {
-      ...result.fieldRects,
-      ...mapGroupsToUnionRects(image, q01Groups),
-    },
+    fieldRects: result.fieldRects,
     registeredFields: result.registeredFields,
     ...(result.diagnostics ? { diagnostics: result.diagnostics } : {}),
   };
@@ -125,7 +127,7 @@ function mergeGridDetection(image: ImageAnalysisData, specs: TableGridSpec[]): G
 
     return {
       overrides: { ...result.overrides, ...exact.overrides },
-      fieldRects: result.fieldRects,
+      fieldRects: { ...result.fieldRects, ...exact.fieldRects },
       registeredFields: result.registeredFields,
       ...(Object.keys(diagnostics).length > 0 ? { diagnostics } : {}),
     };
@@ -134,6 +136,7 @@ function mergeGridDetection(image: ImageAnalysisData, specs: TableGridSpec[]): G
 
 interface GridSpecDetectionResult {
   overrides: FieldCellOverrides;
+  fieldRects: Record<string, PixelRect>;
   diagnostics?: Record<string, string>;
 }
 
@@ -141,10 +144,11 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
   const { groups } = spec;
   const firstGroup = groups[0];
   if (!firstGroup || groups.some((group) => group.candidates.length !== firstGroup.candidates.length)) {
-    return { overrides: {} };
+    return { overrides: {}, fieldRects: {} };
   }
 
   const bounds = getBounds(image);
+  const fallbackFieldRects = mapGroupsToTableRegionRects(image, groups);
   const baseWidth = bounds.right - bounds.left;
   const baseHeight = bounds.bottom - bounds.top;
   const columnCenters = firstGroup.candidates.map((candidate) => candidate.rect.x + candidate.rect.width / 2);
@@ -158,8 +162,11 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
 
   const expectedX = expectedColumnLines.map((value) => bounds.left + value * baseWidth);
   const expectedY = expectedRowLines.map((value) => bounds.top + value * baseHeight);
-  const xTolerance = Math.max(8, Math.round(baseWidth * 0.035));
-  const yTolerance = Math.max(8, Math.round(baseHeight * 0.03));
+  // The template supplies a broad search anchor only. The detected rules are
+  // validated by count and self-consistent spacing below, not by proximity to
+  // each template boundary.
+  const xTolerance = Math.max(12, Math.round(baseWidth * 0.06));
+  const yTolerance = Math.max(12, Math.round(baseHeight * 0.05));
 
   const horizontalLines = detectHorizontalLines(
     image,
@@ -186,17 +193,19 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
   if (lineFailure) {
     return {
       overrides: {},
+      fieldRects: fallbackFieldRects,
       diagnostics: diagnosticsForGroups(groups, lineFailure),
     };
   }
 
-  const matchedRows = matchExpectedLines(horizontalLines, expectedY, yTolerance);
-  const matchedColumns = matchExpectedLines(verticalLines, expectedX, xTolerance);
-  const rowGapDeviation = matchedRows ? getMaxGapDeviation(matchedRows, expectedY) : null;
-  const columnGapDeviation = matchedColumns ? getMaxGapDeviation(matchedColumns, expectedX) : null;
-  if (!matchedRows || !matchedColumns || !hasConsistentGaps(matchedRows, expectedY) || !hasConsistentGaps(matchedColumns, expectedX)) {
+  const matchedRows = matchExpectedLines(horizontalLines, expectedY);
+  const matchedColumns = matchExpectedLines(verticalLines, expectedX);
+  const rowGapDeviation = matchedRows ? getLineSpacingCoefficientOfVariation(matchedRows) : null;
+  const columnGapDeviation = matchedColumns ? getLineSpacingCoefficientOfVariation(matchedColumns) : null;
+  if (!matchedRows || !matchedColumns || !hasEvenSpacing(matchedRows) || !hasEvenSpacing(matchedColumns)) {
     return {
       overrides: {},
+      fieldRects: fallbackFieldRects,
       diagnostics: diagnosticsForGroups(
         groups,
         formatGapMismatchDiagnostic(rowGapDeviation, columnGapDeviation),
@@ -219,6 +228,7 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
     if (candidates.some((rect) => rect.right - rect.left < 4 || rect.bottom - rect.top < 4)) {
       return {
         overrides: {},
+        fieldRects: fallbackFieldRects,
         diagnostics: diagnosticsForGroups(groups, '격자: gap_mismatch (감지선 사이의 셀 크기 부족)'),
       };
     }
@@ -226,7 +236,7 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
     overrides[group.field] = candidates;
   }
 
-  return { overrides };
+  return { overrides, fieldRects: fallbackFieldRects };
 }
 
 function classifyGridLineFailure(
@@ -264,6 +274,44 @@ function mapGroupsToUnionRects(
       bottom: Math.max(...cells.map((cell) => cell.bottom)),
     }];
   }));
+}
+
+function mapGroupsToTableRegionRects(
+  image: ImageAnalysisData,
+  groups: ChoiceGroup[],
+): Record<string, PixelRect> {
+  const bounds = image.contentBoundsConfident ? getBounds(image) : {
+    left: 0,
+    top: 0,
+    right: image.width,
+    bottom: image.height,
+  };
+  const candidates = groups.flatMap((group) => group.candidates.map((candidate) => candidate.rect));
+  if (candidates.length === 0) {
+    return {};
+  }
+
+  const paddingX = 0.02;
+  const paddingY = 0.02;
+  const left = Math.max(0, Math.min(...candidates.map((candidate) => candidate.x)) - paddingX);
+  const top = Math.max(0, Math.min(...candidates.map((candidate) => candidate.y)) - paddingY);
+  const right = Math.min(1, Math.max(...candidates.map((candidate) => candidate.x + candidate.width)) + paddingX);
+  const bottom = Math.min(1, Math.max(...candidates.map((candidate) => candidate.y + candidate.height)) + paddingY);
+  const region = toPixelRegionRect({ x: left, y: top, width: right - left, height: bottom - top }, bounds);
+
+  return Object.fromEntries(groups.map((group) => [group.field, region]));
+}
+
+function toPixelRegionRect(rect: NormalizedRect, bounds: PixelBounds): PixelRect {
+  const baseWidth = bounds.right - bounds.left;
+  const baseHeight = bounds.bottom - bounds.top;
+
+  return {
+    left: Math.round(bounds.left + rect.x * baseWidth),
+    top: Math.round(bounds.top + rect.y * baseHeight),
+    right: Math.round(bounds.left + (rect.x + rect.width) * baseWidth),
+    bottom: Math.round(bounds.top + (rect.y + rect.height) * baseHeight),
+  };
 }
 
 function toPixelRect(
@@ -311,47 +359,54 @@ function deriveCellBoundaries(centers: number[], fallbackSize: number): number[]
   return boundaries;
 }
 
-function matchExpectedLines(detected: number[], expected: number[], tolerance: number): number[] | null {
+function matchExpectedLines(detected: number[], expected: number[]): number[] | null {
   if (detected.length < expected.length || expected.length < 2) {
     return null;
   }
 
   const sorted = [...detected].sort((a, b) => a - b);
-  const matched: number[] = [];
-  let previous = -Infinity;
+  if (sorted.length === expected.length) {
+    return sorted;
+  }
 
-  for (const expectedLine of expected) {
-    const candidates = sorted.filter((line) => line > previous && Math.abs(line - expectedLine) <= tolerance);
-    const nearest = candidates.sort((a, b) => Math.abs(a - expectedLine) - Math.abs(b - expectedLine))[0];
-    if (nearest === undefined) {
-      return null;
+  // Expected coordinates are only a location anchor. If nearby rules are
+  // also inside the search band, select the most even count-sized subset and
+  // use the anchor only as a tie-breaker; never compare internal gaps with
+  // the template.
+  const expectedSpan = expected[expected.length - 1] - expected[0];
+  const expectedCenter = (expected[0] + expected[expected.length - 1]) / 2;
+  let best: number[] | undefined;
+  let bestScore = Number.POSITIVE_INFINITY;
+
+  const visit = (start: number, selected: number[]) => {
+    if (selected.length === expected.length) {
+      const coefficient = getLineSpacingCoefficientOfVariation(selected);
+      if (coefficient === null) {
+        return;
+      }
+
+      const candidate = selected;
+      const span = candidate[candidate.length - 1] - candidate[0];
+      const center = (candidate[0] + candidate[candidate.length - 1]) / 2;
+      const anchorScore = Math.abs(center - expectedCenter) / Math.max(expectedSpan, 1)
+        + Math.abs(span - expectedSpan) / Math.max(expectedSpan, 1);
+      const score = coefficient * 10 + anchorScore;
+      if (score < bestScore) {
+        best = [...candidate];
+        bestScore = score;
+      }
+      return;
     }
-    matched.push(nearest);
-    previous = nearest;
-  }
 
-  return matched;
-}
+    const remaining = expected.length - selected.length;
+    for (let index = start; index <= sorted.length - remaining; index++) {
+      visit(index + 1, [...selected, sorted[index]]);
+    }
+  };
 
-function getMaxGapDeviation(actual: number[], expected: number[]): number | null {
-  if (actual.length !== expected.length || actual.length < 2) {
-    return null;
-  }
+  visit(0, []);
 
-  const actualTotal = actual[actual.length - 1] - actual[0];
-  const expectedTotal = expected[expected.length - 1] - expected[0];
-  if (actualTotal <= 0 || expectedTotal <= 0) {
-    return null;
-  }
-
-  let maxDeviation = 0;
-  for (let index = 1; index < actual.length; index++) {
-    const actualGap = (actual[index] - actual[index - 1]) / actualTotal;
-    const expectedGap = (expected[index] - expected[index - 1]) / expectedTotal;
-    maxDeviation = Math.max(maxDeviation, Math.abs(actualGap - expectedGap));
-  }
-
-  return maxDeviation;
+  return best || null;
 }
 
 function formatGapMismatchDiagnostic(
@@ -363,29 +418,7 @@ function formatGapMismatchDiagnostic(
   }
 
   const maxDeviation = Math.max(rowGapDeviation, columnGapDeviation);
-  return `격자: gap_mismatch (감지선 간격 패턴 불일치; 최대 편차 ${Math.round(maxDeviation * 100)}% (허용 18%))`;
-}
-
-function hasConsistentGaps(actual: number[], expected: number[]): boolean {
-  if (actual.length !== expected.length || actual.length < 2) {
-    return false;
-  }
-
-  const actualTotal = actual[actual.length - 1] - actual[0];
-  const expectedTotal = expected[expected.length - 1] - expected[0];
-  if (actualTotal <= 0 || expectedTotal <= 0) {
-    return false;
-  }
-
-  for (let index = 1; index < actual.length; index++) {
-    const actualGap = (actual[index] - actual[index - 1]) / actualTotal;
-    const expectedGap = (expected[index] - expected[index - 1]) / expectedTotal;
-    if (Math.abs(actualGap - expectedGap) > 0.18) {
-      return false;
-    }
-  }
-
-  return true;
+  return `격자: gap_mismatch (감지선 간격 패턴 불일치; 최대 편차 ${Math.round(maxDeviation * 100)}% (허용 ${Math.round(EVEN_SPACING_CV_THRESHOLD * 100)}%))`;
 }
 
 function buildCellCenterRect(left: number, right: number, top: number, bottom: number): PixelRect {

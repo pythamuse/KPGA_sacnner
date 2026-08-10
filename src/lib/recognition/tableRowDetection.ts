@@ -27,6 +27,25 @@ export interface RowDetectionResult {
   diagnostics?: Record<string, string>;
 }
 
+// A photographed form can introduce some perspective and rasterization noise,
+// but a real answer table should still have substantially even rule spacing.
+// This is intentionally strict enough to reject a visibly non-uniform line
+// sequence while allowing ordinary scan/photo variation.
+export const EVEN_SPACING_CV_THRESHOLD = 0.25;
+
+export function getLineSpacingCoefficientOfVariation(linePositions: number[]): number | null {
+  const gaps = getPositiveGaps(linePositions);
+  return gaps ? coefficientOfVariation(gaps) : null;
+}
+
+export function hasEvenSpacing(
+  linePositions: number[],
+  threshold = EVEN_SPACING_CV_THRESHOLD,
+): boolean {
+  const coefficient = getLineSpacingCoefficientOfVariation(linePositions);
+  return coefficient !== null && coefficient <= threshold;
+}
+
 export function detectHorizontalLines(
   image: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>,
   searchTop: number,
@@ -87,17 +106,20 @@ export function detectHorizontalLines(
 export function matchRowPattern(
   detectedLines: HorizontalLine[],
   expectedRelativeGaps: number[],
-  toleranceRatio = 0.35,
+  toleranceRatio = EVEN_SPACING_CV_THRESHOLD,
 ): RowMatchResult | null {
-  return evaluateRowPattern(detectedLines, expectedRelativeGaps, toleranceRatio).match;
+  return evaluateRowPattern(
+    detectedLines,
+    expectedRelativeGaps.length + 1,
+    toleranceRatio,
+  ).match;
 }
 
 function evaluateRowPattern(
   detectedLines: HorizontalLine[],
-  expectedRelativeGaps: number[],
-  toleranceRatio = 0.35,
+  requiredLineCount: number,
+  toleranceRatio = EVEN_SPACING_CV_THRESHOLD,
 ): { match: RowMatchResult | null; failure?: RowPatternFailure } {
-  const requiredLineCount = expectedRelativeGaps.length + 1;
   if (requiredLineCount < 2) {
     return {
       match: null,
@@ -124,25 +146,17 @@ function evaluateRowPattern(
 
   for (let start = 0; start <= sortedLines.length - requiredLineCount; start++) {
     const candidateLines = sortedLines.slice(start, start + requiredLineCount);
-    const gaps = getPositiveGaps(candidateLines.map((line) => line.y));
-    if (!gaps) {
+    const lineYs = candidateLines.map((line) => line.y);
+    const candidateDeviation = getLineSpacingCoefficientOfVariation(lineYs);
+    if (candidateDeviation === null) {
       continue;
     }
 
-    const firstGap = gaps[0];
-    const actualRelativeGaps = gaps.map((gap) => gap / firstGap);
-    const deviations = actualRelativeGaps.map((gap, index) => {
-      const expected = expectedRelativeGaps[index];
-      return Math.abs(gap - expected) / expected;
-    });
-    const candidateDeviation = Math.max(...deviations);
     if (bestDeviation === undefined || candidateDeviation < bestDeviation) {
       bestDeviation = candidateDeviation;
     }
 
-    const matched = deviations.every((deviation) => deviation <= toleranceRatio);
-
-    if (matched) {
+    if (hasEvenSpacing(lineYs, toleranceRatio)) {
       return {
         match: {
           lineYs: candidateLines.map((line) => line.y),
@@ -191,14 +205,20 @@ export function buildCagiRowDetection(
   imageBuffer?: Buffer,
   ocrOptions?: OcrOptions,
 ): RowDetectionResult | Promise<RowDetectionResult> {
-  const questionYs = [...cagiQuestionYs, ...cagiLateQuestionYs];
-  const fields = questionYs.map((_, index) => `cagi.q${String(index + 1).padStart(2, '0')}`);
+  const primaryFields = cagiQuestionYs.map((_, index) => `cagi.q${String(index + 1).padStart(2, '0')}`);
+  const lateFields = cagiLateQuestionYs.map((_, index) => `cagi.q${String(index + 8).padStart(2, '0')}`);
 
   if (imageBuffer) {
-    return buildRowDetectionAsync(image, imageBuffer, questionYs, fields, ocrOptions);
+    return Promise.all([
+      buildRowDetectionAsync(image, imageBuffer, cagiQuestionYs, primaryFields, ocrOptions),
+      buildRowDetectionAsync(image, imageBuffer, cagiLateQuestionYs, lateFields, ocrOptions),
+    ]).then(([primary, late]) => mergeRowDetectionResults(primary, late));
   }
 
-  return buildRowDetectionSync(image, questionYs, fields);
+  return mergeRowDetectionResults(
+    buildRowDetectionSync(image, cagiQuestionYs, primaryFields),
+    buildRowDetectionSync(image, cagiLateQuestionYs, lateFields),
+  );
 }
 
 export function buildSatisfactionRowOverrides(image: ImageAnalysisData): Record<string, RowYOverride>;
@@ -342,8 +362,8 @@ function findRowMatch(
   imageBuffer?: Buffer,
   ocrOptions?: OcrOptions,
 ): RowMatchResult | Promise<RowMatchResult> {
-  const expectedRelativeGaps = buildExpectedRelativeGaps(templateYs);
-  if (expectedRelativeGaps.length === 0) {
+  const requiredLineCount = templateYs.length;
+  if (requiredLineCount < 2) {
     return createFailureResult({ reason: 'lines_undetected', detail: '행 선 패턴 없음' }, '픽셀');
   }
 
@@ -354,8 +374,18 @@ function findRowMatch(
     bottom: image.height,
   };
   const baseWidth = bounds.right - bounds.left;
-  const searchTop = image.height * 0.15;
-  const searchBottom = image.height * 0.9;
+  // A non-confident content bound can be just the dark answer lines rather
+  // than the page frame. In that case template Ys still refer to full-page
+  // coordinates, so use the image itself as the broad search anchor.
+  const yReference = image.contentBoundsConfident ? bounds : {
+    top: 0,
+    bottom: image.height,
+  };
+  const templateTop = yReference.top + Math.min(...templateYs) * (yReference.bottom - yReference.top);
+  const templateBottom = yReference.top + Math.max(...templateYs) * (yReference.bottom - yReference.top);
+  const searchPadding = Math.max(24, Math.round((yReference.bottom - yReference.top) * 0.04));
+  const searchTop = clamp(templateTop - searchPadding, 0, image.height - 1);
+  const searchBottom = clamp(templateBottom + searchPadding, searchTop + 1, image.height);
   const xLeft = bounds.left + baseWidth * 0.08;
   const xRight = bounds.right - baseWidth * 0.02;
 
@@ -363,7 +393,7 @@ function findRowMatch(
     return findRowMatchWithOcrFallback(
       image,
       imageBuffer,
-      expectedRelativeGaps,
+      requiredLineCount,
       searchTop,
       searchBottom,
       xLeft,
@@ -373,9 +403,9 @@ function findRowMatch(
   }
 
   const detectedLines = detectHorizontalLines(image, searchTop, searchBottom, xLeft, xRight);
-  const pixelEvaluation = evaluateRowPattern(detectedLines, expectedRelativeGaps);
+  const pixelEvaluation = evaluateRowPattern(detectedLines, requiredLineCount);
   return pixelEvaluation.match || createFailureResult(
-    pixelEvaluation.failure || classifyRowPatternFailure(detectedLines.length, expectedRelativeGaps.length + 1),
+    pixelEvaluation.failure || classifyRowPatternFailure(detectedLines.length, requiredLineCount),
     '픽셀',
   );
 }
@@ -383,7 +413,7 @@ function findRowMatch(
 async function findRowMatchWithOcrFallback(
   image: ImageAnalysisData,
   imageBuffer: Buffer,
-  expectedRelativeGaps: number[],
+  requiredLineCount: number,
   searchTop: number,
   searchBottom: number,
   xLeft: number,
@@ -391,12 +421,12 @@ async function findRowMatchWithOcrFallback(
   ocrOptions?: OcrOptions,
 ): Promise<RowMatchResult> {
   const detectedLines = detectHorizontalLines(image, searchTop, searchBottom, xLeft, xRight);
-  const pixelEvaluation = evaluateRowPattern(detectedLines, expectedRelativeGaps);
+  const pixelEvaluation = evaluateRowPattern(detectedLines, requiredLineCount);
   if (pixelEvaluation.match?.confident) {
     return pixelEvaluation.match;
   }
   const pixelFailure = pixelEvaluation.failure
-    || classifyRowPatternFailure(detectedLines.length, expectedRelativeGaps.length + 1);
+    || classifyRowPatternFailure(detectedLines.length, requiredLineCount);
 
   const ocrLines = await detectOcrTextLines(
     imageBuffer,
@@ -408,12 +438,12 @@ async function findRowMatchWithOcrFallback(
     xRight,
     ocrOptions,
   );
-  const ocrEvaluation = evaluateRowPattern(ocrLines, expectedRelativeGaps);
+  const ocrEvaluation = evaluateRowPattern(ocrLines, requiredLineCount);
   if (ocrEvaluation.match?.confident) {
     return ocrEvaluation.match;
   }
   const ocrFailure = ocrEvaluation.failure
-    || classifyRowPatternFailure(ocrLines.length, expectedRelativeGaps.length + 1);
+    || classifyRowPatternFailure(ocrLines.length, requiredLineCount);
 
   return {
     lineYs: [],
@@ -454,16 +484,6 @@ function classifyRowPatternFailure(found: number, required: number): RowPatternF
   }
 
   return { reason: 'gap_mismatch', detail: '행 선 간격 패턴 불일치' };
-}
-
-function buildExpectedRelativeGaps(ys: number[]): number[] {
-  const gaps = getPositiveGaps(ys);
-  if (!gaps) {
-    return [];
-  }
-
-  const firstGap = gaps[0];
-  return gaps.map((gap) => gap / firstGap);
 }
 
 function buildOverridesFromRowCenters(
@@ -514,6 +534,20 @@ function getPositiveGaps(values: number[]): number[] | null {
   }
 
   return gaps;
+}
+
+function coefficientOfVariation(values: number[]): number {
+  if (values.length === 0) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+  if (mean <= 0) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length;
+  return Math.sqrt(variance) / mean;
 }
 
 function clamp(value: number, min: number, max: number): number {

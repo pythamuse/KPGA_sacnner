@@ -114,7 +114,7 @@ describe('table grid detection', () => {
 
     expect(detection.overrides['cagi.q01']).toBeUndefined();
     expect(diagnostic).toContain('gap_mismatch');
-    expect(diagnostic).toMatch(/최대 편차 \d+% \(허용 18%\)/);
+    expect(diagnostic).toMatch(/최대 편차 \d+% \(허용 25%\)/);
     expect(Number(diagnostic?.match(/최대 편차 (\d+)%/)?.[1])).toBeGreaterThanOrEqual(0);
   });
 });

@@ -174,7 +174,9 @@ export async function recognizeStudentForms(
     }
 
     for (const [field, rect] of Object.entries(cagiGridDetection.fieldRects)) {
-      recognitionCropRects[field] = rect;
+      if (!recognitionCropRects[field] && recognitionCropSource[field] === 'fixed') {
+        recognitionCropRects[field] = rect;
+      }
       recognitionCropSource[field] = recognitionCropSource[field] || 'fixed';
     }
   } catch {
@@ -231,7 +233,7 @@ export async function recognizeStudentForms(
     }
 
     for (const [field, rect] of Object.entries(satisfactionGridDetection.fieldRects)) {
-      if (!recognitionCropRects[field]) {
+      if (!recognitionCropRects[field] && recognitionCropSource[field] === 'fixed') {
         recognitionCropRects[field] = rect;
       }
       recognitionCropSource[field] = recognitionCropSource[field] || 'fixed';

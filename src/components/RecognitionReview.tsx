@@ -27,7 +27,7 @@ const confidenceRank = {
 const cropSourceLabel = {
   grid: '격자 검출',
   row: '행 검출',
-  fixed: '고정 좌표',
+  fixed: '위치 특정 실패 (구역 전체 표시)',
 };
 
 export default function RecognitionReview({

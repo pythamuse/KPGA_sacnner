@@ -20,7 +20,7 @@ afterAll(() => {
 });
 
 describe('table row detection', () => {
-  it('matches a contiguous subset of horizontal lines to an expected gap pattern', () => {
+  it('matches a contiguous subset of horizontal lines when their spacing is even', () => {
     const result = matchRowPattern(
       [{ y: 10 }, { y: 30 }, { y: 50 }, { y: 60 }, { y: 70 }, { y: 80 }, { y: 90 }],
       [1, 1, 1, 1],
@@ -41,6 +41,18 @@ describe('table row detection', () => {
     expect(result).toBeNull();
   });
 
+  it('accepts even detected rows without matching the template gap ratios', () => {
+    const result = matchRowPattern(
+      [{ y: 100 }, { y: 125 }, { y: 150 }, { y: 175 }, { y: 200 }],
+      [1, 1, 0.729, 0.729],
+    );
+
+    expect(result).toEqual({
+      lineYs: [100, 125, 150, 175, 200],
+      confident: true,
+    });
+  });
+
   it('detects dark horizontal line groups in y order', async () => {
     const image = await makeSyntheticRows([80, 100, 125], 'detected-lines.png');
 
@@ -49,7 +61,7 @@ describe('table row detection', () => {
     expect(lines.map((line) => Math.round(line.y))).toEqual([80, 100, 125]);
   });
 
-  it('builds CAGI row overrides when the detected rows match the template gap pattern', async () => {
+  it('builds CAGI row overrides when each detected table has even row spacing', async () => {
     const rowYs = [334, 358, 383, 401, 419, 436, 455, 512, 530];
     const filePath = path.join(fixtureDir, 'cagi-rows.png');
     await writeSyntheticRows(filePath, rowYs);
@@ -107,22 +119,22 @@ describe('table row detection', () => {
 
     expect(detection.overrides).toEqual({});
     expect(diagnostic).toContain('insufficient_lines');
-    expect(diagnostic).toContain('1/9');
+    expect(diagnostic).toContain('1/7');
   });
 
   it('reports gap_mismatch when enough rows have the wrong spacing pattern', async () => {
     const filePath = path.join(fixtureDir, 'gap-mismatch-diagnostic.png');
-    await writeSyntheticRows(filePath, [200, 210, 220, 230, 240, 300, 310, 320, 330]);
+    await writeSyntheticRows(filePath, [300, 310, 335, 365, 400, 440, 490]);
     const detection = buildCagiRowDetection(await loadImageAnalysisData(filePath));
     const diagnostic = detection.diagnostics?.['cagi.q01'];
 
     expect(detection.overrides).toEqual({});
     expect(diagnostic).toContain('gap_mismatch');
-    expect(diagnostic).toMatch(/최대 편차 \d+% \(허용 35%\)/);
+    expect(diagnostic).toMatch(/최대 편차 \d+% \(허용 25%\)/);
     expect(Number(diagnostic?.match(/최대 편차 (\d+)%/)?.[1])).toBeGreaterThanOrEqual(0);
   });
 
-  it('matches satisfaction row groups independently and skips q01', async () => {
+  it('matches satisfaction row groups independently by even spacing and skips q01', async () => {
     const filePath = path.join(fixtureDir, 'satisfaction-rows.png');
     await writeSyntheticRows(filePath, [430, 478, 526, 561, 596, 750, 780, 811, 841]);
     const image = await loadImageAnalysisData(filePath);

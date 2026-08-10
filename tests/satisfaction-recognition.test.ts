@@ -83,6 +83,9 @@ describe('만족도 ROI 인식', () => {
     expect(draft.recognitionCropSource?.['cagi.q01']).toBe('fixed');
     expect(draft.recognitionCropDiagnostic?.['cagi.q01']).toContain('격자: insufficient_lines');
     expect(draft.recognitionCropDiagnostic?.['satisfaction.q02']).toMatch(/격자: (lines_undetected|insufficient_lines)/);
+    const fallbackRect = draft.recognitionCropRects?.['satisfaction.q02'];
+    expect(fallbackRect).toEqual(draft.recognitionCropRects?.['satisfaction.q06']);
+    expect((fallbackRect?.bottom || 0) - (fallbackRect?.top || 0)).toBeGreaterThan(200);
   });
 });
 
