@@ -75,6 +75,10 @@ export function restoreExtLst(origPath: string, destPath: string) {
     throw new Error('복원 대상 엑셀 파일이 존재하지 않습니다.');
   }
 
+  if (path.resolve(origPath).toLowerCase() === path.resolve(destPath).toLowerCase()) {
+    throw new Error('원본 템플릿에는 확장 영역을 복원할 수 없습니다. 작업 파일 사본을 사용하세요.');
+  }
+
   const origZip = new AdmZip(origPath);
   const origXml = origZip.readAsText('xl/worksheets/sheet1.xml');
   const extLstMatch = origXml.match(/<extLst>[\s\S]*?<\/extLst>/);

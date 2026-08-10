@@ -1,13 +1,18 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import fs from 'fs';
 import path from 'path';
-import { initJobWorkspace, loadJobWorkbooks, getJobDir, restoreExtLst } from '../src/lib/excel/templateManager';
+import { getTemplateFiles, initJobWorkspace, loadJobWorkbooks, getJobDir, restoreExtLst } from '../src/lib/excel/templateManager';
 import { writeCagiRow } from '../src/lib/excel/writeCagi';
 import { writeSatisfactionRow } from '../src/lib/excel/writeSatisfaction';
 import { verifyWorkbooks } from '../src/lib/excel/verifyWorkbook';
 import { StudentData } from '../src/lib/validation/types';
 
 const TEST_JOB_ID = 'test-job-excel';
+const templateFiles = getTemplateFiles();
+const templateSnapshots = {
+  cagi: fs.readFileSync(templateFiles.cagiPath),
+  satisfaction: fs.readFileSync(templateFiles.satisfactionPath),
+};
 
 describe('엑셀 입출력 및 보존 테스트', () => {
   const sampleStudent: StudentData = {
@@ -20,7 +25,9 @@ describe('엑셀 입출력 및 보존 테스트', () => {
 
   beforeAll(() => {
     // 테스트용 세션 초기화
-    initJobWorkspace(TEST_JOB_ID);
+    const files = initJobWorkspace(TEST_JOB_ID);
+    expect(path.resolve(files.cagiPath)).not.toBe(path.resolve(templateFiles.cagiPath));
+    expect(path.resolve(files.satisfactionPath)).not.toBe(path.resolve(templateFiles.satisfactionPath));
   });
 
   afterAll(() => {
@@ -29,6 +36,8 @@ describe('엑셀 입출력 및 보존 테스트', () => {
     if (fs.existsSync(dir)) {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+    expect(fs.readFileSync(templateFiles.cagiPath)).toEqual(templateSnapshots.cagi);
+    expect(fs.readFileSync(templateFiles.satisfactionPath)).toEqual(templateSnapshots.satisfaction);
   });
 
   it('단일 학생 저장 및 엑셀 재검증 (드롭다운 보존 포함)', async () => {
@@ -46,10 +55,8 @@ describe('엑셀 입출력 및 보존 테스트', () => {
     await satisfactionWorkbook.xlsx.writeFile(satisfactionPath);
 
     // x14:dataValidations 드롭다운 유효성 검사 복원
-    const origCagi = path.resolve(process.cwd(), 'templates', 'cagi', '양식_청소년도박문제선별검사_CAGI_3.xlsx');
-    const origSat = path.resolve(process.cwd(), 'templates', 'satisfaction', '청소년예방교육만족도.xlsx');
-    restoreExtLst(origCagi, cagiPath);
-    restoreExtLst(origSat, satisfactionPath);
+    restoreExtLst(templateFiles.cagiPath, cagiPath);
+    restoreExtLst(templateFiles.satisfactionPath, satisfactionPath);
 
     // 저장된 파일 검증
     const result = await verifyWorkbooks(cagiPath, satisfactionPath, [sampleStudent]);
@@ -87,10 +94,8 @@ describe('엑셀 입출력 및 보존 테스트', () => {
     await satisfactionWorkbook.xlsx.writeFile(satisfactionPath);
 
     // x14:dataValidations 드롭다운 유효성 검사 복원
-    const origCagi = path.resolve(process.cwd(), 'templates', 'cagi', '양식_청소년도박문제선별검사_CAGI_3.xlsx');
-    const origSat = path.resolve(process.cwd(), 'templates', 'satisfaction', '청소년예방교육만족도.xlsx');
-    restoreExtLst(origCagi, cagiPath);
-    restoreExtLst(origSat, satisfactionPath);
+    restoreExtLst(templateFiles.cagiPath, cagiPath);
+    restoreExtLst(templateFiles.satisfactionPath, satisfactionPath);
 
     const result = await verifyWorkbooks(cagiPath, satisfactionPath, students);
     expect(result.errors).toEqual([]);

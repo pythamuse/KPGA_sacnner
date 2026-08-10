@@ -1,11 +1,6 @@
 import { type ImageAnalysisData, type PixelBounds, type PixelRect } from './markDensity';
 import { cagiTemplate, satisfactionTemplate, type ChoiceGroup, type NormalizedRect } from './roiTemplates';
-import {
-  detectHorizontalLines,
-  EVEN_SPACING_CV_THRESHOLD,
-  getLineSpacingCoefficientOfVariation,
-  hasEvenSpacing,
-} from './tableRowDetection';
+import { detectHorizontalLines } from './tableRowDetection';
 
 export interface VerticalLine {
   x: number;
@@ -16,6 +11,8 @@ export type FieldCellOverrides = Record<string, PixelRect[]>;
 interface TableGridSpec {
   groups: ChoiceGroup[];
 }
+
+const GRID_TEMPLATE_TOLERANCE_RATIO = 0.18;
 
 export interface GridDetectionResult {
   overrides: FieldCellOverrides;
@@ -162,20 +159,12 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
 
   const expectedX = expectedColumnLines.map((value) => bounds.left + value * baseWidth);
   const expectedY = expectedRowLines.map((value) => bounds.top + value * baseHeight);
-  // The template supplies a broad search anchor only. The detected rules are
-  // validated by count and self-consistent spacing below, not by proximity to
-  // each template boundary.
+  // The template supplies both the search anchor and the expected uneven gap
+  // pattern. The latter is important because two-line questions create rows
+  // that are intentionally taller than their neighbours.
   const xTolerance = Math.max(12, Math.round(baseWidth * 0.06));
   const yTolerance = Math.max(12, Math.round(baseHeight * 0.05));
 
-  const horizontalLines = detectHorizontalLines(
-    image,
-    expectedY[0] - yTolerance,
-    expectedY[expectedY.length - 1] + yTolerance,
-    expectedX[0] - xTolerance,
-    expectedX[expectedX.length - 1] + xTolerance,
-    0.3,
-  ).map((line) => line.y);
   const verticalLines = detectVerticalLines(
     image,
     expectedY[0] - yTolerance,
@@ -183,6 +172,18 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
     expectedX[0] - xTolerance,
     expectedX[expectedX.length - 1] + xTolerance,
   ).map((line) => line.x);
+  const matchedColumns = matchTemplateLinePattern(verticalLines, expectedX);
+  const horizontalSearchLeft = matchedColumns?.[0] ?? expectedX[0] - xTolerance;
+  const horizontalSearchRight = matchedColumns?.[matchedColumns.length - 1]
+    ?? expectedX[expectedX.length - 1] + xTolerance;
+  const horizontalLines = detectHorizontalLines(
+    image,
+    expectedY[0] - yTolerance,
+    expectedY[expectedY.length - 1] + yTolerance,
+    horizontalSearchLeft,
+    horizontalSearchRight,
+    0.3,
+  ).map((line) => line.y);
 
   const lineFailure = classifyGridLineFailure(
     horizontalLines.length,
@@ -198,11 +199,10 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
     };
   }
 
-  const matchedRows = matchExpectedLines(horizontalLines, expectedY);
-  const matchedColumns = matchExpectedLines(verticalLines, expectedX);
-  const rowGapDeviation = matchedRows ? getLineSpacingCoefficientOfVariation(matchedRows) : null;
-  const columnGapDeviation = matchedColumns ? getLineSpacingCoefficientOfVariation(matchedColumns) : null;
-  if (!matchedRows || !matchedColumns || !hasEvenSpacing(matchedRows) || !hasEvenSpacing(matchedColumns)) {
+  const matchedRows = matchTemplateLinePattern(horizontalLines, expectedY);
+  const rowGapDeviation = getTemplateGapDeviation(matchedRows || horizontalLines, expectedY);
+  const columnGapDeviation = getTemplateGapDeviation(matchedColumns || verticalLines, expectedX);
+  if (!matchedRows || !matchedColumns) {
     return {
       overrides: {},
       fieldRects: fallbackFieldRects,
@@ -359,20 +359,12 @@ function deriveCellBoundaries(centers: number[], fallbackSize: number): number[]
   return boundaries;
 }
 
-function matchExpectedLines(detected: number[], expected: number[]): number[] | null {
+function matchTemplateLinePattern(detected: number[], expected: number[]): number[] | null {
   if (detected.length < expected.length || expected.length < 2) {
     return null;
   }
 
   const sorted = [...detected].sort((a, b) => a - b);
-  if (sorted.length === expected.length) {
-    return sorted;
-  }
-
-  // Expected coordinates are only a location anchor. If nearby rules are
-  // also inside the search band, select the most even count-sized subset and
-  // use the anchor only as a tie-breaker; never compare internal gaps with
-  // the template.
   const expectedSpan = expected[expected.length - 1] - expected[0];
   const expectedCenter = (expected[0] + expected[expected.length - 1]) / 2;
   let best: number[] | undefined;
@@ -380,19 +372,22 @@ function matchExpectedLines(detected: number[], expected: number[]): number[] | 
 
   const visit = (start: number, selected: number[]) => {
     if (selected.length === expected.length) {
-      const coefficient = getLineSpacingCoefficientOfVariation(selected);
-      if (coefficient === null) {
+      const deviations = getNormalizedGapDeviations(selected, expected);
+      if (!deviations) {
         return;
       }
 
-      const candidate = selected;
-      const span = candidate[candidate.length - 1] - candidate[0];
-      const center = (candidate[0] + candidate[candidate.length - 1]) / 2;
+      if (!deviations.every((deviation) => deviation <= GRID_TEMPLATE_TOLERANCE_RATIO)) {
+        return;
+      }
+
+      const span = selected[selected.length - 1] - selected[0];
+      const center = (selected[0] + selected[selected.length - 1]) / 2;
       const anchorScore = Math.abs(center - expectedCenter) / Math.max(expectedSpan, 1)
         + Math.abs(span - expectedSpan) / Math.max(expectedSpan, 1);
-      const score = coefficient * 10 + anchorScore;
+      const score = Math.max(...deviations) + anchorScore;
       if (score < bestScore) {
-        best = [...candidate];
+        best = [...selected];
         bestScore = score;
       }
       return;
@@ -405,7 +400,6 @@ function matchExpectedLines(detected: number[], expected: number[]): number[] | 
   };
 
   visit(0, []);
-
   return best || null;
 }
 
@@ -418,7 +412,59 @@ function formatGapMismatchDiagnostic(
   }
 
   const maxDeviation = Math.max(rowGapDeviation, columnGapDeviation);
-  return `격자: gap_mismatch (감지선 간격 패턴 불일치; 최대 편차 ${Math.round(maxDeviation * 100)}% (허용 ${Math.round(EVEN_SPACING_CV_THRESHOLD * 100)}%))`;
+  return `격자: gap_mismatch (감지선 간격 패턴 불일치; 최대 편차 ${Math.round(maxDeviation * 100)}% (허용 ${Math.round(GRID_TEMPLATE_TOLERANCE_RATIO * 100)}%))`;
+}
+
+function getTemplateGapDeviation(actual: number[] | null, expected: number[]): number | null {
+  if (actual && actual.length === expected.length) {
+    return getRelativeGapDeviation(actual, expected);
+  }
+
+  return actual ? getRelativeGapDeviation(actual, expected) : null;
+}
+
+function getRelativeGapDeviation(actual: number[], expected: number[]): number | null {
+  const deviations = getNormalizedGapDeviations(actual, expected);
+  return deviations ? Math.max(...deviations) : null;
+}
+
+function getNormalizedGapDeviations(actual: number[], expected: number[]): number[] | null {
+  if (actual.length !== expected.length || actual.length < 2) {
+    return null;
+  }
+
+  const actualGaps = getPositiveGaps(actual);
+  const expectedGaps = getPositiveGaps(expected);
+  if (!actualGaps || !expectedGaps) {
+    return null;
+  }
+
+  const actualTotal = actual[actual.length - 1] - actual[0];
+  const expectedTotal = expected[expected.length - 1] - expected[0];
+  if (actualTotal <= 0 || expectedTotal <= 0) {
+    return null;
+  }
+
+  return actualGaps.map((gap, index) =>
+    Math.abs(gap / actualTotal - expectedGaps[index] / expectedTotal),
+  );
+}
+
+function getPositiveGaps(values: number[]): number[] | null {
+  if (values.length < 2) {
+    return null;
+  }
+
+  const gaps: number[] = [];
+  for (let index = 1; index < values.length; index++) {
+    const gap = values[index] - values[index - 1];
+    if (gap <= 0) {
+      return null;
+    }
+    gaps.push(gap);
+  }
+
+  return gaps;
 }
 
 function buildCellCenterRect(left: number, right: number, top: number, bottom: number): PixelRect {

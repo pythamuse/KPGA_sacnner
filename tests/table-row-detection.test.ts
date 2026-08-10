@@ -41,16 +41,13 @@ describe('table row detection', () => {
     expect(result).toBeNull();
   });
 
-  it('accepts even detected rows without matching the template gap ratios', () => {
+  it('rejects even detected rows without matching the template gap ratios', () => {
     const result = matchRowPattern(
       [{ y: 100 }, { y: 125 }, { y: 150 }, { y: 175 }, { y: 200 }],
       [1, 1, 0.729, 0.729],
     );
 
-    expect(result).toEqual({
-      lineYs: [100, 125, 150, 175, 200],
-      confident: true,
-    });
+    expect(result).toBeNull();
   });
 
   it('detects dark horizontal line groups in y order', async () => {
@@ -61,7 +58,7 @@ describe('table row detection', () => {
     expect(lines.map((line) => Math.round(line.y))).toEqual([80, 100, 125]);
   });
 
-  it('builds CAGI row overrides when each detected table has even row spacing', async () => {
+  it('builds CAGI row overrides when detected tables match the template pattern', async () => {
     const rowYs = [334, 358, 383, 401, 419, 436, 455, 512, 530];
     const filePath = path.join(fixtureDir, 'cagi-rows.png');
     await writeSyntheticRows(filePath, rowYs);
@@ -130,11 +127,11 @@ describe('table row detection', () => {
 
     expect(detection.overrides).toEqual({});
     expect(diagnostic).toContain('gap_mismatch');
-    expect(diagnostic).toMatch(/최대 편차 \d+% \(허용 25%\)/);
+    expect(diagnostic).toMatch(/최대 편차 \d+% \(허용 35%\)/);
     expect(Number(diagnostic?.match(/최대 편차 (\d+)%/)?.[1])).toBeGreaterThanOrEqual(0);
   });
 
-  it('matches satisfaction row groups independently by even spacing and skips q01', async () => {
+  it('matches satisfaction row groups independently by template pattern and skips q01', async () => {
     const filePath = path.join(fixtureDir, 'satisfaction-rows.png');
     await writeSyntheticRows(filePath, [430, 478, 526, 561, 596, 750, 780, 811, 841]);
     const image = await loadImageAnalysisData(filePath);
