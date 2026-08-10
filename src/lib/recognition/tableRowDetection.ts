@@ -1,4 +1,4 @@
-import { hasUsableFormBounds, ImageAnalysisData } from './markDensity';
+import { getRegistrationBounds, hasUsableFormBounds, ImageAnalysisData } from './markDensity';
 import {
   cagiTemplate,
   cagiLateQuestionYs,
@@ -363,12 +363,7 @@ function findBasicCandidateRows(
   image: ImageAnalysisData,
   group: ChoiceGroup,
 ): BasicGroupRowDetectionResult {
-  const bounds = image.contentBounds || {
-    left: 0,
-    top: 0,
-    right: image.width,
-    bottom: image.height,
-  };
+  const bounds = getRegistrationBounds(image);
   const baseHeight = bounds.bottom - bounds.top;
   // The two-line answer text is short and concentrated around each checkbox.
   // A wide horizontal scan dilutes those strokes below the dark-pixel ratio,
@@ -403,12 +398,7 @@ function findBasicGroupRow(
   image: ImageAnalysisData,
   group: ChoiceGroup,
 ): BasicGroupRowDetectionResult {
-  const bounds = image.contentBounds || {
-    left: 0,
-    top: 0,
-    right: image.width,
-    bottom: image.height,
-  };
+  const bounds = getRegistrationBounds(image);
   const baseHeight = bounds.bottom - bounds.top;
   const candidateCenters = group.candidates.map((candidate) => candidate.rect.y + candidate.rect.height / 2);
   const expectedCenter = average(candidateCenters);
@@ -457,12 +447,7 @@ function findBasicGroupLines(
   group: ChoiceGroup,
   xPaddingRatio = 0.035,
 ): number[] {
-  const bounds = image.contentBounds || {
-    left: 0,
-    top: 0,
-    right: image.width,
-    bottom: image.height,
-  };
+  const bounds = getRegistrationBounds(image);
   const baseWidth = bounds.right - bounds.left;
   const baseHeight = bounds.bottom - bounds.top;
   const candidateTop = Math.min(...group.candidates.map((candidate) => candidate.rect.y));
@@ -544,16 +529,11 @@ async function buildSatisfactionRowDetectionAsync(
 
 function buildSatisfactionQuestionOneDetection(image: ImageAnalysisData): RowDetectionResult {
   const group = satisfactionTemplate.choiceGroups.find((item) => item.field === 'satisfaction.q01');
-  if (!group || !image.contentBoundsConfident) {
+  if (!group || !hasUsableFormBounds(image)) {
     return { overrides: {} };
   }
 
-  const bounds = image.contentBounds || {
-    left: 0,
-    top: 0,
-    right: image.width,
-    bottom: image.height,
-  };
+  const bounds = getRegistrationBounds(image);
   const baseWidth = bounds.right - bounds.left;
   const baseHeight = bounds.bottom - bounds.top;
   const templateY = group.candidates[0]
@@ -710,22 +690,16 @@ function findRowMatch(
     return createFailureResult({ reason: 'lines_undetected', detail: '행 선 패턴 없음' }, '픽셀');
   }
 
-  const bounds = image.contentBounds || {
-    left: 0,
-    top: 0,
-    right: image.width,
-    bottom: image.height,
-  };
+  const bounds = getRegistrationBounds(image);
   const baseWidth = bounds.right - bounds.left;
-  // A scanner can omit a continuous outer page border while still yielding a
-  // stable, full-form content envelope. Treat that usable envelope as the
-  // template frame; falling back to the full bitmap shifts every expected row
-  // upward by the scan's top margin and lets an earlier table satisfy a later
-  // row pattern.
-  const yReference = hasUsableFormBounds(image) ? bounds : {
-    top: 0,
-    bottom: image.height,
-  };
+  // A verified page/template frame and the row search must share one
+  // coordinate frame. A raw dark-pixel envelope, however, can be only one
+  // internal table (as in scanner margins or synthetic diagnostics); using it
+  // as a full-form frame shifts every expected row. Keep that evidence for X
+  // search width, but use the full bitmap until the form bounds are trusted.
+  const yReference = hasStableRowRegistrationBounds(image)
+    ? bounds
+    : { top: 0, bottom: image.height };
   const templateTop = yReference.top + Math.min(...templateYs) * (yReference.bottom - yReference.top);
   const templateBottom = yReference.top + Math.max(...templateYs) * (yReference.bottom - yReference.top);
   const expectedLineYs = templateYs.map((y) => yReference.top + y * (yReference.bottom - yReference.top));
@@ -765,6 +739,34 @@ function findRowMatch(
   return pixelEvaluation.match || createFailureResult(
     pixelEvaluation.failure || classifyRowPatternFailure(detectedLines.length, expectedRelativeGaps.length + 1),
     '픽셀',
+  );
+}
+
+/**
+ * Row matching can use a full-page dark-content envelope as a search anchor
+ * when the frame detector missed a scanner border. This does not authorize a
+ * static ROI or automatic answer: `recognizeStudentForms` still requires
+ * `hasUsableFormBounds` and a verified grid before it writes a value.
+ */
+function hasStableRowRegistrationBounds(image: ImageAnalysisData): boolean {
+  if (hasUsableFormBounds(image)) {
+    return true;
+  }
+
+  const bounds = getRegistrationBounds(image);
+  const width = bounds.right - bounds.left;
+  const height = bounds.bottom - bounds.top;
+  const aspectRatio = height / width;
+
+  return (
+    width >= image.width * 0.72
+    && height >= image.height * 0.78
+    && bounds.left <= image.width * 0.16
+    && bounds.right >= image.width * 0.84
+    && bounds.top <= image.height * 0.16
+    && bounds.bottom >= image.height * 0.84
+    && aspectRatio >= 1.05
+    && aspectRatio <= 1.9
   );
 }
 

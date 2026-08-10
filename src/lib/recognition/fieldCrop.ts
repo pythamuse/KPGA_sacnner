@@ -1,6 +1,13 @@
 import sharp from 'sharp';
-import { loadImageAnalysisData, type PixelRect } from './markDensity';
-import { cagiTemplate, ChoiceGroup, FieldRegion, NormalizedRect, satisfactionTemplate } from './roiTemplates';
+import { applyTemplateRegistrationFrame, getRegistrationBounds, loadImageAnalysisData, type PixelRect } from './markDensity';
+import {
+  cagiTemplate,
+  ChoiceGroup,
+  FieldRegion,
+  FormRecognitionTemplate,
+  NormalizedRect,
+  satisfactionTemplate,
+} from './roiTemplates';
 import { type RecognitionCropSource } from './detectCheckmarks';
 
 export interface CropBox {
@@ -50,12 +57,7 @@ export function getCropBox(
   rect: NormalizedRect,
   paddingRatio: number,
 ): CropBox {
-  const bounds = image.contentBounds || {
-    left: 0,
-    top: 0,
-    right: image.width,
-    bottom: image.height,
-  };
+  const bounds = getRegistrationBounds(image);
   const baseWidth = bounds.right - bounds.left;
   const baseHeight = bounds.bottom - bounds.top;
   const paddingX = Math.max(8, Math.round(baseWidth * paddingRatio));
@@ -83,6 +85,10 @@ export function getCropBox(
       height: roiBottom - roiTop,
     },
   };
+}
+
+function getTemplateForField(field: string): FormRecognitionTemplate {
+  return field.startsWith('satisfaction.') ? satisfactionTemplate : cagiTemplate;
 }
 
 export function getPixelCropBox(
@@ -134,7 +140,11 @@ export async function generateFieldCropBuffer(
   const cropRect = pixelRect ? undefined : findCropRect(field);
   if (!cropRect && !pixelRect) return undefined;
 
-  const analysis = await loadImageAnalysisData(imagePath);
+  const template = getTemplateForField(field);
+  const analysis = applyTemplateRegistrationFrame(
+    await loadImageAnalysisData(imagePath),
+    template.registrationFrame,
+  );
   const cropBox = pixelRect
     ? getPixelCropBox(analysis, pixelRect, debug ? 0.07 : 0.022)
     : getCropBox(analysis, cropRect!, debug ? 0.07 : 0.022);

@@ -2,6 +2,7 @@ import ExcelJS from 'exceljs';
 import AdmZip from 'adm-zip';
 import { StudentData } from '../validation/types';
 import { validateStudent } from '../validation/validateStudent';
+import { getUnboundWorksheetExtensionPrefixes } from './templateManager';
 
 export interface VerifyResult {
   ok: boolean;
@@ -127,6 +128,10 @@ export async function verifyWorkbooks(
           const xml = zip.readAsText('xl/worksheets/sheet1.xml');
           if (!xml.includes('x14:dataValidations')) {
             errors.push(`${label} 엑셀 파일에 데이터 유효성 검사(드롭다운, x14:dataValidations)가 유실되었습니다.`);
+          }
+          const missingPrefixes = getUnboundWorksheetExtensionPrefixes(xml);
+          if (missingPrefixes.length > 0) {
+            errors.push(`${label} 엑셀 파일의 확장 XML 네임스페이스가 누락되었습니다: ${missingPrefixes.join(', ')}`);
           }
         } catch (err: any) {
           errors.push(`${label} 엑셀 파일 압축 해제 검증 중 오류: ${err.message}`);

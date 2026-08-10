@@ -2,7 +2,7 @@ import sharp from 'sharp';
 import os from 'os';
 import path from 'path';
 import { createWorker, OEM, PSM, type Worker } from 'tesseract.js';
-import type { PixelRect } from './markDensity';
+import type { ImageAnalysisData, PixelRect } from './markDensity';
 
 export interface OcrTextLine {
   y: number;
@@ -15,7 +15,15 @@ export interface OcrOptions {
 
 export interface DigitOcrOptions extends OcrOptions {}
 
+export interface DigitTemplateReference {
+  image: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>;
+  rect: PixelRect;
+}
+
 const MIN_CONFIDENCE = 30;
+// Handwritten digits are optional enrichment. A value below this level is
+// shown as blank for manual review instead of being written as a wrong age.
+const MIN_DIGIT_CONFIDENCE = 60;
 const MIN_LINE_HEIGHT = 6;
 const GROUP_DISTANCE_PX = 8;
 // Emergency fix (see Task/OCR_ANCHORED_ROW_DETECTION.md cycle 1 feedback): the original
@@ -27,11 +35,19 @@ const GROUP_DISTANCE_PX = 8;
 // creation + recognition together; if it's not done in time, this silently returns []
 // and the caller falls back to the existing pixel-line detector, exactly as on any other
 // OCR failure.
+// Korean row-anchor OCR remains optional and intentionally short. Age uses a
+// separate English digit worker below; loading a Korean model just to read two
+// handwritten digits was the source of repeated empty age values on cold
+// serverless instances.
 const OCR_TOTAL_TIMEOUT_MS = 2_500;
+const DIGIT_OCR_TOTAL_TIMEOUT_MS = 6_000;
 const OCR_CACHE_PATH = path.join(os.tmpdir(), 'gambling-prevention-tesseract-cache');
+const DIGIT_OCR_CACHE_PATH = path.join(os.tmpdir(), 'gambling-prevention-digit-tesseract-cache');
 
 let workerPromise: Promise<Worker> | null = null;
 let workerReady = false;
+let digitWorkerPromise: Promise<Worker> | null = null;
+let digitWorkerReady = false;
 const ocrResultCache = new WeakMap<Buffer, Map<string, Promise<OcrTextLine[]>>>();
 
 export async function detectOcrTextLines(
@@ -102,19 +118,20 @@ export async function recognizeDigitsInRegion(
   imageHeight: number,
   rect: PixelRect,
   options?: DigitOcrOptions,
+  templateReference?: DigitTemplateReference,
 ): Promise<number | undefined> {
   try {
     if (!Buffer.isBuffer(imageBuffer) || imageWidth <= 0 || imageHeight <= 0) {
       return undefined;
     }
 
-    if (workerPromise && !workerReady) {
+    if (digitWorkerPromise && !digitWorkerReady) {
       return undefined;
     }
 
     const remainingMs = options?.deadlineAt
-      ? Math.min(OCR_TOTAL_TIMEOUT_MS, options.deadlineAt - Date.now())
-      : OCR_TOTAL_TIMEOUT_MS;
+      ? Math.min(DIGIT_OCR_TOTAL_TIMEOUT_MS, options.deadlineAt - Date.now())
+      : DIGIT_OCR_TOTAL_TIMEOUT_MS;
     if (remainingMs <= 0) {
       return undefined;
     }
@@ -125,7 +142,7 @@ export async function recognizeDigitsInRegion(
     }
 
     return await withTimeout(
-      recognizeDigitsCrop(imageBuffer, crop),
+      recognizeDigitsCrop(imageBuffer, crop, templateReference),
       remainingMs,
     );
   } catch {
@@ -145,6 +162,14 @@ export function parseAgeOcrText(text: unknown): number | undefined {
 
   const age = Number.parseInt(normalized, 10);
   return Number.isInteger(age) && age >= 1 && age <= 20 ? age : undefined;
+}
+
+export function parseTrustedAgeOcrText(text: unknown, confidence: number): number | undefined {
+  if (!Number.isFinite(confidence) || confidence < MIN_DIGIT_CONFIDENCE) {
+    return undefined;
+  }
+
+  return parseAgeOcrText(text);
 }
 
 async function recognizeCrop(
@@ -184,44 +209,88 @@ async function recognizeCrop(
 async function recognizeDigitsCrop(
   imageBuffer: Buffer,
   crop: { left: number; top: number; width: number; height: number },
+  templateReference?: DigitTemplateReference,
 ): Promise<number | undefined> {
-  let parametersApplied = false;
-
   try {
-    const croppedBuffer = await sharp(imageBuffer)
+    const targetWidth = Math.max(crop.width * 4, 320);
+    // Preserve the small age box's natural aspect ratio. Stretching a
+    // 95x24 crop to a 120px minimum height turns a handwritten "4" into a
+    // loop-like shape that Tesseract repeatedly misread as "9".
+    const targetHeight = Math.max(crop.height * 4, 96);
+    const { data: croppedPixels } = await sharp(imageBuffer)
       .rotate()
       .extract(crop)
       .flatten({ background: '#ffffff' })
       .grayscale()
+      .resize({
+        width: targetWidth,
+        height: targetHeight,
+        fit: 'fill',
+        kernel: sharp.kernel.lanczos3,
+      })
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    const ocrPixels = templateReference
+      ? await subtractTemplateDigits(croppedPixels, targetWidth, targetHeight, templateReference)
+      : croppedPixels;
+    const croppedBuffer = await sharp(ocrPixels, {
+      raw: { width: targetWidth, height: targetHeight, channels: 1 },
+    })
+      .normalise()
+      .sharpen({ sigma: 1.1 })
+      .threshold(190)
       .png()
       .toBuffer();
 
-    const worker = await getWorker();
-    await worker.setParameters({
-      tessedit_char_whitelist: '0123456789',
-      tessedit_pageseg_mode: PSM.SINGLE_WORD,
-      preserve_interword_spaces: '0',
-    });
-    parametersApplied = true;
-
+    const worker = await getDigitWorker();
     const result = await worker.recognize(croppedBuffer, {}, { text: true });
-    return parseAgeOcrText(result.data.text);
+    return parseTrustedAgeOcrText(result.data.text, result.data.confidence);
   } catch {
     return undefined;
-  } finally {
-    if (parametersApplied) {
-      try {
-        const worker = await getWorker();
-        await worker.setParameters({
-          tessedit_char_whitelist: '',
-          tessedit_pageseg_mode: PSM.SPARSE_TEXT,
-          preserve_interword_spaces: '1',
-        });
-      } catch {
-        // OCR is optional; a failed parameter reset must not escape this path.
-      }
+  }
+}
+
+async function subtractTemplateDigits(
+  actualPixels: Buffer,
+  targetWidth: number,
+  targetHeight: number,
+  templateReference: DigitTemplateReference,
+): Promise<Buffer> {
+  const templateCrop = buildPixelCropBounds(
+    templateReference.image.width,
+    templateReference.image.height,
+    templateReference.rect,
+  );
+  if (!templateCrop) {
+    return actualPixels;
+  }
+
+  const { data: blankPixels } = await sharp(templateReference.image.pixels, {
+    raw: {
+      width: templateReference.image.width,
+      height: templateReference.image.height,
+      channels: 1,
+    },
+  })
+    .extract(templateCrop)
+    .resize({ width: targetWidth, height: targetHeight, fit: 'fill', kernel: sharp.kernel.lanczos3 })
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  const brightnessOffset = percentile(blankPixels, 0.82) - percentile(actualPixels, 0.82);
+  const output = Buffer.alloc(actualPixels.length, 255);
+
+  for (let index = 0; index < actualPixels.length; index++) {
+    const normalizedActual = clamp(actualPixels[index] + brightnessOffset, 0, 255);
+    // The blank form removes the box outline and its centre divider. Keep only
+    // strokes that are materially darker than the printed template at the
+    // matching position.
+    const addedInk = blankPixels[index] - normalizedActual;
+    if (addedInk > 24) {
+      output[index] = Math.max(0, 255 - (addedInk - 24) * 5);
     }
   }
+
+  return output;
 }
 
 function getWorker(): Promise<Worker> {
@@ -264,6 +333,27 @@ function buildCropBounds(
   }
 
   return { left, top, width, height };
+}
+
+function getDigitWorker(): Promise<Worker> {
+  if (!digitWorkerPromise) {
+    digitWorkerPromise = createWorker('eng', OEM.DEFAULT, { cachePath: DIGIT_OCR_CACHE_PATH })
+      .then(async (worker) => {
+        await worker.setParameters({
+          tessedit_char_whitelist: '0123456789',
+          tessedit_pageseg_mode: PSM.SINGLE_WORD,
+          preserve_interword_spaces: '0',
+        });
+        digitWorkerReady = true;
+        return worker;
+      })
+      .catch((error) => {
+        digitWorkerPromise = null;
+        throw error;
+      });
+  }
+
+  return digitWorkerPromise;
 }
 
 function buildPixelCropBounds(
@@ -316,6 +406,15 @@ function toWeightedLine(lines: Array<OcrTextLine & { height: number }>): OcrText
     y: lines.reduce((sum, line) => sum + line.y * line.confidence, 0) / totalConfidence,
     confidence: Math.max(...lines.map((line) => line.confidence)),
   };
+}
+
+function percentile(values: Buffer, fraction: number): number {
+  if (values.length === 0) {
+    return 0;
+  }
+  const sorted = Array.from(values).sort((first, second) => first - second);
+  const index = Math.min(sorted.length - 1, Math.max(0, Math.round((sorted.length - 1) * fraction)));
+  return sorted[index];
 }
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {

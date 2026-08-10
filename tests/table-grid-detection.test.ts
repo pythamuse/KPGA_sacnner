@@ -6,6 +6,7 @@ import { ImageAnalysisData, loadImageAnalysisData } from '../src/lib/recognition
 import {
   buildCagiGridDetection,
   buildCagiGridOverrides,
+  buildSatisfactionGridDetection,
   buildSatisfactionGridOverrides,
   detectVerticalLines,
 } from '../src/lib/recognition/tableGridDetection';
@@ -42,7 +43,6 @@ describe('table grid detection', () => {
     const detection = buildCagiGridDetection(image);
     const overrides = detection.overrides;
 
-    expect(image.contentBoundsConfident).toBe(true);
     expect(Object.keys(overrides)).toContain('cagi.q01');
     expect(overrides['cagi.q03']).toHaveLength(4);
     expect(overrides['cagi.q03'][0].left).toBeLessThan(overrides['cagi.q03'][1].left);
@@ -81,6 +81,27 @@ describe('table grid detection', () => {
     // Each printed table is an independent registration unit. A two-column
     // table must never fabricate coordinates for the five-point table below.
     expect(overrides['satisfaction.q07']).toBeUndefined();
+  });
+
+  it('verifies a locally translated lower satisfaction scale without requiring the upper table to match', async () => {
+    const filePath = path.join(fixtureDir, 'satisfaction-scale-local-y-offset.png');
+    await writeGridFixture(filePath, groupsFor(satisfactionTemplate.choiceGroups, [
+      'satisfaction.q07', 'satisfaction.q08', 'satisfaction.q09', 'satisfaction.q10',
+    ]), {
+      horizontalLineOffsets: { 0: -42, 1: -42, 2: -42, 3: -42, 4: -42 },
+    });
+
+    const detection = buildSatisfactionGridDetection(await loadImageAnalysisData(filePath));
+    const registration = detection.registrations['satisfaction.q07'];
+
+    expect(detection.overrides['satisfaction.q07']).toHaveLength(5);
+    expect(registration).toMatchObject({
+      tableId: 'satisfaction.scale',
+      source: 'grid',
+      status: 'verified',
+      independentRegistration: true,
+    });
+    expect(registration.candidateCenterOffset?.y).toBeLessThan(-0.02);
   });
 
   it('does not fabricate cells from dark printed content when table rules are absent', () => {

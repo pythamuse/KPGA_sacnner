@@ -3,8 +3,9 @@ import fs from 'fs';
 import path from 'path';
 import { getJobDir } from '../../../../lib/excel/templateManager';
 import { hasJobSession } from '../../../../lib/storage/jobStore';
-import { loadImageAnalysisData } from '../../../../lib/recognition/markDensity';
+import { applyTemplateRegistrationFrame, loadImageAnalysisData } from '../../../../lib/recognition/markDensity';
 import { findCropRect, generateFieldCropBuffer, getCropBox, serializeCropBox, serializeRect } from '../../../../lib/recognition/fieldCrop';
+import { cagiTemplate, satisfactionTemplate } from '../../../../lib/recognition/roiTemplates';
 
 const imageExtensions = new Set(['.png', '.jpg', '.jpeg', '.webp']);
 
@@ -48,7 +49,11 @@ export async function GET(req: NextRequest) {
     }
 
     const imagePath = path.join(uploadDir, filename);
-    const analysis = await loadImageAnalysisData(imagePath);
+    const template = field.startsWith('satisfaction.') ? satisfactionTemplate : cagiTemplate;
+    const analysis = applyTemplateRegistrationFrame(
+      await loadImageAnalysisData(imagePath),
+      template.registrationFrame,
+    );
     const cropBox = getCropBox(analysis, cropRect, debug ? 0.07 : 0.022);
 
     const cropBuffer = await generateFieldCropBuffer(imagePath, field, debug);

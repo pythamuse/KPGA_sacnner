@@ -1,5 +1,11 @@
-import { calculateDarkPixelDensity, hasUsableFormBounds, loadImageAnalysisData, type ImageAnalysisData } from './markDensity';
-import { NormalizedRect } from './roiTemplates';
+import {
+  applyTemplateRegistrationFrame,
+  calculateDarkPixelDensity,
+  hasUsableFormBounds,
+  loadImageAnalysisData,
+  type ImageAnalysisData,
+} from './markDensity';
+import { cagiTemplate, NormalizedRect } from './roiTemplates';
 
 const MARK_THRESHOLD = 0.34;
 const CONTACT_INPUT_THRESHOLD = 0.08;
@@ -29,7 +35,10 @@ export interface CagiEarlyInterventionDetection {
 
 export async function detectCagiEarlyIntervention(filePath: string): Promise<CagiEarlyInterventionDetection> {
   try {
-    const image = await loadImageAnalysisData(filePath);
+    const image = applyTemplateRegistrationFrame(
+      await loadImageAnalysisData(filePath),
+      cagiTemplate.registrationFrame,
+    );
     return detectCagiEarlyInterventionFromImage(image);
   } catch {
     return { hasMarks: false, hasContactInformation: false };

@@ -1,7 +1,15 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import fs from 'fs';
 import path from 'path';
-import { getTemplateFiles, initJobWorkspace, loadJobWorkbooks, getJobDir, restoreExtLst } from '../src/lib/excel/templateManager';
+import {
+  getTemplateFiles,
+  getUnboundWorksheetExtensionPrefixes,
+  getJobDir,
+  initJobWorkspace,
+  loadJobWorkbooks,
+  mergeWorksheetRootNamespaces,
+  restoreExtLst,
+} from '../src/lib/excel/templateManager';
 import { writeCagiRow } from '../src/lib/excel/writeCagi';
 import { writeSatisfactionRow } from '../src/lib/excel/writeSatisfaction';
 import { verifyWorkbooks } from '../src/lib/excel/verifyWorkbook';
@@ -38,6 +46,17 @@ describe('엑셀 입출력 및 보존 테스트', () => {
     }
     expect(fs.readFileSync(templateFiles.cagiPath)).toEqual(templateSnapshots.cagi);
     expect(fs.readFileSync(templateFiles.satisfactionPath)).toEqual(templateSnapshots.satisfaction);
+  });
+
+  it('restores worksheet extension namespaces together with extLst', () => {
+    const templateXml = '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:xr="http://schemas.microsoft.com/office/spreadsheetml/2014/revision" mc:Ignorable="xr"><extLst><ext uri="{test}"><xr:uid val="{abc}"/></ext></extLst></worksheet>';
+    const writtenXml = '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>';
+    const merged = mergeWorksheetRootNamespaces(templateXml, writtenXml);
+    const completed = merged.replace('</worksheet>', '<extLst><ext uri="{test}"><xr:uid val="{abc}"/></ext></extLst></worksheet>');
+
+    expect(merged).toContain('xmlns:xr="http://schemas.microsoft.com/office/spreadsheetml/2014/revision"');
+    expect(merged).toContain('mc:Ignorable="xr"');
+    expect(getUnboundWorksheetExtensionPrefixes(completed)).toEqual([]);
   });
 
   it('단일 학생 저장 및 엑셀 재검증 (드롭다운 보존 포함)', async () => {

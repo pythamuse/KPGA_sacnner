@@ -1,4 +1,9 @@
-import { type ImageAnalysisData, type PixelBounds, type PixelRect } from './markDensity';
+import {
+  getRegistrationBounds,
+  type ImageAnalysisData,
+  type PixelBounds,
+  type PixelRect,
+} from './markDensity';
 import { cagiTemplate, satisfactionTemplate, type ChoiceGroup, type NormalizedRect } from './roiTemplates';
 import { buildCagiBasicRowDetection, detectHorizontalLines, type RowDetectionResult } from './tableRowDetection';
 
@@ -11,6 +16,13 @@ export type FieldCellOverrides = Record<string, PixelRect[]>;
 interface TableGridSpec {
   id: string;
   groups: ChoiceGroup[];
+  columnSearchToleranceRatio?: number;
+  rowSearchToleranceRatio?: number;
+  verticalLineDarkRatio?: number;
+  horizontalLineDarkRatio?: number;
+  darkThreshold?: number;
+  maxUniformCandidateOffsetY?: number;
+  independentRegistration?: boolean;
 }
 
 // A scan can preserve the form's row/column pattern while its outer paper
@@ -49,6 +61,7 @@ export interface FieldRegistration {
   candidateCenterOffset?: { x: number; y: number };
   candidateCenterSpread?: { x: number; y: number };
   qualityScore?: number;
+  independentRegistration?: boolean;
   diagnostic?: string;
 }
 
@@ -258,7 +271,23 @@ export function buildSatisfactionGridDetection(image: ImageAnalysisData): GridDe
   const result = mergeGridDetection(image, [
     { id: 'satisfaction.frequency', groups: q01Groups },
     { id: 'satisfaction.binary', groups: binaryGroups },
-    { id: 'satisfaction.scale', groups: scaleGroups },
+    {
+      id: 'satisfaction.scale',
+      groups: scaleGroups,
+      // The lower five-point table has short, thin vertical rules in phone
+      // photos. Detect it locally with a wider row search, then require its
+      // own complete line pattern instead of borrowing the upper tables'
+      // registration.
+      rowSearchToleranceRatio: 0.1,
+      verticalLineDarkRatio: 0.3,
+      horizontalLineDarkRatio: 0.3,
+      // At the default 200 threshold, the photographed paper texture merges
+      // adjacent rules into one broad band. The darkest printed rules remain
+      // distinct at 180 and preserve the actual five-by-four cell pattern.
+      darkThreshold: 180,
+      maxUniformCandidateOffsetY: 0.06,
+      independentRegistration: true,
+    },
   ]);
 
   return {
@@ -317,14 +346,16 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
   // The template supplies both the search anchor and the expected uneven gap
   // pattern. The latter is important because two-line questions create rows
   // that are intentionally taller than their neighbours.
-  const xTolerance = Math.max(12, Math.round(baseWidth * 0.06));
-  const yTolerance = Math.max(12, Math.round(baseHeight * 0.05));
+  const xTolerance = Math.max(12, Math.round(baseWidth * (spec.columnSearchToleranceRatio ?? 0.06)));
+  const yTolerance = Math.max(12, Math.round(baseHeight * (spec.rowSearchToleranceRatio ?? 0.05)));
   const verticalLines = detectVerticalLines(
     image,
     expectedY[0] - yTolerance,
     expectedY[expectedY.length - 1] + yTolerance,
     expectedX[0] - xTolerance,
     expectedX[expectedX.length - 1] + xTolerance,
+    spec.verticalLineDarkRatio,
+    spec.darkThreshold,
   ).map((line) => line.x);
   const matchedColumns = matchTemplateLinePattern(verticalLines, expectedX);
   const horizontalSearchLeft = matchedColumns?.[0] ?? expectedX[0] - xTolerance;
@@ -336,7 +367,8 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
     expectedY[expectedY.length - 1] + yTolerance,
     horizontalSearchLeft,
     horizontalSearchRight,
-    0.3,
+    spec.horizontalLineDarkRatio ?? 0.3,
+    spec.darkThreshold,
   ).map((line) => line.y);
 
   const lineFailure = classifyGridLineFailure(
@@ -440,7 +472,11 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
   );
   const registrations: Record<string, FieldRegistration> = Object.fromEntries(groups.map((group) => {
     const candidateCenter = getCandidateCenterQuality(group, overrides[group.field], bounds);
-    const status: RegistrationStatus = isVerifiedGridQuality(quality, candidateCenter) ? 'verified' : 'candidate';
+    const status: RegistrationStatus = isVerifiedGridQuality(
+      quality,
+      candidateCenter,
+      spec.maxUniformCandidateOffsetY,
+    ) ? 'verified' : 'candidate';
     const diagnostic = status === 'candidate'
       ? formatGridQualityDiagnostic(quality, candidateCenter)
       : undefined;
@@ -458,6 +494,7 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
       candidateCenterOffset: { x: candidateCenter.meanX, y: candidateCenter.meanY },
       candidateCenterSpread: { x: candidateCenter.spreadX, y: candidateCenter.spreadY },
       qualityScore: Math.max(quality.score, candidateCenter.maxX, candidateCenter.maxY),
+      ...(spec.independentRegistration ? { independentRegistration: true } : {}),
       diagnostic,
     } satisfies FieldRegistration];
   }));
@@ -614,7 +651,11 @@ function getLineFit(actual: number[], expected: number[], pageSize: number): {
   };
 }
 
-function isVerifiedGridQuality(quality: GridQuality, candidateCenter: CandidateCenterQuality): boolean {
+function isVerifiedGridQuality(
+  quality: GridQuality,
+  candidateCenter: CandidateCenterQuality,
+  maxUniformCandidateOffsetY = GRID_MAX_UNIFORM_CANDIDATE_OFFSET_Y,
+): boolean {
   const anchoredToTemplate = (
     candidateCenter.maxX <= GRID_MAX_CANDIDATE_CENTER_DEVIATION &&
     candidateCenter.maxY <= GRID_MAX_CANDIDATE_CENTER_DEVIATION
@@ -625,7 +666,7 @@ function isVerifiedGridQuality(quality: GridQuality, candidateCenter: CandidateC
   // option-to-option or row-to-row drift.
   const uniformlyTranslated = (
     Math.abs(candidateCenter.meanX) <= GRID_MAX_UNIFORM_CANDIDATE_OFFSET_X &&
-    Math.abs(candidateCenter.meanY) <= GRID_MAX_UNIFORM_CANDIDATE_OFFSET_Y &&
+    Math.abs(candidateCenter.meanY) <= maxUniformCandidateOffsetY &&
     candidateCenter.spreadX <= GRID_MAX_CANDIDATE_CENTER_SPREAD &&
     candidateCenter.spreadY <= GRID_MAX_CANDIDATE_CENTER_SPREAD
   );
@@ -662,7 +703,12 @@ function registrationsForGroups(
 function applyCrossTableRegistrationCheck(result: GridDetectionResult): GridDetectionResult {
   const representatives = new Map<string, FieldRegistration>();
   for (const registration of Object.values(result.registrations)) {
-    if (registration.source === 'grid' && registration.status === 'verified' && registration.candidateCenterOffset) {
+    if (
+      registration.source === 'grid'
+      && registration.status === 'verified'
+      && registration.candidateCenterOffset
+      && !registration.independentRegistration
+    ) {
       representatives.set(registration.tableId, registration);
     }
   }
@@ -800,12 +846,7 @@ function mapGroupsToTableRegionRects(
   image: ImageAnalysisData,
   groups: ChoiceGroup[],
 ): Record<string, PixelRect> {
-  const bounds = image.contentBoundsConfident ? getBounds(image) : {
-    left: 0,
-    top: 0,
-    right: image.width,
-    bottom: image.height,
-  };
+  const bounds = getBounds(image);
   const candidates = groups.flatMap((group) => group.candidates.map((candidate) => candidate.rect));
   if (candidates.length === 0) {
     return {};
@@ -1037,12 +1078,7 @@ function groupLinePositions(values: number[]): number[] {
 }
 
 function getBounds(image: ImageAnalysisData): PixelBounds {
-  return image.contentBounds || {
-    left: 0,
-    top: 0,
-    right: image.width,
-    bottom: image.height,
-  };
+  return getRegistrationBounds(image);
 }
 
 function average(values: number[]): number {

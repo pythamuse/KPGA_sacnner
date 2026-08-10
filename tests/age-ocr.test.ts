@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { parseAgeOcrText, recognizeDigitsInRegion } from '../src/lib/recognition/ocrTextLines';
+import {
+  parseAgeOcrText,
+  parseTrustedAgeOcrText,
+  recognizeDigitsInRegion,
+} from '../src/lib/recognition/ocrTextLines';
 import path from 'path';
-import { recognizeStudentForms } from '../src/lib/recognition/detectCheckmarks';
+import { getAgeDigitsRect, recognizeStudentForms } from '../src/lib/recognition/detectCheckmarks';
+import { cagiTemplate } from '../src/lib/recognition/roiTemplates';
 
 const blankFormDir = path.join(process.cwd(), 'tests', 'fixtures', 'blank-form');
 
@@ -19,6 +24,12 @@ describe('age OCR validation', () => {
     expect(parseAgeOcrText(null)).toBeUndefined();
   });
 
+  it('does not write a low-confidence handwritten age into the review draft', () => {
+    expect(parseTrustedAgeOcrText('19', 55)).toBeUndefined();
+    expect(parseTrustedAgeOcrText('14', 60)).toBe(14);
+    expect(parseTrustedAgeOcrText('21', 99)).toBeUndefined();
+  });
+
   it('returns empty when the shared OCR deadline has expired', async () => {
     const age = await recognizeDigitsInRegion(
       Buffer.from('not-an-image'),
@@ -31,11 +42,29 @@ describe('age OCR validation', () => {
     expect(age).toBeUndefined();
   });
 
+  it('keeps both handwritten digits inside the measured age-number box', () => {
+    expect(getAgeDigitsRect({ left: 100, top: 200, right: 300, bottom: 260 })).toEqual({
+      left: 112,
+      right: 288,
+      top: 207,
+      bottom: 253,
+    });
+  });
+
+  it('anchors the age field to the blank form number box rather than the "세" suffix', () => {
+    expect(cagiTemplate.fieldRegions?.find((region) => region.field === 'basic.age')?.rect).toEqual({
+      x: 0.716,
+      y: 0.162,
+      width: 0.11,
+      height: 0.023,
+    });
+  });
+
   it('leaves age empty on the committed blank form when OCR has a live budget', async () => {
     const draft = await recognizeStudentForms(
       path.join(blankFormDir, 'cagi-blank.png'),
       path.join(blankFormDir, 'satisfaction-blank.png'),
-      { ocrDeadlineAt: Date.now() + 2_500 },
+      { ocrDeadlineAt: Date.now() + 6_000 },
     );
 
     expect(draft.basic.age).toBeUndefined();

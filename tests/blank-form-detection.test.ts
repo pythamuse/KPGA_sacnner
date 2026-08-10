@@ -48,9 +48,13 @@ describe('real blank-form detection', () => {
     console.info('blank-form recognition sources', JSON.stringify(sources, null, 2));
     expect(draft.basic.age).toBeUndefined();
     expect(draft.confidence['basic.age']).toBe('medium');
-    for (const field of fields) {
+    for (const field of [...cagiFields, ...satisfactionFields]) {
       expect(['grid', 'row'], `${field}: ${draft.recognitionCropDiagnostic?.[field] || 'no source'}`)
         .toContain(sources[field]);
+    }
+    for (const field of basicFields) {
+      expect(sources[field], `${field}: ${draft.recognitionCropDiagnostic?.[field] || 'no source'}`)
+        .toBe('fixed');
     }
   });
 

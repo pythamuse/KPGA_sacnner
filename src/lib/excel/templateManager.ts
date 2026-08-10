@@ -92,6 +92,7 @@ export function restoreExtLst(origPath: string, destPath: string) {
   let destXml = destZip.readAsText('xl/worksheets/sheet1.xml');
 
   destXml = destXml.replace(/<extLst>[\s\S]*?<\/extLst>/g, '');
+  destXml = mergeWorksheetRootNamespaces(origXml, destXml);
 
   const insertIndex = destXml.lastIndexOf('</worksheet>');
   if (insertIndex === -1) {
@@ -102,6 +103,101 @@ export function restoreExtLst(origPath: string, destPath: string) {
 
   destZip.updateFile('xl/worksheets/sheet1.xml', Buffer.from(destXml, 'utf-8'));
   destZip.writeZip(destPath);
+}
+
+/**
+ * ExcelJS writes a clean worksheet root, then we restore the template's
+ * x14:dataValidations extension. That extension may reference `xr`, `x14`,
+ * or `xm` prefixes that only existed on the original worksheet root. Keep the
+ * required declarations and the Ignorable token list together with extLst so
+ * Excel never has to repair a downloaded workbook.
+ */
+export function mergeWorksheetRootNamespaces(sourceXml: string, destinationXml: string): string {
+  const sourceRoot = getWorksheetRootTag(sourceXml);
+  const destinationRoot = getWorksheetRootTag(destinationXml);
+  if (!sourceRoot || !destinationRoot) {
+    throw new Error('Worksheet root element is missing while restoring extensions.');
+  }
+
+  let mergedRoot = destinationRoot;
+  const sourceNamespaces = getNamespaceAttributes(sourceRoot);
+  const destinationNamespaces = getNamespaceAttributes(mergedRoot);
+
+  for (const [name, value] of Array.from(sourceNamespaces.entries())) {
+    if (!destinationNamespaces.has(name)) {
+      mergedRoot = appendXmlAttribute(mergedRoot, name, value);
+    }
+  }
+
+  const sourceIgnorable = getXmlAttribute(sourceRoot, 'mc:Ignorable');
+  if (sourceIgnorable) {
+    const destinationIgnorable = getXmlAttribute(mergedRoot, 'mc:Ignorable');
+    const tokens = new Set([
+      ...(destinationIgnorable ? destinationIgnorable.split(/\s+/) : []),
+      ...sourceIgnorable.split(/\s+/),
+    ].filter(Boolean));
+    mergedRoot = setXmlAttribute(mergedRoot, 'mc:Ignorable', Array.from(tokens).join(' '));
+  }
+
+  return destinationXml.replace(destinationRoot, mergedRoot);
+}
+
+export function getUnboundWorksheetExtensionPrefixes(xml: string): string[] {
+  const root = getWorksheetRootTag(xml);
+  const extLst = xml.match(/<extLst>[\s\S]*?<\/extLst>/)?.[0];
+  if (!root || !extLst) {
+    return [];
+  }
+
+  const declared = new Set<string>();
+  for (const name of Array.from(getNamespaceAttributes(root).keys())) {
+    if (name.startsWith('xmlns:')) declared.add(name.slice('xmlns:'.length));
+  }
+  for (const name of Array.from(getNamespaceAttributes(extLst).keys())) {
+    if (name.startsWith('xmlns:')) declared.add(name.slice('xmlns:'.length));
+  }
+
+  const used = new Set<string>();
+  const prefixPattern = /<\/?([A-Za-z_][\w.-]*):[\w.-]+|\s([A-Za-z_][\w.-]*):[\w.-]+=/g;
+  let match: RegExpExecArray | null;
+  while ((match = prefixPattern.exec(extLst)) !== null) {
+    used.add(match[1] || match[2]);
+  }
+
+  return Array.from(used)
+    .filter((prefix) => prefix !== 'xml' && prefix !== 'xmlns' && !declared.has(prefix))
+    .sort();
+}
+
+function getWorksheetRootTag(xml: string): string | null {
+  return xml.match(/<worksheet\b[^>]*>/)?.[0] || null;
+}
+
+function getNamespaceAttributes(xmlTag: string): Map<string, string> {
+  const attributes = new Map<string, string>();
+  const namespacePattern = /\s(xmlns(?::[A-Za-z_][\w.-]*)?)="([^"]*)"/g;
+  let match: RegExpExecArray | null;
+  while ((match = namespacePattern.exec(xmlTag)) !== null) {
+    attributes.set(match[1], match[2]);
+  }
+  return attributes;
+}
+
+function getXmlAttribute(xmlTag: string, name: string): string | undefined {
+  const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return xmlTag.match(new RegExp(`\\s${escapedName}="([^"]*)"`))?.[1];
+}
+
+function appendXmlAttribute(xmlTag: string, name: string, value: string): string {
+  return xmlTag.replace(/\/$|>$/, (suffix) => ` ${name}="${value}"${suffix}`);
+}
+
+function setXmlAttribute(xmlTag: string, name: string, value: string): string {
+  const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const attribute = new RegExp(`\\s${escapedName}="[^"]*"`);
+  return attribute.test(xmlTag)
+    ? xmlTag.replace(attribute, ` ${name}="${value}"`)
+    : appendXmlAttribute(xmlTag, name, value);
 }
 
 export function backupJobFiles(jobId: string) {

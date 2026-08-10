@@ -175,7 +175,10 @@ export async function POST(req: Request) {
     }
 
     const studentDrafts = [];
-    const ocrDeadlineAt = Date.now() + 2_500;
+    // A first request in a serverless instance may need to initialize the
+    // shared OCR worker. Keep it bounded, but allow the small age-number crop
+    // enough time to finish rather than silently returning no value.
+    const ocrDeadlineAt = Date.now() + 6_000;
     for (const pair of matchedPairs) {
       const draft = await recognizeStudentForms(pair.cagiPath, pair.satisfactionPath, { ocrDeadlineAt });
       const {

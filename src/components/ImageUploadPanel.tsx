@@ -520,7 +520,7 @@ export default function ImageUploadPanel({
         }
       }
 
-      if (PERSPECTIVE_CORRECTION_ENABLED && filesToUpload.some((item) => item.source === 'image')) {
+      if (PERSPECTIVE_CORRECTION_ENABLED && filesToUpload.length > 0) {
         setBatchStatusMessage('페이지 보정 엔진을 준비하고 있습니다.');
         correctionEngineReady = await warmupPerspectiveWorker(BATCH_WORKER_WARMUP_TIMEOUT_MS);
         correctionEngineUnavailable = !correctionEngineReady;
@@ -534,7 +534,10 @@ export default function ImageUploadPanel({
 
       for (let i = 0; i < total; i++) {
         const { file: sourceFile, source } = filesToUpload[i];
-        const needsPerspectiveCorrection = source === 'image';
+        // PDF pages may already be flat scans, but their per-page crop or
+        // minor skew can still differ. The normalizer keeps the original when
+        // no trustworthy document quadrilateral is found.
+        const needsPerspectiveCorrection = source === 'image' || source === 'pdf';
         let fileToUpload = sourceFile;
         let pageCorrectionWarningAdded = false;
 

@@ -1,5 +1,7 @@
 import {
   analyzeChoiceGroup,
+  applyTemplateRegistrationFrame,
+  getRegistrationBounds,
   hasUsableFormBounds,
   loadImageAnalysisData,
   type ImageAnalysisData,
@@ -17,6 +19,7 @@ import {
   type FieldRegistration,
 } from './tableGridDetection';
 import { recognizeDigitsInRegion } from './ocrTextLines';
+import { loadBlankFormBaseline } from './templateBaseline';
 import fs from 'fs/promises';
 
 export type RecognitionCropSource = 'grid' | 'grid-candidate' | 'row' | 'row-fallback' | 'fixed';
@@ -133,20 +136,21 @@ export async function recognizeStudentForms(
   const recognitionRegistration: Record<string, FieldRegistration> = {};
 
   try {
-    const cagiImage = await loadImageAnalysisData(cagiPath);
-    const cagiImageBuffer = await fs.readFile(cagiPath);
     const cagiTemplate = getTemplate('cagi');
+    const [cagiImageData, cagiBaseline] = await Promise.all([
+      loadImageAnalysisData(cagiPath),
+      loadBlankFormBaseline('cagi'),
+    ]);
+    const cagiImage = applyTemplateRegistrationFrame(cagiImageData, cagiTemplate.registrationFrame);
+    const cagiImageBuffer = await fs.readFile(cagiPath);
     const canAutoRecognizeCagi = hasUsableFormBounds(cagiImage);
-    const cagiRowDetection: RowDetectionResult = canAutoRecognizeCagi
-      ? await buildCagiRowDetection(cagiImage, cagiImageBuffer, toOcrOptions(options))
-      : { overrides: {} };
-    const cagiRowOverrides = cagiRowDetection.overrides;
-    // Grid cells remain useful review coordinates even when the outer document
-    // frame is uncertain. The confidence gate below still forbids auto values.
     const cagiGridDetection = buildCagiGridDetection(cagiImage);
     const cagiGridOverrides = cagiGridDetection.overrides;
 
+    // Start the small digit-only OCR before row detection initializes the
+    // shared worker, otherwise this request can be skipped as "worker busy".
     const ageRect = cagiGridDetection.fieldRects['basic.age'];
+    const templateAgeRect = cagiBaseline?.fieldRects['basic.age'];
     if (canAutoRecognizeCagi && ageRect) {
       const age = await recognizeDigitsInRegion(
         cagiImageBuffer,
@@ -154,11 +158,20 @@ export async function recognizeStudentForms(
         cagiImage.height,
         getAgeDigitsRect(ageRect),
         toOcrOptions(options),
+        cagiBaseline && templateAgeRect ? {
+          image: cagiBaseline.image,
+          rect: getAgeDigitsRect(templateAgeRect),
+        } : undefined,
       );
       if (age !== undefined) {
         draft.basic.age = age;
       }
     }
+
+    const cagiRowDetection: RowDetectionResult = canAutoRecognizeCagi
+      ? await buildCagiRowDetection(cagiImage, cagiImageBuffer, toOcrOptions(options))
+      : { overrides: {} };
+    const cagiRowOverrides = cagiRowDetection.overrides;
 
     if (!canAutoRecognizeCagi) {
       draft.warnings?.push('선별검사지의 종이 경계를 안정적으로 찾지 못해 자동 입력을 확정하지 않았습니다. 강조된 항목을 원본과 대조해 직접 확인해주세요.');
@@ -182,12 +195,10 @@ export async function recognizeStudentForms(
         recognitionRegistration[group.field] = registration;
       }
       const scoringCells = resolveScoringCells(cagiImage, group, gridCells, rowOverride, registration);
-      const displayCells = scoringCells || gridCells;
-      if (displayCells) {
-        recognitionCandidateRects[group.field] = displayCells;
-        recognitionCropRects[group.field] = unionPixelRects(displayCells);
-      }
-      if (gridCells && scoringCells && scoringCells !== gridCells) {
+      const displayCells = scoringCells;
+      recognitionCandidateRects[group.field] = displayCells;
+      recognitionCropRects[group.field] = unionPixelRects(displayCells);
+      if (gridCells && scoringCells !== gridCells) {
         recognitionRejectedCandidateRects[group.field] = gridCells;
       }
 
@@ -195,14 +206,17 @@ export async function recognizeStudentForms(
       // a row fallback. It is still manual-only and remains visible as
       // rejected evidence in the debug overlay.
       const verifiedGridCells = isVerifiedGrid(registration) ? gridCells : undefined;
-      const analysisRowOverride = scoringCells ? undefined : rowOverride;
       const result = analyzeChoiceGroup(
         cagiImage,
         group,
-        analysisRowOverride,
+        undefined,
         canAutoRecognizeCagi && Boolean(verifiedGridCells),
         scoringCells,
         requiresHighVisualConfidence(group.field),
+        cagiBaseline ? {
+          image: cagiBaseline.image,
+          candidatePixelOverrides: cagiBaseline.candidateRects[group.field],
+        } : undefined,
       );
       draft.confidence[result.field] = result.confidence;
       draft.candidates![result.field] = mapRecognizedCandidates(result.field, result.candidates);
@@ -242,9 +256,13 @@ export async function recognizeStudentForms(
   }
 
   try {
-    const satisfactionImage = await loadImageAnalysisData(satisfactionPath);
-    const satisfactionImageBuffer = await fs.readFile(satisfactionPath);
     const satisfactionTemplate = getTemplate('satisfaction');
+    const [satisfactionImageData, satisfactionBaseline] = await Promise.all([
+      loadImageAnalysisData(satisfactionPath),
+      loadBlankFormBaseline('satisfaction'),
+    ]);
+    const satisfactionImage = applyTemplateRegistrationFrame(satisfactionImageData, satisfactionTemplate.registrationFrame);
+    const satisfactionImageBuffer = await fs.readFile(satisfactionPath);
     const canAutoRecognizeSatisfaction = hasUsableFormBounds(satisfactionImage);
     const satisfactionRowDetection: RowDetectionResult = canAutoRecognizeSatisfaction
       ? await buildSatisfactionRowDetection(satisfactionImage, satisfactionImageBuffer, toOcrOptions(options))
@@ -275,24 +293,25 @@ export async function recognizeStudentForms(
         recognitionRegistration[group.field] = registration;
       }
       const scoringCells = resolveScoringCells(satisfactionImage, group, gridCells, rowOverride, registration);
-      const displayCells = scoringCells || gridCells;
-      if (displayCells) {
-        recognitionCandidateRects[group.field] = displayCells;
-        recognitionCropRects[group.field] = unionPixelRects(displayCells);
-      }
-      if (gridCells && scoringCells && scoringCells !== gridCells) {
+      const displayCells = scoringCells;
+      recognitionCandidateRects[group.field] = displayCells;
+      recognitionCropRects[group.field] = unionPixelRects(displayCells);
+      if (gridCells && scoringCells !== gridCells) {
         recognitionRejectedCandidateRects[group.field] = gridCells;
       }
 
       const verifiedGridCells = isVerifiedGrid(registration) ? gridCells : undefined;
-      const analysisRowOverride = scoringCells ? undefined : rowOverride;
       const result = analyzeChoiceGroup(
         satisfactionImage,
         group,
-        analysisRowOverride,
+        undefined,
         canAutoRecognizeSatisfaction && Boolean(verifiedGridCells),
         scoringCells,
         requiresHighVisualConfidence(group.field),
+        satisfactionBaseline ? {
+          image: satisfactionBaseline.image,
+          candidatePixelOverrides: satisfactionBaseline.candidateRects[group.field],
+        } : undefined,
       );
       draft.confidence[result.field] = result.confidence;
       draft.candidates![result.field] = result.candidates;
@@ -424,18 +443,17 @@ function unionPixelRects(rects: PixelRect[]): PixelRect {
   };
 }
 
-function getAgeDigitsRect(rect: PixelRect): PixelRect {
+export function getAgeDigitsRect(rect: PixelRect): PixelRect {
   const width = rect.right - rect.left;
   const height = rect.bottom - rect.top;
 
-  // The field preview intentionally includes "만 [ ] 세". OCR must receive
-  // only the inner number box so the printed borders and the Korean suffix
-  // cannot be mistaken for a digit.
+  // The template field is the measured number box itself. Keep only a small
+  // inset to exclude its rules without cutting off either handwritten digit.
   return {
-    left: Math.round(rect.left + width * 0.04),
-    right: Math.round(rect.left + width * 0.47),
-    top: Math.round(rect.top + height * 0.08),
-    bottom: Math.round(rect.top + height * 0.65),
+    left: Math.round(rect.left + width * 0.06),
+    right: Math.round(rect.left + width * 0.94),
+    top: Math.round(rect.top + height * 0.12),
+    bottom: Math.round(rect.top + height * 0.88),
   };
 }
 
@@ -445,10 +463,7 @@ export function resolveRecognitionCropSource(
   registration?: FieldRegistration,
 ): RecognitionCropSource {
   if (isVerifiedGrid(registration) && gridCells) return 'grid';
-  if (registration?.source === 'row' && gridCells) return 'row';
-  if (hasStableCandidateGridRows(gridCells, registration)) return 'grid-candidate';
   if (rowOverride) return gridCells ? 'row-fallback' : 'row';
-  if (gridCells) return 'grid-candidate';
   return 'fixed';
 }
 
@@ -458,9 +473,6 @@ export function resolveRecognitionCropDiagnostic(
   rowDiagnostic?: string,
 ): string | undefined {
   if (source === 'grid') return gridDiagnostic;
-  if (source === 'grid-candidate') {
-    return gridDiagnostic || 'Grid candidate is not registered; values remain manual.';
-  }
   if (source === 'row-fallback') {
     const details = [gridDiagnostic, rowDiagnostic].filter((diagnostic): diagnostic is string => Boolean(diagnostic));
     return details.length > 0
@@ -469,32 +481,15 @@ export function resolveRecognitionCropDiagnostic(
   }
   if (source === 'row') return rowDiagnostic || gridDiagnostic;
 
-  return [gridDiagnostic, rowDiagnostic].filter((diagnostic): diagnostic is string => Boolean(diagnostic)).join('; ') || undefined;
+  const details = [gridDiagnostic, rowDiagnostic].filter((diagnostic): diagnostic is string => Boolean(diagnostic));
+  if (details.length === 0) return undefined;
+  return source === 'fixed'
+    ? `Grid candidate rejected; measured template coordinates used. ${details.join('; ')}`
+    : details.join('; ');
 }
 
 function isVerifiedGrid(registration?: FieldRegistration): boolean {
   return registration?.source === 'grid' && registration.status === 'verified';
-}
-
-function hasStableCandidateGridRows(
-  gridCells?: PixelRect[],
-  registration?: FieldRegistration,
-): boolean {
-  if (!gridCells || registration?.source !== 'grid' || registration.status !== 'candidate') {
-    return false;
-  }
-
-  const rowGapDeviation = registration.gapDeviation?.rows;
-  const rowResidualRatio = registration.residualRatio?.rows;
-  const rowCenterDeviation = registration.candidateCenterDeviation?.y;
-  return (
-    rowGapDeviation !== undefined
-    && rowResidualRatio !== undefined
-    && rowCenterDeviation !== undefined
-    && rowGapDeviation <= 0.1
-    && rowResidualRatio <= 0.07
-    && rowCenterDeviation <= 0.025
-  );
 }
 
 /**
@@ -508,46 +503,48 @@ export function resolveScoringCells(
   gridCells?: PixelRect[],
   rowOverride?: { top: number; bottom: number },
   registration?: FieldRegistration,
-): PixelRect[] | undefined {
+): PixelRect[] {
   if (isVerifiedGrid(registration) && gridCells) return gridCells;
-  if (registration?.source === 'row' && gridCells) return gridCells;
-  if (hasStableCandidateGridRows(gridCells, registration)) return gridCells;
-  if (rowOverride) return buildRowFallbackCandidateRects(image, group, rowOverride, gridCells);
-  // Candidate geometry is valuable as a manual suggestion only. The caller
-  // keeps automatic confirmation disabled unless the grid is verified.
-  if (gridCells) return gridCells;
-  return undefined;
+  if (rowOverride) return buildRowFallbackCandidateRects(image, group, rowOverride);
+  return buildFixedTemplateCandidateRects(image, group);
 }
 
 export function buildRowFallbackCandidateRects(
   image: Pick<ImageAnalysisData, 'width' | 'height' | 'contentBounds'>,
   group: ChoiceGroup,
   rowOverride: { top: number; bottom: number },
-  xReferenceCells?: PixelRect[],
 ): PixelRect[] {
-  const bounds = image.contentBounds || {
-    left: 0,
-    top: 0,
-    right: image.width,
-    bottom: image.height,
-  };
+  const bounds = getRegistrationBounds(image);
   const baseWidth = bounds.right - bounds.left;
   const rowHeight = Math.max(rowOverride.bottom - rowOverride.top, 1);
   const verticalInset = Math.min(Math.max(1, Math.round(rowHeight * 0.15)), Math.floor(rowHeight / 3));
   const top = rowOverride.top + verticalInset;
   const bottom = Math.max(top + 1, rowOverride.bottom - verticalInset);
-  const canUseDetectedColumns = xReferenceCells?.length === group.candidates.length
-    && xReferenceCells.every((cell) => cell.right > cell.left);
-
   return group.candidates.map((candidate, index) => ({
-    left: canUseDetectedColumns
-      ? clampPixel(xReferenceCells![index].left, 0, image.width - 1)
-      : clampPixel(Math.round(bounds.left + candidate.rect.x * baseWidth), 0, image.width - 1),
-    right: canUseDetectedColumns
-      ? clampPixel(xReferenceCells![index].right, 1, image.width)
-      : clampPixel(Math.round(bounds.left + (candidate.rect.x + candidate.rect.width) * baseWidth), 1, image.width),
+    left: clampPixel(Math.round(bounds.left + candidate.rect.x * baseWidth), 0, image.width - 1),
+    right: clampPixel(Math.round(bounds.left + (candidate.rect.x + candidate.rect.width) * baseWidth), 1, image.width),
     top: clampPixel(top, 0, image.height - 1),
     bottom: clampPixel(bottom, 1, image.height),
+  })).map((rect) => ({
+    ...rect,
+    right: Math.max(rect.left + 1, rect.right),
+    bottom: Math.max(rect.top + 1, rect.bottom),
+  }));
+}
+
+export function buildFixedTemplateCandidateRects(
+  image: Pick<ImageAnalysisData, 'width' | 'height' | 'contentBounds'>,
+  group: ChoiceGroup,
+): PixelRect[] {
+  const bounds = getRegistrationBounds(image);
+  const baseWidth = bounds.right - bounds.left;
+  const baseHeight = bounds.bottom - bounds.top;
+
+  return group.candidates.map((candidate) => ({
+    left: clampPixel(Math.round(bounds.left + candidate.rect.x * baseWidth), 0, image.width - 1),
+    right: clampPixel(Math.round(bounds.left + (candidate.rect.x + candidate.rect.width) * baseWidth), 1, image.width),
+    top: clampPixel(Math.round(bounds.top + candidate.rect.y * baseHeight), 0, image.height - 1),
+    bottom: clampPixel(Math.round(bounds.top + (candidate.rect.y + candidate.rect.height) * baseHeight), 1, image.height),
   })).map((rect) => ({
     ...rect,
     right: Math.max(rect.left + 1, rect.right),

@@ -28,6 +28,13 @@ export interface FormRecognitionTemplate {
     width: number;
     height: number;
   };
+  /**
+   * Printed-content frame measured from the blank form, normalized to the
+   * physical sheet. Real photos are registered to this frame after the sheet
+   * itself has been detected, rather than from a dark-pixel envelope that can
+   * include a desk edge, cable, or shadow.
+   */
+  registrationFrame?: NormalizedRect;
   choiceGroups: ChoiceGroup[];
   fieldRegions?: FieldRegion[];
 }
@@ -89,6 +96,9 @@ export const cagiTemplate: FormRecognitionTemplate = {
     width: 474,
     height: 656,
   },
+  // Measured from templates/blank-cagi.png: [154, 190] - [1619, 2219]
+  // inside a 1654 x 2337 page.
+  registrationFrame: rect(0.0931, 0.0813, 0.8857, 0.8682),
   choiceGroups: [
     {
       field: 'basic.gender',
@@ -113,7 +123,12 @@ export const cagiTemplate: FormRecognitionTemplate = {
     ),
   ],
   fieldRegions: [
-    { field: 'basic.age', rect: rect(0.77, 0.163, 0.12, 0.03) },
+    // Measured from the inner age-number rectangle on cagi-blank.png:
+    // [1204, 517] - [1364, 563] in the [154, 190] - [1619, 2219]
+    // registration frame. The prior anchor started at the printed "세"
+    // suffix, so a correct photograph could never expose the handwritten
+    // digits to OCR.
+    { field: 'basic.age', rect: rect(0.716, 0.162, 0.11, 0.023) },
   ],
 };
 
@@ -123,6 +138,9 @@ export const satisfactionTemplate: FormRecognitionTemplate = {
     width: 474,
     height: 656,
   },
+  // Measured from templates/blank-satisfaction.png: [155, 207] -
+  // [1513, 2219] inside a 1654 x 2337 page.
+  registrationFrame: rect(0.0938, 0.0886, 0.8210, 0.8609),
   choiceGroups: [
     makeChoiceGroup('satisfaction.q01', [1, 2, 3, 4], satisfactionFrequencyXs, 0.2852, 0.025),
     ...satisfactionBinaryYs.map((y, index) =>

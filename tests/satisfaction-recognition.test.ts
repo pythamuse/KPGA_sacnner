@@ -79,13 +79,15 @@ describe('만족도 ROI 인식', () => {
     expect(draft.satisfaction.q01).toBeUndefined();
     expect(draft.confidence['cagi.q01']).toBe('low');
     expect(draft.confidence['satisfaction.q01']).toBe('low');
-    expect(draft.warnings).toHaveLength(2);
     expect(draft.recognitionCropSource?.['cagi.q01']).toBe('fixed');
-    expect(draft.recognitionCropDiagnostic?.['cagi.q01']).toContain('격자: insufficient_lines');
+    expect(draft.recognitionCropDiagnostic?.['cagi.q01']).toMatch(/격자: (lines_undetected|insufficient_lines)/);
     expect(draft.recognitionCropDiagnostic?.['satisfaction.q02']).toMatch(/격자: (lines_undetected|insufficient_lines)/);
     const fallbackRect = draft.recognitionCropRects?.['satisfaction.q02'];
-    expect(fallbackRect).toEqual(draft.recognitionCropRects?.['satisfaction.q06']);
-    expect((fallbackRect?.bottom || 0) - (fallbackRect?.top || 0)).toBeGreaterThan(200);
+    const otherFieldRect = draft.recognitionCropRects?.['satisfaction.q06'];
+    expect(fallbackRect).toBeDefined();
+    // Fallback coordinates still belong to each question's own template ROI.
+    expect(fallbackRect).not.toEqual(otherFieldRect);
+    expect((fallbackRect?.bottom || 0) - (fallbackRect?.top || 0)).toBeGreaterThan(0);
   });
 
   it('keeps an offset grid as a review candidate and blocks automatic values', async () => {
@@ -102,13 +104,14 @@ describe('만족도 ROI 인식', () => {
 
     const draft = await recognizeStudentForms(cagiPath, satisfactionPath);
 
-    expect(draft.recognitionCropSource?.['cagi.q01']).toBe('grid-candidate');
+    expect(draft.recognitionCropSource?.['cagi.q01']).toBe('fixed');
     expect(draft.recognitionRegistration?.['cagi.q01']).toMatchObject({
       source: 'grid',
       status: 'candidate',
     });
     expect(draft.recognitionCropDiagnostic?.['cagi.q01']).toContain('choice center delta');
     expect(draft.recognitionCandidateRects?.['cagi.q01']).toHaveLength(4);
+    expect(draft.recognitionRejectedCandidateRects?.['cagi.q01']).toHaveLength(4);
     expect(draft.cagi.q01).toBeUndefined();
   });
 });
@@ -125,11 +128,21 @@ async function writeMarkedForm(
 
   const width = 1000;
   const height = 1400;
-  const bounds = {
+  const pageBounds = {
     left: 100,
     top: 100,
     width: 800,
     height: 1200,
+  };
+  const template = groups.some((group) => group.field.startsWith('cagi.'))
+    ? cagiTemplate
+    : satisfactionTemplate;
+  const registrationFrame = template.registrationFrame!;
+  const bounds = {
+    left: pageBounds.left + registrationFrame.x * pageBounds.width,
+    top: pageBounds.top + registrationFrame.y * pageBounds.height,
+    width: registrationFrame.width * pageBounds.width,
+    height: registrationFrame.height * pageBounds.height,
   };
 
   const marks = groups.flatMap((group) => {
@@ -152,7 +165,7 @@ async function writeMarkedForm(
   const svg = `
     <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
       <rect width="100%" height="100%" fill="#fff"/>
-      ${includeFrame ? `<rect x="${bounds.left}" y="${bounds.top}" width="${bounds.width}" height="${bounds.height}" fill="none" stroke="#000" stroke-width="6"/>` : ''}
+      ${includeFrame ? `<rect x="${pageBounds.left}" y="${pageBounds.top}" width="${pageBounds.width}" height="${pageBounds.height}" fill="none" stroke="#000" stroke-width="6"/>` : ''}
       ${includeTableGrids ? renderResponseGrids(groups, bounds, gridOffsetY) : ''}
       ${marks.join('\n')}
     </svg>

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  buildFixedTemplateCandidateRects,
   buildRowFallbackCandidateRects,
   resolveRecognitionCropDiagnostic,
   resolveRecognitionCropSource,
@@ -20,7 +21,7 @@ describe('recognition crop source provenance', () => {
       status: 'verified',
     })).toBe('grid');
     expect(resolveRecognitionCropSource(cells, row)).toBe('row-fallback');
-    expect(resolveRecognitionCropSource(cells)).toBe('grid-candidate');
+    expect(resolveRecognitionCropSource(cells)).toBe('fixed');
   });
 
   it('records row when only a row override exists', () => {
@@ -31,7 +32,7 @@ describe('recognition crop source provenance', () => {
     expect(resolveRecognitionCropSource()).toBe('fixed');
   });
 
-  it('uses a row fallback with detected candidate columns when grid rows are unstable', () => {
+  it('uses a row fallback with measured template columns when grid rows are unstable', () => {
     const group = cagiTemplate.choiceGroups.find((candidate) => candidate.field === 'cagi.q01');
     if (!group) throw new Error('Missing CAGI q01 template');
 
@@ -48,7 +49,7 @@ describe('recognition crop source provenance', () => {
       contentBounds: { left: 100, top: 100, right: 900, bottom: 1300 },
     };
 
-    const directFallback = buildRowFallbackCandidateRects(image, group, row, rejectedGrid);
+    const directFallback = buildRowFallbackCandidateRects(image, group, row);
     const scoringCells = resolveScoringCells(image, group, rejectedGrid, row, {
       tableId: 'cagi.primary',
       source: 'grid',
@@ -61,12 +62,12 @@ describe('recognition crop source provenance', () => {
     expect(scoringCells).toEqual(directFallback);
     expect(scoringCells).not.toBe(rejectedGrid);
     expect(scoringCells?.every((cell) => cell.top >= row.top && cell.bottom <= row.bottom)).toBe(true);
-    expect(scoringCells?.map((cell) => [cell.left, cell.right])).toEqual(
+    expect(scoringCells?.map((cell) => [cell.left, cell.right])).not.toEqual(
       rejectedGrid.map((cell) => [cell.left, cell.right]),
     );
   });
 
-  it('uses a candidate grid for manual scoring when no row fallback exists', () => {
+  it('uses measured template cells when no registered grid exists', () => {
     const group = cagiTemplate.choiceGroups.find((candidate) => candidate.field === 'cagi.q01');
     if (!group) throw new Error('Missing CAGI q01 template');
 
@@ -91,8 +92,9 @@ describe('recognition crop source provenance', () => {
       candidateCenterDeviation: { x: 0.02, y: 0.01 },
     } as const;
 
-    expect(resolveScoringCells(image, group, candidateGrid, undefined, registration)).toBe(candidateGrid);
-    expect(resolveRecognitionCropSource(candidateGrid, { top: 850, bottom: 880 }, registration)).toBe('grid-candidate');
+    expect(resolveScoringCells(image, group, candidateGrid, undefined, registration))
+      .toEqual(buildFixedTemplateCandidateRects(image, group));
+    expect(resolveRecognitionCropSource(candidateGrid, { top: 850, bottom: 880 }, registration)).toBe('row-fallback');
   });
 
   it('shows diagnostics for every non-verified crop source', () => {
@@ -100,7 +102,7 @@ describe('recognition crop source provenance', () => {
       'fixed',
       'grid: insufficient_lines',
       'row: gap_mismatch',
-    )).toBe('grid: insufficient_lines; row: gap_mismatch');
+    )).toBe('Grid candidate rejected; measured template coordinates used. grid: insufficient_lines; row: gap_mismatch');
     expect(resolveRecognitionCropDiagnostic(
       'grid',
       'grid: gap_mismatch',
