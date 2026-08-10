@@ -5,11 +5,14 @@ interface ErrorSummaryProps {
   errors: ValidationError[];
 }
 
-export default function ErrorSummary({ errors }: ErrorSummaryProps) {
+const ErrorSummary = React.forwardRef<HTMLDivElement, ErrorSummaryProps>(function ErrorSummary(
+  { errors },
+  ref,
+) {
   if (errors.length === 0) return null;
 
   return (
-    <div className="error-box animate-fade-in">
+    <div ref={ref} className="error-box animate-fade-in" role="alert" aria-live="assertive">
       <h3 style={{ fontSize: 16, marginBottom: 10, fontWeight: 800 }}>
         저장 전 확인이 필요한 항목 ({errors.length}건)
       </h3>
@@ -38,4 +41,8 @@ export default function ErrorSummary({ errors }: ErrorSummaryProps) {
       </ul>
     </div>
   );
-}
+});
+
+ErrorSummary.displayName = 'ErrorSummary';
+
+export default ErrorSummary;

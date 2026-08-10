@@ -1,5 +1,6 @@
 import React from 'react';
 import { RecognitionDraft } from '../lib/recognition/detectCheckmarks';
+import { ValidationError } from '../lib/validation/types';
 
 interface RecognitionReviewProps {
   draft: RecognitionDraft;
@@ -8,6 +9,7 @@ interface RecognitionReviewProps {
   onSave: () => void;
   onReset: () => void;
   isSaving: boolean;
+  saveErrors?: ValidationError[];
   currentIndex?: number;
   totalCount?: number;
 }
@@ -37,6 +39,7 @@ export default function RecognitionReview({
   onSave,
   onReset,
   isSaving,
+  saveErrors = [],
   currentIndex = 1,
   totalCount = 1,
 }: RecognitionReviewProps) {
@@ -107,6 +110,18 @@ export default function RecognitionReview({
 
   const getFieldCardStyle = (key: string): React.CSSProperties => {
     const level = getConfidenceLevel(key);
+    const hasSaveError = saveErrors.some((error) => error.field === key);
+
+    if (hasSaveError) {
+      return {
+        border: '2px solid var(--error)',
+        background: 'var(--error-bg)',
+        borderRadius: 8,
+        padding: 11,
+        boxShadow: '0 0 0 3px rgba(216, 48, 36, 0.16)',
+      };
+    }
+
     if (level === 'low') {
       return {
         border: '1px solid #f0b7b2',
@@ -230,7 +245,6 @@ export default function RecognitionReview({
   };
 
   const renderFieldCropPreview = (key: string) => {
-    if (getConfidenceLevel(key) === 'high') return null;
     if (!draft.candidates?.[key]?.length && key !== 'basic.age') return null;
 
     const url = cropUrl(key);
@@ -357,6 +371,34 @@ export default function RecognitionReview({
   const attentionFields = reviewKeys.filter((key) => confidenceRank[getConfidenceLevel(key)] > 0);
   const lowCount = attentionFields.filter((key) => getConfidenceLevel(key) === 'low').length;
   const mediumCount = attentionFields.filter((key) => getConfidenceLevel(key) === 'medium').length;
+  const saveErrorKeys = Array.from(
+    new Set(saveErrors.flatMap((error) => (error.field ? [error.field] : []))),
+  );
+
+  const fieldLabel = (key: string) => {
+    const basicLabels: Record<string, string> = {
+      'basic.age': '연령대',
+      'basic.gender': '성별',
+      'basic.schoolType': '학교유형',
+      'basic.grade': '학년',
+    };
+    if (basicLabels[key]) return basicLabels[key];
+
+    const cagiMatch = key.match(/^cagi\.q(\d{2})$/);
+    if (cagiMatch) return `CAGI ${cagiMatch[1]}`;
+
+    const satisfactionMatch = key.match(/^satisfaction\.q(\d{2})$/);
+    if (satisfactionMatch) {
+      const number = Number(satisfactionMatch[1]);
+      if (number === 1) return '문항1 교육 참여 횟수';
+      if (number <= 6) return `문항${number} 예/아니오`;
+      return `문항${number} 만족도`;
+    }
+
+    return key;
+  };
+
+  const saveErrorMessages = saveErrors.filter((error) => !error.field);
 
   const fieldShell = (label: string, badgeKey: string, control: React.ReactNode) => (
     <div style={getFieldCardStyle(badgeKey)}>
@@ -550,6 +592,26 @@ export default function RecognitionReview({
           })}
         </div>
       </div>
+
+      {saveErrors.length > 0 && (
+        <div className="error-box" role="alert" aria-live="assertive">
+          <strong>
+            {saveErrorKeys.length > 0
+              ? `필수 항목 ${saveErrorKeys.length}개가 비어 있어 저장하지 못했습니다.`
+              : '저장하지 못했습니다.'}
+          </strong>
+          {saveErrorKeys.length > 0 && (
+            <div style={{ marginTop: 6 }}>
+              확인할 항목: {saveErrorKeys.map(fieldLabel).join(', ')}
+            </div>
+          )}
+          {saveErrorMessages.map((error, index) => (
+            <div key={`${error.code}-${index}`} style={{ marginTop: 6 }}>
+              {error.message}
+            </div>
+          ))}
+        </div>
+      )}
 
       <button className="btn-primary" style={{ width: '100%' }} disabled={isSaving} onClick={onSave}>
         {isSaving ? '엑셀 반영 및 검증 중' : '검수 완료 및 엑셀 반영'}

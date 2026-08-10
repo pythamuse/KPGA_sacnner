@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import ImageUploadPanel, { UploadMode } from '@/components/ImageUploadPanel';
 import type { UploadInventory } from '@/lib/uploadInventory';
 import RecognitionReview from '@/components/RecognitionReview';
@@ -115,7 +115,7 @@ function BrandHeader() {
           whiteSpace: 'nowrap',
         }}
       >
-        테스트 버전 v2026-08-10.6
+        테스트 버전 v2026-08-10.7
       </span>
     </div>
   );
@@ -137,7 +137,16 @@ export default function Home() {
   const [isSaving, setIsSaving] = useState(false);
   const [isUploadingFiles, setIsUploadingFiles] = useState(false);
   const [errors, setErrors] = useState<ValidationError[]>([]);
+  const [shouldScrollToErrors, setShouldScrollToErrors] = useState(false);
+  const errorSummaryRef = useRef<HTMLDivElement>(null);
   const [notices, setNotices] = useState<string[]>([]);
+
+  useEffect(() => {
+    if (!shouldScrollToErrors || errors.length === 0) return;
+
+    errorSummaryRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    setShouldScrollToErrors(false);
+  }, [errors, shouldScrollToErrors]);
 
   const resetDraft = () => {
     setCagiImageId(null);
@@ -145,6 +154,7 @@ export default function Home() {
     setDrafts(null);
     setCurrentDraftIndex(0);
     setErrors([]);
+    setShouldScrollToErrors(false);
     setNotices([]);
   };
 
@@ -238,6 +248,7 @@ export default function Home() {
 
     setIsSaving(true);
     setErrors([]);
+    setShouldScrollToErrors(false);
 
     try {
       const res = await fetch('/api/students', {
@@ -257,6 +268,7 @@ export default function Home() {
         } else {
           setErrors([{ code: 'SAVE_FAILED', message: data.error }]);
         }
+        setShouldScrollToErrors(true);
         return;
       }
 
@@ -272,6 +284,7 @@ export default function Home() {
       }
     } catch (err: any) {
       setErrors([{ code: 'SAVE_EXCEPTION', message: `학생 저장 처리 중 실패: ${err.message}` }]);
+      setShouldScrollToErrors(true);
     } finally {
       setIsSaving(false);
     }
@@ -351,7 +364,7 @@ export default function Home() {
       ) : (
         <div className="work-grid">
           <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
-            <ErrorSummary errors={errors} />
+            <ErrorSummary ref={errorSummaryRef} errors={errors} />
             {notices.length > 0 && (
               <div className="notice">
                 <strong>확인 안내:</strong>
@@ -398,6 +411,7 @@ export default function Home() {
                 jobId={jobId}
                 onChange={handleDraftChange}
                 onSave={handleSaveStudent}
+                saveErrors={errors}
                 onReset={resetDraft}
                 isSaving={isSaving}
                 currentIndex={currentDraftIndex + 1}
