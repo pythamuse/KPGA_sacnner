@@ -25,9 +25,18 @@ export interface RowYOverride {
   bottom: number;
 }
 
+export type CandidateRowYOverrides = Record<string, RowYOverride[]>;
+
 export interface RowDetectionResult {
   overrides: Record<string, RowYOverride>;
+  candidateOverrides?: CandidateRowYOverrides;
   diagnostics?: Record<string, string>;
+}
+
+interface BasicGroupRowDetectionResult {
+  override?: RowYOverride;
+  overrides?: RowYOverride[];
+  diagnostic?: string;
 }
 
 const BASIC_CAGI_FIELDS = ['basic.gender', 'basic.schoolType', 'basic.grade'];
@@ -227,15 +236,21 @@ export function buildCagiRowDetection(
  */
 export function buildCagiBasicRowDetection(image: ImageAnalysisData): RowDetectionResult {
   const overrides: Record<string, RowYOverride> = {};
+  const candidateOverrides: CandidateRowYOverrides = {};
   const diagnostics: Record<string, string> = {};
   const groups = BASIC_CAGI_FIELDS
     .map((field) => cagiTemplate.choiceGroups.find((group) => group.field === field))
     .filter((group): group is ChoiceGroup => Boolean(group));
 
   for (const group of groups) {
-    const result = findBasicGroupRow(image, group);
+    const result = group.field === 'basic.gender'
+      ? findBasicGroupRow(image, group)
+      : findBasicCandidateRows(image, group);
     if (result.override) {
       overrides[group.field] = result.override;
+    } else if (result.overrides) {
+      candidateOverrides[group.field] = result.overrides;
+      overrides[group.field] = unionRowOverrides(result.overrides);
     } else if (result.diagnostic) {
       diagnostics[group.field] = result.diagnostic;
     }
@@ -243,40 +258,65 @@ export function buildCagiBasicRowDetection(image: ImageAnalysisData): RowDetecti
 
   return {
     overrides,
+    ...(Object.keys(candidateOverrides).length > 0 ? { candidateOverrides } : {}),
     ...(Object.keys(diagnostics).length > 0 ? { diagnostics } : {}),
   };
 }
 
-function findBasicGroupRow(
+function findBasicCandidateRows(
   image: ImageAnalysisData,
   group: ChoiceGroup,
-): { override?: RowYOverride; diagnostic?: string } {
+): BasicGroupRowDetectionResult {
   const bounds = image.contentBounds || {
     left: 0,
     top: 0,
     right: image.width,
     bottom: image.height,
   };
-  const baseWidth = bounds.right - bounds.left;
+  const baseHeight = bounds.bottom - bounds.top;
+  // The two-line answer text is short and concentrated around each checkbox.
+  // A wide horizontal scan dilutes those strokes below the dark-pixel ratio,
+  // so keep this scan close to the candidate columns.
+  const lines = findBasicGroupLines(image, group, 0.015);
+  const rows: RowYOverride[] = [];
+  const minRowHeight = Math.max(
+    8,
+    Math.round(average(group.candidates.map((candidate) => candidate.rect.height)) * baseHeight * 0.25),
+  );
+
+  for (const candidate of group.candidates) {
+    const centerY = bounds.top + (candidate.rect.y + candidate.rect.height / 2) * baseHeight;
+    const top = [...lines].reverse().find((line) => line < centerY);
+    const bottom = lines.find((line) => line > centerY);
+    if (top === undefined || bottom === undefined || bottom - top < minRowHeight) {
+      return {
+        diagnostic: `행: insufficient_lines (기본정보 후보 행 경계 ${lines.length}개; ${group.field})`,
+      };
+    }
+
+    rows.push({
+      top: clamp(Math.floor(top), 0, image.height - 1),
+      bottom: clamp(Math.ceil(bottom), 1, image.height),
+    });
+  }
+
+  return { overrides: rows };
+}
+
+function findBasicGroupRow(
+  image: ImageAnalysisData,
+  group: ChoiceGroup,
+): BasicGroupRowDetectionResult {
+  const bounds = image.contentBounds || {
+    left: 0,
+    top: 0,
+    right: image.width,
+    bottom: image.height,
+  };
   const baseHeight = bounds.bottom - bounds.top;
   const candidateCenters = group.candidates.map((candidate) => candidate.rect.y + candidate.rect.height / 2);
   const expectedCenter = average(candidateCenters);
-  const candidateTop = Math.min(...group.candidates.map((candidate) => candidate.rect.y));
-  const candidateBottom = Math.max(...group.candidates.map((candidate) => candidate.rect.y + candidate.rect.height));
-  const searchPadding = Math.max(24, Math.round(baseHeight * 0.026));
-  const xPadding = Math.max(12, Math.round(baseWidth * 0.035));
-  const searchTop = bounds.top + candidateTop * baseHeight - searchPadding;
-  const searchBottom = bounds.top + candidateBottom * baseHeight + searchPadding;
-  const answerLeft = Math.min(...group.candidates.map((candidate) => candidate.rect.x));
-  const answerRight = Math.max(...group.candidates.map((candidate) => candidate.rect.x + candidate.rect.width));
-  const lines = detectHorizontalLines(
-    image,
-    searchTop,
-    searchBottom,
-    bounds.left + answerLeft * baseWidth - xPadding,
-    bounds.left + answerRight * baseWidth + xPadding,
-    0.15,
-  ).map((line) => line.y).sort((a, b) => a - b);
+  const lines = findBasicGroupLines(image, group);
 
   const centerY = bounds.top + expectedCenter * baseHeight;
   const minRowHeight = Math.max(
@@ -313,6 +353,45 @@ function findBasicGroupRow(
       top: clamp(Math.floor(bestPair[0]), 0, image.height - 1),
       bottom: clamp(Math.ceil(bestPair[1]), 1, image.height),
     },
+  };
+}
+
+function findBasicGroupLines(
+  image: ImageAnalysisData,
+  group: ChoiceGroup,
+  xPaddingRatio = 0.035,
+): number[] {
+  const bounds = image.contentBounds || {
+    left: 0,
+    top: 0,
+    right: image.width,
+    bottom: image.height,
+  };
+  const baseWidth = bounds.right - bounds.left;
+  const baseHeight = bounds.bottom - bounds.top;
+  const candidateTop = Math.min(...group.candidates.map((candidate) => candidate.rect.y));
+  const candidateBottom = Math.max(...group.candidates.map((candidate) => candidate.rect.y + candidate.rect.height));
+  const searchPadding = Math.max(24, Math.round(baseHeight * 0.026));
+  const xPadding = Math.max(12, Math.round(baseWidth * xPaddingRatio));
+  const searchTop = bounds.top + candidateTop * baseHeight - searchPadding;
+  const searchBottom = bounds.top + candidateBottom * baseHeight + searchPadding;
+  const answerLeft = Math.min(...group.candidates.map((candidate) => candidate.rect.x));
+  const answerRight = Math.max(...group.candidates.map((candidate) => candidate.rect.x + candidate.rect.width));
+
+  return detectHorizontalLines(
+    image,
+    searchTop,
+    searchBottom,
+    bounds.left + answerLeft * baseWidth - xPadding,
+    bounds.left + answerRight * baseWidth + xPadding,
+    0.15,
+  ).map((line) => line.y).sort((a, b) => a - b);
+}
+
+function unionRowOverrides(rows: RowYOverride[]): RowYOverride {
+  return {
+    top: Math.min(...rows.map((row) => row.top)),
+    bottom: Math.max(...rows.map((row) => row.bottom)),
   };
 }
 

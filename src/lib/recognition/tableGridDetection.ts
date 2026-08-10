@@ -1,6 +1,6 @@
 import { type ImageAnalysisData, type PixelBounds, type PixelRect } from './markDensity';
 import { cagiTemplate, satisfactionTemplate, type ChoiceGroup, type NormalizedRect } from './roiTemplates';
-import { buildCagiBasicRowDetection, detectHorizontalLines } from './tableRowDetection';
+import { buildCagiBasicRowDetection, detectHorizontalLines, type RowDetectionResult } from './tableRowDetection';
 
 export interface VerticalLine {
   x: number;
@@ -78,7 +78,7 @@ export function buildCagiGridDetection(image: ImageAnalysisData): GridDetectionR
     'basic.gender', 'basic.schoolType', 'basic.grade',
   ]);
   const basicRowDetection = buildCagiBasicRowDetection(image);
-  const basicOverrides = buildBasicRowCellOverrides(image, basicGroups, basicRowDetection.overrides);
+  const basicOverrides = buildBasicRowCellOverrides(image, basicGroups, basicRowDetection);
   const ageRegion = cagiTemplate.fieldRegions?.find((region) => region.field === 'basic.age');
 
   return {
@@ -98,25 +98,74 @@ export function buildCagiGridDetection(image: ImageAnalysisData): GridDetectionR
 function buildBasicRowCellOverrides(
   image: ImageAnalysisData,
   groups: ChoiceGroup[],
-  rowOverrides: Record<string, { top: number; bottom: number }>,
+  rowDetection: RowDetectionResult,
 ): FieldCellOverrides {
   const bounds = getBounds(image);
   const baseWidth = bounds.right - bounds.left;
 
   return Object.fromEntries(groups.flatMap((group) => {
-    const row = rowOverrides[group.field];
-    if (!row) {
+    const candidateRows = rowDetection.candidateOverrides?.[group.field];
+    const groupRow = rowDetection.overrides[group.field];
+    const rows = candidateRows?.length === group.candidates.length
+      ? candidateRows
+      : group.field === 'basic.gender' && groupRow
+        ? group.candidates.map(() => groupRow)
+        : undefined;
+    if (!rows) {
       return [];
     }
 
-    const cells = group.candidates.map((candidate) => ({
+    const cells = group.candidates.map((candidate, index) => ({
       left: Math.round(bounds.left + candidate.rect.x * baseWidth),
       right: Math.round(bounds.left + (candidate.rect.x + candidate.rect.width) * baseWidth),
-      top: row.top,
-      bottom: row.bottom,
+      top: rows[index].top,
+      bottom: rows[index].bottom,
     }));
+    const duplicate = findDuplicateCandidateRectPair(cells);
+    if (duplicate) {
+      return [];
+    }
     return [[group.field, cells]] as Array<[string, PixelRect[]]>;
   }));
+}
+
+export interface DuplicateCandidateRectPair {
+  firstIndex: number;
+  secondIndex: number;
+}
+
+const DUPLICATE_RECT_TOLERANCE_PX = 2;
+
+export function findDuplicateCandidateRectPair(
+  cells: PixelRect[],
+): DuplicateCandidateRectPair | undefined {
+  for (let firstIndex = 0; firstIndex < cells.length - 1; firstIndex++) {
+    for (let secondIndex = firstIndex + 1; secondIndex < cells.length; secondIndex++) {
+      if (areNearlySameRect(cells[firstIndex], cells[secondIndex])) {
+        return { firstIndex, secondIndex };
+      }
+    }
+  }
+
+  return undefined;
+}
+
+export function assertUniqueCandidateRects(field: string, cells: PixelRect[]): void {
+  const duplicate = findDuplicateCandidateRectPair(cells);
+  if (duplicate) {
+    throw new Error(
+      `${field}: duplicate candidate rectangles at indexes ${duplicate.firstIndex} and ${duplicate.secondIndex}`,
+    );
+  }
+}
+
+function areNearlySameRect(first: PixelRect, second: PixelRect): boolean {
+  return (
+    Math.abs(first.left - second.left) <= DUPLICATE_RECT_TOLERANCE_PX &&
+    Math.abs(first.top - second.top) <= DUPLICATE_RECT_TOLERANCE_PX &&
+    Math.abs(first.right - second.right) <= DUPLICATE_RECT_TOLERANCE_PX &&
+    Math.abs(first.bottom - second.bottom) <= DUPLICATE_RECT_TOLERANCE_PX
+  );
 }
 
 export function buildSatisfactionGridOverrides(image: ImageAnalysisData): FieldCellOverrides {
@@ -259,6 +308,14 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
         overrides: {},
         fieldRects: fallbackFieldRects,
         diagnostics: diagnosticsForGroups(groups, '격자: gap_mismatch (감지선 사이의 셀 크기 부족)'),
+      };
+    }
+
+    if (findDuplicateCandidateRectPair(candidates)) {
+      return {
+        overrides: {},
+        fieldRects: fallbackFieldRects,
+        diagnostics: diagnosticsForGroups(groups, 'grid: duplicate_candidate_rects'),
       };
     }
 

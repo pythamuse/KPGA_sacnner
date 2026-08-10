@@ -2,9 +2,14 @@ import { describe, expect, it } from 'vitest';
 import path from 'path';
 import { recognizeStudentForms } from '../src/lib/recognition/detectCheckmarks';
 import { loadImageAnalysisData, type ImageAnalysisData, type PixelRect } from '../src/lib/recognition/markDensity';
-import { buildCagiGridDetection, buildSatisfactionGridDetection } from '../src/lib/recognition/tableGridDetection';
+import {
+  assertUniqueCandidateRects,
+  buildCagiGridDetection,
+  buildSatisfactionGridDetection,
+} from '../src/lib/recognition/tableGridDetection';
 import {
   cagiTemplate,
+  satisfactionTemplate,
 } from '../src/lib/recognition/roiTemplates';
 
 const fixtureDir = path.join(process.cwd(), 'tests', 'fixtures', 'blank-form');
@@ -80,6 +85,47 @@ describe('real blank-form detection', () => {
     );
     expectTemplateXCentres(cagiImage, cagiGrid.overrides, basicFields);
 
+    const basicCandidateCoordinates = [
+      summarizeCandidateCoordinates(cagiImage, cagiGrid.overrides, 'basic.schoolType'),
+      summarizeCandidateCoordinates(cagiImage, cagiGrid.overrides, 'basic.grade'),
+    ].flat();
+    console.info('blank basic per-candidate coordinates', JSON.stringify(basicCandidateCoordinates, null, 2));
+    expectCandidateCentres(cagiImage, cagiGrid.overrides, 'basic.schoolType');
+    expectCandidateCentres(cagiImage, cagiGrid.overrides, 'basic.grade');
+
+    const schoolYs = cagiGrid.overrides['basic.schoolType'].map((cell) => normalizedY(cagiImage, cell));
+    expect(schoolYs[2] - Math.max(schoolYs[0], schoolYs[1], schoolYs[3])).toBeGreaterThan(0.01);
+    const gradeYs = cagiGrid.overrides['basic.grade'].map((cell) => normalizedY(cagiImage, cell));
+    expect(Math.min(...gradeYs.slice(3)) - Math.max(...gradeYs.slice(0, 3))).toBeGreaterThan(0.01);
+
+  });
+
+  it('rejects duplicate candidate rectangles for every group, including a deliberately collapsed group', async () => {
+    const cagiImage = await loadImageAnalysisData(cagiPath);
+    const satisfactionImage = await loadImageAnalysisData(satisfactionPath);
+    const detections = [
+      { image: cagiImage, overrides: buildCagiGridDetection(cagiImage).overrides, groups: cagiTemplate.choiceGroups },
+      {
+        image: satisfactionImage,
+        overrides: buildSatisfactionGridDetection(satisfactionImage).overrides,
+        groups: satisfactionTemplate.choiceGroups,
+      },
+    ];
+
+    for (const detection of detections) {
+      for (const group of detection.groups) {
+        const cells = detection.overrides[group.field];
+        expect(cells, `${group.field}: grid was not detected`).toBeDefined();
+        expect(() => assertUniqueCandidateRects(group.field, cells!)).not.toThrow();
+      }
+    }
+
+    const collapsed = cagiTemplate.choiceGroups
+      .find((group) => group.field === 'basic.schoolType')!
+      .candidates.map(() => ({ left: 100, top: 200, right: 120, bottom: 220 }));
+    expect(() => assertUniqueCandidateRects('basic.schoolType', collapsed)).toThrow(
+      /duplicate candidate rectangles/,
+    );
   });
 });
 
@@ -164,4 +210,49 @@ function expectTemplateXCentres(
         .toBeLessThanOrEqual(0.01);
     });
   });
+}
+
+function summarizeCandidateCoordinates(
+  image: ImageAnalysisData,
+  overrides: Record<string, PixelRect[]>,
+  field: string,
+) {
+  const group = cagiTemplate.choiceGroups.find((item) => item.field === field);
+  const cells = overrides[field];
+  if (!group || !cells) {
+    throw new Error(`${field}: missing group or grid cells`);
+  }
+
+  return group.candidates.map((candidate, index) => ({
+    field,
+    value: candidate.value,
+    templateX: Number((candidate.rect.x + candidate.rect.width / 2).toFixed(4)),
+    templateY: Number((candidate.rect.y + candidate.rect.height / 2).toFixed(4)),
+    detectedX: Number(normalizedX(image, cells[index]).toFixed(4)),
+    detectedY: Number(normalizedY(image, cells[index]).toFixed(4)),
+  }));
+}
+
+function expectCandidateCentres(
+  image: ImageAnalysisData,
+  overrides: Record<string, PixelRect[]>,
+  field: string,
+) {
+  const group = cagiTemplate.choiceGroups.find((item) => item.field === field)!;
+  const cells = overrides[field];
+  group.candidates.forEach((candidate, index) => {
+    const expectedY = candidate.rect.y + candidate.rect.height / 2;
+    expect(Math.abs(normalizedY(image, cells[index]) - expectedY), `${field}[${index}]: detected y`)
+      .toBeLessThanOrEqual(0.01);
+  });
+}
+
+function normalizedX(image: ImageAnalysisData, cell: PixelRect): number {
+  const bounds = image.contentBounds || { left: 0, right: image.width };
+  return ((cell.left + cell.right) / 2 - bounds.left) / (bounds.right - bounds.left);
+}
+
+function normalizedY(image: ImageAnalysisData, cell: PixelRect): number {
+  const bounds = image.contentBounds || { top: 0, bottom: image.height };
+  return ((cell.top + cell.bottom) / 2 - bounds.top) / (bounds.bottom - bounds.top);
 }
