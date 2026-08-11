@@ -3,7 +3,12 @@ import fs from 'fs';
 import path from 'path';
 import sharp from 'sharp';
 import { classifyForm } from '../src/lib/recognition/classifyForm';
-import { cagiTemplate, ChoiceGroup, satisfactionTemplate } from '../src/lib/recognition/roiTemplates';
+import {
+  cagiTemplate,
+  ChoiceGroup,
+  FormRecognitionTemplate,
+  satisfactionTemplate,
+} from '../src/lib/recognition/roiTemplates';
 
 const fixtureDir = path.join(process.cwd(), 'tmp', 'test-form-classifier');
 
@@ -16,14 +21,14 @@ afterAll(() => {
 describe('이미지 내용 기반 양식 판별', () => {
   it('파일명이 애매해도 CAGI 선택지 구조를 감지한다', async () => {
     const filePath = path.join(fixtureDir, 'unknown-front.png');
-    await writeSyntheticForm(filePath, cagiTemplate.choiceGroups);
+    await writeSyntheticForm(filePath, cagiTemplate);
 
     await expect(classifyForm(filePath)).resolves.toBe('cagi');
   });
 
   it('파일명이 cagi여도 만족도 선택지 구조가 더 강하면 만족도로 판별한다', async () => {
     const filePath = path.join(fixtureDir, 'cagi_wrong_bucket.png');
-    await writeSyntheticForm(filePath, satisfactionTemplate.choiceGroups);
+    await writeSyntheticForm(filePath, satisfactionTemplate);
 
     await expect(classifyForm(filePath)).resolves.toBe('satisfaction');
   });
@@ -43,19 +48,20 @@ describe('이미지 내용 기반 양식 판별', () => {
   });
 });
 
-async function writeSyntheticForm(filePath: string, groups: ChoiceGroup[]) {
+async function writeSyntheticForm(filePath: string, template: FormRecognitionTemplate) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
 
   const width = 1000;
   const height = 1400;
+  const registrationFrame = template.registrationFrame || { x: 0, y: 0, width: 1, height: 1 };
   const bounds = {
-    left: 100,
-    top: 100,
-    width: 800,
-    height: 1200,
+    left: Math.round(registrationFrame.x * width),
+    top: Math.round(registrationFrame.y * height),
+    width: Math.round(registrationFrame.width * width),
+    height: Math.round(registrationFrame.height * height),
   };
 
-  const circles = groups.flatMap((group) =>
+  const circles = template.choiceGroups.flatMap((group) =>
     group.candidates.map((candidate) => {
       const cx = bounds.left + (candidate.rect.x + candidate.rect.width / 2) * bounds.width;
       const cy = bounds.top + (candidate.rect.y + candidate.rect.height / 2) * bounds.height;

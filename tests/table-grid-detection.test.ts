@@ -83,6 +83,58 @@ describe('table grid detection', () => {
     expect(overrides['satisfaction.q07']).toBeUndefined();
   });
 
+  it('recovers a two-column table when only the inner and left rules survive rasterization', async () => {
+    const filePath = path.join(fixtureDir, 'satisfaction-binary-missing-right-rule.png');
+    await writeGridFixture(filePath, groupsFor(satisfactionTemplate.choiceGroups, [
+      'satisfaction.q02', 'satisfaction.q03', 'satisfaction.q04', 'satisfaction.q05', 'satisfaction.q06',
+    ]), {
+      verticalLineIndexes: [0, 1],
+      omitPageFrame: true,
+    });
+
+    const detection = buildSatisfactionGridDetection(await loadWithFixtureBounds(filePath));
+    const registration = detection.registrations['satisfaction.q02'];
+
+    expect(detection.overrides['satisfaction.q02']).toHaveLength(2);
+    expect(registration).toMatchObject({ source: 'grid', status: 'verified' });
+    expect(registration.inferredVerticalLines).toMatchObject({ found: 2, expected: 3 });
+  });
+
+  it('recovers a five-point scale from four measured internal column rules', async () => {
+    const filePath = path.join(fixtureDir, 'satisfaction-scale-missing-outer-rules.png');
+    await writeGridFixture(filePath, groupsFor(satisfactionTemplate.choiceGroups, [
+      'satisfaction.q07', 'satisfaction.q08', 'satisfaction.q09', 'satisfaction.q10',
+    ]), {
+      verticalLineIndexes: [1, 2, 3, 4],
+      omitPageFrame: true,
+    });
+
+    const detection = buildSatisfactionGridDetection(await loadWithFixtureBounds(filePath));
+    const registration = detection.registrations['satisfaction.q07'];
+
+    expect(detection.overrides['satisfaction.q07']).toHaveLength(5);
+    expect(registration).toMatchObject({ source: 'grid', status: 'verified' });
+    expect(registration.inferredVerticalLines).toMatchObject({ found: 4, expected: 6 });
+  });
+
+  it('recovers a CAGI late-table row when the internal horizontal rule is faint', async () => {
+    const filePath = path.join(fixtureDir, 'cagi-late-missing-middle-row-rule.png');
+    await writeGridFixture(filePath, groupsFor(cagiTemplate.choiceGroups, [
+      'cagi.q08', 'cagi.q09',
+    ]), {
+      horizontalLineIndexes: [0, 2],
+      verticalLinePadding: 100,
+      omitPageFrame: true,
+    });
+
+    const detection = buildCagiGridDetection(await loadWithFixtureBounds(filePath));
+    const registration = detection.registrations['cagi.q08'];
+
+    expect(detection.overrides['cagi.q08']).toHaveLength(4);
+    expect(registration).toMatchObject({ source: 'grid', status: 'verified' });
+    expect(registration.inferredHorizontalLines).toMatchObject({ found: 2, expected: 3 });
+  });
+
   it('verifies a locally translated lower satisfaction scale without requiring the upper table to match', async () => {
     const filePath = path.join(fixtureDir, 'satisfaction-scale-local-y-offset.png');
     await writeGridFixture(filePath, groupsFor(satisfactionTemplate.choiceGroups, [
@@ -210,6 +262,8 @@ async function writeGridFixture(
     verticalLineOffsets?: Record<number, number>;
     horizontalLineYs?: number[];
     verticalLineXs?: number[];
+    verticalLinePadding?: number;
+    omitPageFrame?: boolean;
   } = {},
 ) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -226,7 +280,8 @@ async function writeGridFixture(
     ...selectedVerticalIndexes.map((index) => {
       const x = options.verticalLineXs?.[index]
         || xLines[index] + (options.verticalLineOffsets?.[index] || 0);
-      return `<line x1="${x}" y1="${yLines[0]}" x2="${x}" y2="${yLines[yLines.length - 1]}" stroke="#000" stroke-width="4"/>`;
+      const padding = options.verticalLinePadding || 0;
+      return `<line x1="${x}" y1="${yLines[0] - padding}" x2="${x}" y2="${yLines[yLines.length - 1] + padding}" stroke="#000" stroke-width="4"/>`;
     }),
     ...selectedHorizontalIndexes.map((index) => {
       const y = options.horizontalLineYs?.[index]
@@ -237,7 +292,7 @@ async function writeGridFixture(
   const svg = `
     <svg xmlns="http://www.w3.org/2000/svg" width="${page.width}" height="${page.height}">
       <rect width="100%" height="100%" fill="#fff"/>
-      <rect x="${page.left}" y="${page.top}" width="${page.right - page.left}" height="${page.bottom - page.top}" fill="none" stroke="#000" stroke-width="4"/>
+      ${options.omitPageFrame ? '' : `<rect x="${page.left}" y="${page.top}" width="${page.right - page.left}" height="${page.bottom - page.top}" fill="none" stroke="#000" stroke-width="4"/>`}
       ${lines}
     </svg>
   `;
@@ -259,6 +314,15 @@ function deriveBoundaries(centers: number[]): number[] {
 
 function toPagePixels(values: number[], start: number, end: number): number[] {
   return values.map((value) => Math.round(start + value * (end - start)));
+}
+
+async function loadWithFixtureBounds(filePath: string): Promise<ImageAnalysisData> {
+  const image = await loadImageAnalysisData(filePath);
+  return {
+    ...image,
+    contentBounds: page,
+    contentBoundsConfident: true,
+  };
 }
 
 function average(values: number[]): number {

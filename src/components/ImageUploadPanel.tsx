@@ -6,6 +6,10 @@ import {
   warmupPerspectiveWorker,
 } from '@/lib/documentScanner/perspectiveCorrectClient';
 import {
+  hasBatchPerspectiveCorrectionCandidate,
+  shouldCorrectBatchPerspective,
+} from '@/lib/documentScanner/perspectiveCorrectionPolicy';
+import {
   PDFJS_WORKER_SRC,
   buildPdfDocumentOptions,
   hasMeaningfulRenderedPixels,
@@ -520,7 +524,10 @@ export default function ImageUploadPanel({
         }
       }
 
-      if (PERSPECTIVE_CORRECTION_ENABLED && filesToUpload.length > 0) {
+      const hasPerspectiveCorrectionCandidate = hasBatchPerspectiveCorrectionCandidate(
+        filesToUpload.map(({ source }) => source),
+      );
+      if (PERSPECTIVE_CORRECTION_ENABLED && hasPerspectiveCorrectionCandidate) {
         setBatchStatusMessage('페이지 보정 엔진을 준비하고 있습니다.');
         correctionEngineReady = await warmupPerspectiveWorker(BATCH_WORKER_WARMUP_TIMEOUT_MS);
         correctionEngineUnavailable = !correctionEngineReady;
@@ -534,10 +541,11 @@ export default function ImageUploadPanel({
 
       for (let i = 0; i < total; i++) {
         const { file: sourceFile, source } = filesToUpload[i];
-        // PDF pages may already be flat scans, but their per-page crop or
-        // minor skew can still differ. The normalizer keeps the original when
-        // no trustworthy document quadrilateral is found.
-        const needsPerspectiveCorrection = source === 'image' || source === 'pdf';
+        // PDF.js has already rasterized PDF pages into a flat rectangle. Its
+        // per-page offsets are handled by server-side template registration;
+        // running the camera-only OpenCV worker here both adds latency and
+        // turns an unavailable Worker into a warning for every PDF page.
+        const needsPerspectiveCorrection = shouldCorrectBatchPerspective(source);
         let fileToUpload = sourceFile;
         let pageCorrectionWarningAdded = false;
 

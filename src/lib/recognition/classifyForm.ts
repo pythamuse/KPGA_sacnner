@@ -1,13 +1,18 @@
 import fs from 'fs';
 import path from 'path';
-import { calculateDarkPixelDensity, ImageAnalysisData, loadImageAnalysisData } from './markDensity';
+import {
+  applyTemplateRegistrationFrame,
+  calculateDarkPixelDensity,
+  ImageAnalysisData,
+  loadImageAnalysisData,
+} from './markDensity';
 import { ChoiceGroup, FormType, cagiTemplate, satisfactionTemplate } from './roiTemplates';
 
 type ClassifiedFormType = FormType | 'unknown';
 
 // Included in recognition responses so a deployed client can be compared with
 // the classifier policy that produced its result.
-export const FORM_CLASSIFIER_POLICY_VERSION = '2026-08-05.5';
+export const FORM_CLASSIFIER_POLICY_VERSION = '2026-08-11.3';
 
 const imageExtensions = new Set(['.png', '.jpg', '.jpeg', '.webp']);
 
@@ -54,10 +59,16 @@ async function classifyByImageContent(filePath: string): Promise<ClassifiedFormT
       return 'unknown';
     }
 
-    const cagiScore = scoreChoiceLayout(image, cagiTemplate.choiceGroups);
-    const satisfactionScore = scoreChoiceLayout(image, getSatisfactionClassificationGroups());
-    const cagiSignatureScore = scoreChoiceLayout(image, getCagiSignatureGroups());
-    const satisfactionSignatureScore = scoreChoiceLayout(image, getSatisfactionSignatureGroups());
+    // Classification has to use the same measured template coordinate frame
+    // as recognition. Scoring both forms from a raw paper envelope moves the
+    // satisfaction table into CAGI anchors on flat PDF scans and can produce
+    // a false upload-slot mismatch before the review step begins.
+    const cagiImage = applyTemplateRegistrationFrame(image, cagiTemplate.registrationFrame);
+    const satisfactionImage = applyTemplateRegistrationFrame(image, satisfactionTemplate.registrationFrame);
+    const cagiScore = scoreChoiceLayout(cagiImage, cagiTemplate.choiceGroups);
+    const satisfactionScore = scoreChoiceLayout(satisfactionImage, getSatisfactionClassificationGroups());
+    const cagiSignatureScore = scoreChoiceLayout(cagiImage, getCagiSignatureGroups());
+    const satisfactionSignatureScore = scoreChoiceLayout(satisfactionImage, getSatisfactionSignatureGroups());
     const cagiEvidence = combineEvidence(cagiScore, cagiSignatureScore);
     const satisfactionEvidence = combineEvidence(satisfactionScore, satisfactionSignatureScore);
     const scoreGap = Math.abs(cagiEvidence - satisfactionEvidence);

@@ -38,6 +38,7 @@ const GRID_MAX_UNIFORM_CANDIDATE_OFFSET_X = 0.08;
 const GRID_MAX_UNIFORM_CANDIDATE_OFFSET_Y = 0.02;
 const GRID_MAX_CANDIDATE_CENTER_SPREAD = 0.012;
 const GRID_MAX_INTRA_TABLE_OFFSET_DELTA = 0.02;
+const GRID_MAX_RECOVERED_LINE_SCALE_DEVIATION = 0.15;
 
 export type RegistrationStatus = 'verified' | 'candidate' | 'failed';
 export type RegistrationSource = 'grid' | 'row' | 'fixed';
@@ -53,6 +54,8 @@ export interface FieldRegistration {
   status: RegistrationStatus;
   horizontalLines?: { found: number; expected: number };
   verticalLines?: { found: number; expected: number };
+  inferredHorizontalLines?: { found: number; expected: number };
+  inferredVerticalLines?: { found: number; expected: number };
   gapDeviation?: { rows: number; columns: number };
   residualRatio?: { rows: number; columns: number };
   offsetRatio?: { x: number; y: number };
@@ -358,8 +361,21 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
     spec.darkThreshold,
   ).map((line) => line.x);
   const matchedColumns = matchTemplateLinePattern(verticalLines, expectedX);
-  const horizontalSearchLeft = matchedColumns?.[0] ?? expectedX[0] - xTolerance;
-  const horizontalSearchRight = matchedColumns?.[matchedColumns.length - 1]
+  const partialColumnMatch = matchedColumns
+    ? undefined
+    : inferPartialTemplateLinePattern(
+      verticalLines,
+      expectedX,
+      baseWidth,
+      GRID_MAX_UNIFORM_CANDIDATE_OFFSET_X,
+    );
+  // Some scanner PDFs preserve the inner table rules but lose one printed
+  // outer edge during rasterization. A partial match is only accepted below
+  // when an affine reconstruction is locally consistent with every choice
+  // center; it never replaces a complete measured line pattern by itself.
+  const resolvedColumns = matchedColumns || partialColumnMatch?.lines;
+  const horizontalSearchLeft = resolvedColumns?.[0] ?? expectedX[0] - xTolerance;
+  const horizontalSearchRight = resolvedColumns?.[resolvedColumns.length - 1]
     ?? expectedX[expectedX.length - 1] + xTolerance;
   const horizontalLines = detectHorizontalLines(
     image,
@@ -370,12 +386,29 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
     spec.horizontalLineDarkRatio ?? 0.3,
     spec.darkThreshold,
   ).map((line) => line.y);
+  const matchedRows = matchTemplateLinePattern(horizontalLines, expectedY);
+  const partialRowMatch = shouldRecoverPartialTemplateLinePattern(
+    matchedRows,
+    expectedY,
+    baseHeight,
+    horizontalLines.length,
+  )
+    ? inferPartialTemplateLinePattern(
+      horizontalLines,
+      expectedY,
+      baseHeight,
+      spec.maxUniformCandidateOffsetY ?? GRID_MAX_UNIFORM_CANDIDATE_OFFSET_Y,
+    )
+    : undefined;
+  const resolvedRows = partialRowMatch?.lines || matchedRows;
 
   const lineFailure = classifyGridLineFailure(
     horizontalLines.length,
     expectedY.length,
     verticalLines.length,
     expectedX.length,
+    Boolean(resolvedRows),
+    Boolean(resolvedColumns),
   );
   if (lineFailure) {
     return {
@@ -392,10 +425,9 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
     };
   }
 
-  const matchedRows = matchTemplateLinePattern(horizontalLines, expectedY);
-  const rowGapDeviation = getTemplateGapDeviation(matchedRows || horizontalLines, expectedY);
-  const columnGapDeviation = getTemplateGapDeviation(matchedColumns || verticalLines, expectedX);
-  if (!matchedRows || !matchedColumns) {
+  const rowGapDeviation = getTemplateGapDeviation(resolvedRows || horizontalLines, expectedY);
+  const columnGapDeviation = getTemplateGapDeviation(resolvedColumns || verticalLines, expectedX);
+  if (!resolvedRows || !resolvedColumns) {
     const diagnostic = formatGapMismatchDiagnostic(rowGapDeviation, columnGapDeviation);
     return {
       overrides: {},
@@ -417,11 +449,11 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
   const overrides: FieldCellOverrides = {};
   for (let rowIndex = 0; rowIndex < groups.length; rowIndex++) {
     const group = groups[rowIndex];
-    const top = matchedRows[rowIndex];
-    const bottom = matchedRows[rowIndex + 1];
+    const top = resolvedRows[rowIndex];
+    const bottom = resolvedRows[rowIndex + 1];
     const candidates = group.candidates.map((_, columnIndex) => buildCellCenterRect(
-      matchedColumns[columnIndex],
-      matchedColumns[columnIndex + 1],
+      resolvedColumns[columnIndex],
+      resolvedColumns[columnIndex + 1],
       top,
       bottom,
       group.field === 'satisfaction.q01',
@@ -463,9 +495,9 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
   }
 
   const quality = calculateGridQuality(
-    matchedRows,
+    resolvedRows,
     expectedY,
-    matchedColumns,
+    resolvedColumns,
     expectedX,
     baseHeight,
     baseWidth,
@@ -486,6 +518,18 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
       status,
       horizontalLines: { found: horizontalLines.length, expected: expectedY.length },
       verticalLines: { found: verticalLines.length, expected: expectedX.length },
+      ...(partialRowMatch ? {
+        inferredHorizontalLines: {
+          found: partialRowMatch.matchedCount,
+          expected: expectedY.length,
+        },
+      } : {}),
+      ...(partialColumnMatch ? {
+        inferredVerticalLines: {
+          found: partialColumnMatch.matchedCount,
+          expected: expectedX.length,
+        },
+      } : {}),
       gapDeviation: { rows: quality.rowGapDeviation, columns: quality.columnGapDeviation },
       residualRatio: { rows: quality.rowResidualRatio, columns: quality.columnResidualRatio },
       offsetRatio: { x: quality.columnOffsetRatio, y: quality.rowOffsetRatio },
@@ -810,16 +854,160 @@ function classifyGridLineFailure(
   horizontalRequired: number,
   verticalFound: number,
   verticalRequired: number,
+  hasRecoveredHorizontalPattern = false,
+  hasRecoveredVerticalPattern = false,
 ): string | undefined {
   if (horizontalFound === 0 && verticalFound === 0) {
     return `격자: lines_undetected (가로선 0/${horizontalRequired}개, 세로선 0/${verticalRequired}개)`;
   }
 
-  if (horizontalFound < horizontalRequired || verticalFound < verticalRequired) {
+  if (
+    (horizontalFound < horizontalRequired && !hasRecoveredHorizontalPattern)
+    || (verticalFound < verticalRequired && !hasRecoveredVerticalPattern)
+  ) {
     return `격자: insufficient_lines (가로선 ${horizontalFound}/${horizontalRequired}개, 세로선 ${verticalFound}/${verticalRequired}개)`;
   }
 
   return undefined;
+}
+
+interface PartialTemplateLinePattern {
+  lines: number[];
+  matchedCount: number;
+  residualRatio: number;
+}
+
+/**
+ * Reconstructs a missing table rule from measured rules. A complete grid
+ * remains the default. This fallback deliberately needs at least two measured
+ * lines, a near-unity scale, a bounded translation, and later also passes
+ * candidate-center verification before it can score marks.
+ */
+function inferPartialTemplateLinePattern(
+  detected: number[],
+  expected: number[],
+  pageSize: number,
+  maxOffsetRatio: number,
+): PartialTemplateLinePattern | null {
+  if (detected.length < 2 || expected.length < 3) {
+    return null;
+  }
+
+  const sortedDetected = [...detected].sort((first, second) => first - second);
+  const expectedSpan = Math.max(expected[expected.length - 1] - expected[0], 1);
+  // A page-relative tolerance is far too wide for a short two-row table: it
+  // can turn a nearby description divider into a missing row separator. Keep
+  // the tolerance proportional to the table's own span, with a small floor
+  // for rasterization noise.
+  const lineTolerance = Math.max(3, Math.min(pageSize * 0.012, expectedSpan * 0.18));
+  const minimumMatchedLines = Math.max(2, expected.length - 2);
+  let best: (PartialTemplateLinePattern & { score: number; offsetRatio: number }) | undefined;
+
+  for (let detectedStart = 0; detectedStart < sortedDetected.length - 1; detectedStart++) {
+    for (let detectedEnd = detectedStart + 1; detectedEnd < sortedDetected.length; detectedEnd++) {
+      const measuredSpan = sortedDetected[detectedEnd] - sortedDetected[detectedStart];
+      if (measuredSpan <= 0) continue;
+
+      for (let expectedStart = 0; expectedStart < expected.length - 1; expectedStart++) {
+        for (let expectedEnd = expectedStart + 1; expectedEnd < expected.length; expectedEnd++) {
+          const templateSpan = expected[expectedEnd] - expected[expectedStart];
+          if (templateSpan <= 0) continue;
+
+          const scale = measuredSpan / templateSpan;
+          if (
+            scale < 1 - GRID_MAX_RECOVERED_LINE_SCALE_DEVIATION
+            || scale > 1 + GRID_MAX_RECOVERED_LINE_SCALE_DEVIATION
+          ) continue;
+
+          const offset = sortedDetected[detectedStart] - scale * expected[expectedStart];
+          const offsetRatio = Math.abs(offset) / Math.max(pageSize, 1);
+          if (offsetRatio > maxOffsetRatio) continue;
+
+          const lines = expected.map((line) => scale * line + offset);
+          const match = matchTransformedLines(lines, sortedDetected, lineTolerance);
+          if (match.count < minimumMatchedLines) continue;
+
+          const residualRatio = match.totalDeviation / Math.max(match.count * expectedSpan, 1);
+          const score = match.count * 10 - residualRatio * 100 - offsetRatio;
+          if (!best || score > best.score) {
+            best = {
+              lines,
+              matchedCount: match.count,
+              residualRatio,
+              score,
+              offsetRatio,
+            };
+          }
+        }
+      }
+    }
+  }
+
+  return best ? {
+    lines: best.lines,
+    matchedCount: best.matchedCount,
+    residualRatio: best.residualRatio,
+  } : null;
+}
+
+function shouldRecoverPartialTemplateLinePattern(
+  completeMatch: number[] | null,
+  expected: number[],
+  pageSize: number,
+  detectedCount: number,
+): boolean {
+  if (!completeMatch) {
+    return true;
+  }
+
+  // With a large table, an equal-or-greater number of observed rules means a
+  // complete-but-wrong grid must stay a review candidate. The only exception
+  // is a short two-row table: one printed header rule can look like a row
+  // separator while the true internal separator is too faint to detect.
+  if (detectedCount >= expected.length && expected.length > 3) {
+    return false;
+  }
+
+  const gapDeviation = getTemplateGapDeviation(completeMatch, expected);
+  const fit = getLineFit(completeMatch, expected, pageSize);
+  return (
+    gapDeviation === null
+    || gapDeviation > GRID_MAX_GAP_DEVIATION
+    || fit.residualRatio > GRID_MAX_LINE_RESIDUAL_RATIO
+    || Math.abs(fit.scale - 1) > GRID_MAX_RECOVERED_LINE_SCALE_DEVIATION
+  );
+}
+
+function matchTransformedLines(
+  transformed: number[],
+  detected: number[],
+  tolerance: number,
+): { count: number; totalDeviation: number } {
+  const remaining = new Set(detected.map((_, index) => index));
+  let count = 0;
+  let totalDeviation = 0;
+
+  for (const expectedLine of transformed) {
+    let closestIndex: number | undefined;
+    let closestDeviation = Number.POSITIVE_INFINITY;
+    // Keep this as Set#forEach rather than `for...of Set`: the project emits
+    // an ES5-compatible server bundle without downlevelIteration.
+    remaining.forEach((index) => {
+      const deviation = Math.abs(detected[index] - expectedLine);
+      if (deviation < closestDeviation) {
+        closestIndex = index;
+        closestDeviation = deviation;
+      }
+    });
+
+    if (closestIndex !== undefined && closestDeviation <= tolerance) {
+      remaining.delete(closestIndex);
+      count++;
+      totalDeviation += closestDeviation;
+    }
+  }
+
+  return { count, totalDeviation };
 }
 
 function diagnosticsForGroups(groups: ChoiceGroup[], diagnostic: string): Record<string, string> {
