@@ -1,5 +1,8 @@
 # PDF Raster Registration and Grid Recovery (2026-08-11)
 
+> Current fact, hypothesis, and open-item status is maintained in
+> `Task/RECOGNITION_EVIDENCE_LEDGER_2026-08-11.md`.
+
 ## Scope
 
 This note records the regression found with the user-provided 19-page CAGI and

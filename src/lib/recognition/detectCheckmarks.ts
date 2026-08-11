@@ -84,6 +84,7 @@ export interface RecognitionDraft {
 
 export interface RecognitionOptions {
   ocrDeadlineAt?: number;
+  digitOcrDeadlineAt?: number;
 }
 
 /**
@@ -157,7 +158,7 @@ export async function recognizeStudentForms(
         cagiImage.width,
         cagiImage.height,
         getAgeDigitsRect(ageRect),
-        toOcrOptions(options),
+        toDigitOcrOptions(options),
         cagiBaseline && templateAgeRect ? {
           image: cagiBaseline.image,
           rect: getAgeDigitsRect(templateAgeRect),
@@ -387,6 +388,12 @@ function toOcrOptions(options: RecognitionOptions): { deadlineAt?: number } | un
   return options.ocrDeadlineAt === undefined
     ? undefined
     : { deadlineAt: options.ocrDeadlineAt };
+}
+
+function toDigitOcrOptions(options: RecognitionOptions): { deadlineAt?: number } | undefined {
+  return options.digitOcrDeadlineAt === undefined
+    ? undefined
+    : { deadlineAt: options.digitOcrDeadlineAt };
 }
 
 function mapRecognizedSchoolType(value: number | string): string {

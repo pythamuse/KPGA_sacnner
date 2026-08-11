@@ -5,6 +5,10 @@ import path from 'path';
 import { randomUUID } from 'crypto';
 import { classifyForm, FORM_CLASSIFIER_POLICY_VERSION } from '../../../lib/recognition/classifyForm';
 import { recognizeStudentForms } from '../../../lib/recognition/detectCheckmarks';
+import {
+  createRecognitionOcrDeadlines,
+  ROW_ANCHOR_BATCH_BUDGET_MS,
+} from '../../../lib/recognition/ocrBudget';
 import { matchBatch } from '../../../lib/recognition/batchMatcher';
 import { detectCagiEarlyIntervention } from '../../../lib/recognition/cagiEarlyIntervention';
 import { buildSourcePreview } from '../../../lib/recognition/buildSourcePreview';
@@ -175,12 +179,16 @@ export async function POST(req: Request) {
     }
 
     const studentDrafts = [];
-    // A first request in a serverless instance may need to initialize the
-    // shared OCR worker. Keep it bounded, but allow the small age-number crop
-    // enough time to finish rather than silently returning no value.
-    const ocrDeadlineAt = Date.now() + 6_000;
-    for (const pair of matchedPairs) {
-      const draft = await recognizeStudentForms(pair.cagiPath, pair.satisfactionPath, { ocrDeadlineAt });
+    // Row anchor OCR remains batch-bounded. Age digits use a separate
+    // per-student deadline so later students are still allowed one OCR attempt.
+    const rowOcrDeadlineAt = Date.now() + ROW_ANCHOR_BATCH_BUDGET_MS;
+    for (let studentIndex = 0; studentIndex < matchedPairs.length; studentIndex++) {
+      const pair = matchedPairs[studentIndex];
+      const draft = await recognizeStudentForms(
+        pair.cagiPath,
+        pair.satisfactionPath,
+        createRecognitionOcrDeadlines(rowOcrDeadlineAt, studentIndex),
+      );
       const {
         recognitionCropRects,
         recognitionCandidateRects,
