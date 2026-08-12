@@ -1,4 +1,4 @@
-import { describe, it } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -13,8 +13,9 @@ import { cagiTemplate, satisfactionTemplate } from '../src/lib/recognition/roiTe
 /**
  * Root-cause isolation harness.
  *
- * Real scans carry student answers and contact traces, so they are NEVER
- * committed. Point these at files outside the repository:
+ * Real scans and their answer keys carry student responses, so they are NEVER
+ * committed. Keep them in the gitignored `local-scans/` directory and point
+ * these at files outside version control:
  *
  *   REAL_SCAN_CAGI_PDF="C:/.../선별검사 샘플1.pdf" \
  *   REAL_SCAN_SAT_PDF="C:/.../만족도조사1.pdf" \
@@ -24,14 +25,19 @@ import { cagiTemplate, satisfactionTemplate } from '../src/lib/recognition/roiTe
  * anyone who does not hold the scans.
  *
  * Headline numbers to record in the Task doc for every experiment branch:
- *   AUTO  = fields auto-filled (of 23)   -- the metric the work is judged on
- *   HIGH  = fields at 높음 confidence
- *   OFF   = fields whose detected row centre misses the measured template by >0.01
+ *   CORRECT = auto-filled AND matching the answer key -- judge the work on this
+ *   WRONG   = auto-filled but DIFFERENT from the key  -- must stay 0, asserted
+ *   BLANK   = not auto-filled (safe: the reviewer fills it in)
+ *
+ * Counting filled fields instead of correct ones is what let a change that
+ * added four wrong high-confidence values look like an improvement.
  */
 
 const CAGI_PDF = process.env.REAL_SCAN_CAGI_PDF;
 const SAT_PDF = process.env.REAL_SCAN_SAT_PDF;
 const PAGES = Number(process.env.REAL_SCAN_PAGES || 2);
+const KEY_PATH = process.env.REAL_SCAN_ANSWER_KEY
+  || path.join(process.cwd(), 'local-scans', 'answer-key.json');
 
 const measuredY: Record<string, number> = {
   'basic.gender': 0.1540, 'basic.schoolType': 0.1788, 'basic.grade': 0.2180,
@@ -49,6 +55,12 @@ const ALL_FIELDS = [
   ...Array.from({ length: 9 }, (_, i) => `cagi.q${String(i + 1).padStart(2, '0')}`),
   ...Array.from({ length: 10 }, (_, i) => `satisfaction.q${String(i + 1).padStart(2, '0')}`),
 ];
+
+function loadAnswerKey(): Array<Record<string, unknown>> | undefined {
+  if (!fs.existsSync(KEY_PATH)) return undefined;
+  const parsed = JSON.parse(fs.readFileSync(KEY_PATH, 'utf8')) as { pages?: Array<Record<string, unknown>> };
+  return parsed.pages;
+}
 
 async function renderPdfPages(pdfPath: string, pages: number, outDir: string, label: string) {
   const { createCanvas, Image, ImageData } = await import('canvas');
@@ -114,31 +126,35 @@ async function countCoordinateMisses(cagiPng: string, satPng: string) {
   ];
   let off = 0;
   let missing = 0;
-  const detail: string[] = [];
   for (const [image, overrides, template] of sets) {
     for (const group of template.choiceGroups) {
       const cells = overrides[group.field];
       const expected = measuredY[group.field];
-      if (!cells) { missing += 1; detail.push(`${group.field}=MISSING`); continue; }
+      if (!cells) { missing += 1; continue; }
       if (expected === undefined) continue;
-      const d = rowCentre(image, cells) - expected;
-      if (Math.abs(d) > 0.01) { off += 1; detail.push(`${group.field}=${d.toFixed(4)}`); }
+      if (Math.abs(rowCentre(image, cells) - expected) > 0.01) off += 1;
     }
   }
-  return { off, missing, detail };
+  return { off, missing };
 }
 
 describe.skipIf(!CAGI_PDF || !SAT_PDF)('real scan measurement', () => {
-  it('reports auto-fill and coordinate accuracy per student page', async () => {
+  it('never auto-fills a value that disagrees with the answer key', async () => {
+    const answerKey = loadAnswerKey();
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kpga-scan-'));
     const cagiPngs = await renderPdfPages(CAGI_PDF!, PAGES, tmp, 'cagi');
     const satPngs = await renderPdfPages(SAT_PDF!, PAGES, tmp, 'sat');
 
     const report: string[] = ['\n================ REAL SCAN MEASUREMENT ================'];
-    let totalAuto = 0;
-    let totalHigh = 0;
-    let totalOff = 0;
-    let totalMissing = 0;
+    if (!answerKey) {
+      report.push(`(no answer key at ${KEY_PATH} — correctness not judged)`);
+    }
+    let tCorrect = 0;
+    let tWrong = 0;
+    let tBlank = 0;
+    let tOff = 0;
+    let tMissing = 0;
+    const wrongDetail: string[] = [];
 
     for (let i = 0; i < Math.min(cagiPngs.length, satPngs.length); i += 1) {
       const draft = await recognizeStudentForms(cagiPngs[i], satPngs[i]);
@@ -150,27 +166,53 @@ describe.skipIf(!CAGI_PDF || !SAT_PDF)('real scan measurement', () => {
         ...Object.fromEntries(Object.entries(draft.cagi || {}).map(([k, v]) => [`cagi.${k}`, v])),
         ...Object.fromEntries(Object.entries(draft.satisfaction || {}).map(([k, v]) => [`satisfaction.${k}`, v])),
       };
-
-      const auto = ALL_FIELDS.filter((f) => values[f] !== undefined && values[f] !== null);
-      const high = ALL_FIELDS.filter((f) => draft.confidence?.[f] === 'high');
+      const key = answerKey?.[i];
       const coords = await countCoordinateMisses(cagiPngs[i], satPngs[i]);
 
-      totalAuto += auto.length;
-      totalHigh += high.length;
-      totalOff += coords.off;
-      totalMissing += coords.missing;
+      let correct = 0;
+      let wrong = 0;
+      let blank = 0;
+      const rows: string[] = [];
+      for (const field of ALL_FIELDS) {
+        const got = values[field];
+        const want = key?.[field];
+        let verdict = '-';
+        if (got === undefined || got === null || got === '') {
+          blank += 1;
+          verdict = 'BLANK';
+        } else if (want === undefined) {
+          verdict = 'filled';
+        } else if (String(got) === String(want)) {
+          correct += 1;
+          verdict = 'ok';
+        } else {
+          wrong += 1;
+          verdict = `WRONG (want ${want})`;
+          wrongDetail.push(`p${i + 1} ${field}: got ${got}, want ${want}, conf=${draft.confidence?.[field]}`);
+        }
+        rows.push(`  ${field.padEnd(18)} got=${String(got ?? '-').padEnd(7)} conf=${String(draft.confidence?.[field] ?? '-').padEnd(7)} src=${String(draft.recognitionCropSource?.[field] ?? '-').padEnd(12)} ${verdict}`);
+      }
+
+      tCorrect += correct; tWrong += wrong; tBlank += blank;
+      tOff += coords.off; tMissing += coords.missing;
 
       report.push(`\n--- student page ${i + 1} ---`);
-      report.push(`AUTO ${auto.length}/23   HIGH ${high.length}/23   OFF ${coords.off}   MISSING ${coords.missing}`);
-      report.push(`  blank : ${ALL_FIELDS.filter((f) => !auto.includes(f)).join(', ') || '(none)'}`);
-      if (coords.detail.length) report.push(`  coord : ${coords.detail.join(', ')}`);
-      for (const f of ALL_FIELDS) {
-        report.push(`  ${f.padEnd(18)} value=${String(values[f] ?? '-').padEnd(6)} conf=${String(draft.confidence?.[f] ?? '-').padEnd(7)} src=${draft.recognitionCropSource?.[f] ?? '-'}`);
-      }
+      report.push(`CORRECT ${correct}/23   WRONG ${wrong}   BLANK ${blank}   OFF ${coords.off}   MISSING ${coords.missing}`);
+      report.push(...rows);
     }
 
     report.push('\n================ TOTAL ================');
-    report.push(`AUTO ${totalAuto}/${23 * PAGES}   HIGH ${totalHigh}/${23 * PAGES}   OFF ${totalOff}   MISSING ${totalMissing}`);
+    report.push(`CORRECT ${tCorrect}/${23 * PAGES}   WRONG ${tWrong}   BLANK ${tBlank}   OFF ${tOff}   MISSING ${tMissing}`);
+    if (wrongDetail.length) {
+      report.push('\n!!! WRONG AUTO-FILLED VALUES !!!');
+      report.push(...wrongDetail.map((d) => `  ${d}`));
+    }
     console.info(report.join('\n'));
+
+    // A blank field costs the reviewer a keystroke; a wrong one is saved to the
+    // central system as if a human had confirmed it. Never trade the second for
+    // the first.
+    expect(wrongDetail, `auto-filled values disagree with the answer key:\n${wrongDetail.join('\n')}`)
+      .toEqual([]);
   }, 900_000);
 });

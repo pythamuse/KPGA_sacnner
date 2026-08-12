@@ -42,3 +42,6 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+
+# Real scans and their answer keys: student responses, never committed
+local-scans/
