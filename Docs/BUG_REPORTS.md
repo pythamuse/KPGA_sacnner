@@ -20,6 +20,9 @@
 | 14 | JBIG2 스캔 PDF가 빈 캔버스로 변환되어 검수 원본과 ROI가 모두 비어 보임 | 수정 완료, 실제 19페이지 PDF 재검증 필요 | [PDF_JBIG2_WASM_RENDER_GUARD](../Task/PDF_JBIG2_WASM_RENDER_GUARD.md) |
 | 15 | 내용 분류가 `unknown`인 스캔 페이지를 목록에서 제외해 잘못된 장수 불일치 발생 | 수정 완료, 실제 19페이지 PDF 재검증 필요 | [PDF_BATCH_UNKNOWN_FORM_FALLBACK](../Task/PDF_BATCH_UNKNOWN_FORM_FALLBACK.md) |
 | 16 | Vercel 인스턴스별 임시 디스크에 업로드를 보관해 실제 19페이지 PDF가 18/19로 집계됨 | 완화(Blob 영속화 구현·배포, 잔여 리스크 있음) | [STATELESS_ARCHITECTURE_MIGRATION](../Task/STATELESS_ARCHITECTURE_MIGRATION.md) |
+| 17 | 성별·학교유형·학년이 좌표가 정확해도 **구조적으로** 자동 입력되지 않음 | 원인 확정, 수정 착수 전 | [RECOGNITION_ROOT_CAUSE_ISOLATION_2026-08-13](../Task/RECOGNITION_ROOT_CAUSE_ISOLATION_2026-08-13.md) |
+| 18 | 연령대 OCR이 요청 예산 안에 끝나지 않아 항상 빈칸 | 원인 확정, 수정 착수 전 | [RECOGNITION_ROOT_CAUSE_ISOLATION_2026-08-13](../Task/RECOGNITION_ROOT_CAUSE_ISOLATION_2026-08-13.md) |
+| 19 | 격자 거부 시 템플릿 폴백이 실제 페이지보다 부정확해 값 인식 실패 | 원인 확정, 수정 착수 전 | [RECOGNITION_ROOT_CAUSE_ISOLATION_2026-08-13](../Task/RECOGNITION_ROOT_CAUSE_ISOLATION_2026-08-13.md) |
 
 ---
 
@@ -134,3 +137,23 @@
 **추가 진단**: 실제 선별검사 샘플 원본과 OpenCV 보정 결과는 모두 CAGI로 판정됐다. 같은 보정 결과를 구 분류기(만족도 문항 1~5만 비교)에 넣었을 때만 CAGI `0.534`, 만족도 `0.776`으로 뒤집혔으며, 화면 오류와 일치한다. 따라서 이번 화면은 파일 자체보다 이전 분류 정책을 사용하는 배포본 또는 최신 커밋 미반영 상태에서 발생한 것으로 판단한다.
 **대응**: 프레임 최소 크기를 입력의 70% 폭·78% 높이, 여백을 각 20% 이내로 강화해 중앙 내부 표를 문서 프레임으로 승격하지 않도록 했다. 인식 응답에 `recognitionPolicyVersion: 2026-08-05.3`을 포함해 배포본 정책을 확인할 수 있게 했다.
 **상태**: 코드 및 회귀 테스트 완료(전체 12개 파일, 52개 테스트). 새 커밋 배포 후 `/api/recognize` 응답의 정책 버전과 실제 샘플 재검증이 남아 있다.
+
+## 17. 기본정보 3개 항목의 구조적 자동 입력 차단
+
+**재현**: 실제 스캔 PDF를 일괄 업로드하면 성별·학교유형·학년이 **모든 페이지에서** `낮음`/`미확정`으로 남고 값이 비어 있다. 좌표는 정확하다 — 실측 대비 오차 0.06~0.17%.
+**원인**: 자동 입력 게이트 `isVerifiedGrid()`는 `source==='grid' && status==='verified'`를 요구하는데(`detectCheckmarks.ts:552`), 기본정보 등록 정보는 `source: 'row'|'fixed'`, `status: 'candidate'|'failed'`로 하드코딩돼 있다(`tableGridDetection.ts:212`). 두 조건을 만족할 코드 경로가 없다. 기본정보의 X좌표가 검출값이 아니라 템플릿 상수이므로("열 기하 미검증"이 항상 참) 발생한 설계상 사각지대다.
+**대응**: 미착수. 열 좌표를 실제로 검출하거나, "행 검증됨 + 열은 템플릿" 상태에 대한 승인 등급을 신설하는 두 방향을 검토 중.
+**상태**: 원인 확정(코드 경로 추적 + 실측). 자동 확정 임계값을 낮추는 방식은 금지 — 판정 기준이 아니라 등급 부여 경로가 없는 문제다.
+
+## 18. 연령대 OCR 미완료
+
+**원인**: 요청 단위 OCR 예산 안에 숫자 OCR이 끝나지 않는다. 화면 진단 문구가 `Age OCR did not finish within the allowed time` 또는 `OCR worker was still initializing`으로 직접 표시된다. 좌표는 실측 템플릿 앵커를 사용해 정상.
+**대응**: 미착수.
+**상태**: 원인 확정. 배경은 [OCR_ANCHORED_ROW_DETECTION](../Task/OCR_ANCHORED_ROW_DETECTION.md)의 예산 도입 경위 참고.
+
+## 19. 격자 거부 후 템플릿 폴백의 역효과
+
+**재현**: 만족도조사 2번째 학생 페이지에서 문항 1~6이 `낮음`으로 남고 일부가 빈칸.
+**원인**: 격자 후보가 `최대 편차 78%(허용 35%)`로 거부되고 실측 템플릿 좌표로 폴백했는데, 그 페이지는 중간 표만 다른 위치에 있어 폴백 좌표가 0.012~0.021 어긋났다. 같은 페이지의 문항 7~10은 정상 범위이므로 페이지 전체가 밀린 것이 아니다.
+**대응**: 미착수. 해당 페이지에서는 거부된 격자 쪽이 오히려 정확했을 가능성이 있어 실험으로 확인 필요.
+**상태**: 원인 확정, 대응 방향 미확정.
