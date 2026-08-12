@@ -3,6 +3,7 @@ import {
   parseAgeOcrText,
   parseTrustedAgeOcrText,
   recognizeDigitsInRegion,
+  recognizeDigitsInRegionDetailed,
 } from '../src/lib/recognition/ocrTextLines';
 import path from 'path';
 import { getAgeDigitsRect, recognizeStudentForms } from '../src/lib/recognition/detectCheckmarks';
@@ -40,6 +41,20 @@ describe('age OCR validation', () => {
     );
 
     expect(age).toBeUndefined();
+  });
+
+  it('records the reason when the per-student age OCR deadline has expired', async () => {
+    const result = await recognizeDigitsInRegionDetailed(
+      Buffer.from('not-an-image'),
+      100,
+      100,
+      { left: 10, top: 10, right: 90, bottom: 90 },
+      { deadlineAt: Date.now() - 1 },
+    );
+
+    expect(result.value).toBeUndefined();
+    expect(result.status).toBe('deadline_exhausted');
+    expect(result.diagnostic).toContain('deadline');
   });
 
   it('keeps both handwritten digits inside the measured age-number box', () => {

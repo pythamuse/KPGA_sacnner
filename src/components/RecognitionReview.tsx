@@ -1,5 +1,5 @@
 import React from 'react';
-import { RecognitionDraft } from '../lib/recognition/detectCheckmarks';
+import { RecognitionDraft, type RecognitionValueSource } from '../lib/recognition/detectCheckmarks';
 import { ValidationError } from '../lib/validation/types';
 
 interface RecognitionReviewProps {
@@ -45,9 +45,32 @@ export default function RecognitionReview({
   currentIndex = 1,
   totalCount = 1,
 }: RecognitionReviewProps) {
+  const buildManualReviewSource = (field: string) => {
+    const priorTrace = draft.source?.recognitionDecisionTrace?.[field];
+
+    return {
+      ...(draft.source || {}),
+      recognitionValueSource: {
+        ...(draft.source?.recognitionValueSource || {}),
+        [field]: 'manual' as RecognitionValueSource,
+      },
+      recognitionManualEditedAt: {
+        ...(draft.source?.recognitionManualEditedAt || {}),
+        [field]: new Date().toISOString(),
+      },
+      recognitionDecisionTrace: {
+        ...(draft.source?.recognitionDecisionTrace || {}),
+        [field]: priorTrace
+          ? `${priorTrace} Value was entered or changed during manual review.`
+          : 'Value was entered or changed during manual review.',
+      },
+    };
+  };
+
   const handleBasicChange = (field: string, val: any) => {
     onChange({
       ...draft,
+      source: buildManualReviewSource(`basic.${field}`),
       basic: {
         ...draft.basic,
         [field]: val,
@@ -58,6 +81,7 @@ export default function RecognitionReview({
   const handleCagiChange = (field: string, val: number) => {
     onChange({
       ...draft,
+      source: buildManualReviewSource(`cagi.${field}`),
       cagi: {
         ...draft.cagi,
         [field]: val,
@@ -68,6 +92,7 @@ export default function RecognitionReview({
   const handleSatisfactionChange = (field: string, val: number) => {
     onChange({
       ...draft,
+      source: buildManualReviewSource(`satisfaction.${field}`),
       satisfaction: {
         ...draft.satisfaction,
         [field]: val,
@@ -255,6 +280,44 @@ export default function RecognitionReview({
     );
   };
 
+  const renderValueSourceBadge = (key: string) => {
+    const source = draft.source?.recognitionValueSource?.[key] || 'unresolved';
+    const manualEditedAt = draft.source?.recognitionManualEditedAt?.[key];
+    const styleMap: Record<RecognitionValueSource, { border: string; text: string; bg: string; label: string }> = {
+      auto: { border: '#9fdfc5', text: '#177245', bg: '#eefaf3', label: '자동 인식' },
+      manual: { border: '#b9c8f3', text: '#405aa8', bg: '#f2f5ff', label: '수기 수정' },
+      unresolved: { border: '#d8dde8', text: '#667085', bg: '#f6f8fb', label: '미확정' },
+    };
+    const style = styleMap[source];
+    const title = manualEditedAt
+      ? `수기 수정 시각: ${new Date(manualEditedAt).toLocaleString('ko-KR')}`
+      : source === 'auto'
+        ? '자동 인식값으로 확정되었습니다.'
+        : '자동 인식값이 확정되지 않아 검수가 필요합니다.';
+
+    return (
+      <span
+        title={title}
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          minHeight: 24,
+          padding: '2px 8px',
+          borderRadius: 999,
+          border: `1px solid ${style.border}`,
+          color: style.text,
+          background: style.bg,
+          fontSize: 12,
+          fontWeight: 700,
+          marginLeft: 6,
+          whiteSpace: 'nowrap',
+        }}
+      >
+        {style.label}
+      </span>
+    );
+  };
+
   const openDataUrlInNewTab = async (event: React.MouseEvent, dataUrl: string) => {
     event.preventDefault();
     try {
@@ -311,10 +374,10 @@ export default function RecognitionReview({
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginTop: 5 }}>
           {renderCropSourceBadge(key)}
           <a
-            href={debugUrl}
+            href={inlineUrl}
             target="_blank"
             rel="noreferrer"
-            onClick={(e) => openDataUrlInNewTab(e, debugUrl)}
+            onClick={(e) => openDataUrlInNewTab(e, inlineUrl)}
             style={{
               color: 'var(--brand-primary-active)',
               fontSize: 12,
@@ -426,21 +489,50 @@ export default function RecognitionReview({
     return key;
   };
 
+  const renderDecisionTrace = (key: string) => {
+    const trace = draft.source?.recognitionDecisionTrace?.[key];
+    if (!trace) return null;
+
+    return (
+      <p
+        style={{
+          margin: '8px 0 0',
+          color: 'var(--text-muted)',
+          fontSize: 11,
+          fontWeight: 600,
+          lineHeight: 1.4,
+          overflowWrap: 'anywhere',
+        }}
+      >
+        {trace}
+      </p>
+    );
+  };
+
   const formatPercent = (value?: number) => value === undefined
     ? '-'
     : `${value >= 0 ? '+' : ''}${Math.round(value * 100)}%`;
 
   const renderCoordinateDiagnostics = () => {
     const registrations = draft.source?.recognitionRegistration;
-    if (!registrations || Object.keys(registrations).length === 0) return null;
+    const valueSources = draft.source?.recognitionValueSource;
+    const decisionTraces = draft.source?.recognitionDecisionTrace;
+    if (!registrations && !valueSources && !decisionTraces) return null;
 
     const entries = reviewKeys
-      .filter((key) => registrations[key] || draft.source?.recognitionCropSource?.[key])
+      .filter((key) => (
+        registrations?.[key]
+        || draft.source?.recognitionCropSource?.[key]
+        || valueSources?.[key]
+        || decisionTraces?.[key]
+      ))
       .map((key) => ({
         key,
-        registration: registrations[key],
+        registration: registrations?.[key],
         source: draft.source?.recognitionCropSource?.[key],
         diagnostic: draft.source?.recognitionCropDiagnostic?.[key],
+        valueSource: valueSources?.[key] || 'unresolved',
+        decisionTrace: decisionTraces?.[key],
       }));
 
     if (entries.length === 0) return null;
@@ -458,7 +550,7 @@ export default function RecognitionReview({
           좌표 진단 데이터 ({entries.length}개 항목)
         </summary>
         <div style={{ display: 'grid', gap: 8, marginTop: 12 }}>
-          {entries.map(({ key, registration, source, diagnostic }) => {
+          {entries.map(({ key, registration, source, diagnostic, valueSource, decisionTrace }) => {
             const horizontal = registration?.horizontalLines;
             const vertical = registration?.verticalLines;
             const gap = registration?.gapDeviation;
@@ -482,6 +574,7 @@ export default function RecognitionReview({
                 <strong>{fieldLabel(key)}</strong>
                 <span style={{ color: 'var(--text-muted)' }}>
                   {' '}| {source ? cropSourceLabel[source] : '좌표 정보 없음'}
+                  {' '}| {valueSource === 'auto' ? '자동 인식' : valueSource === 'manual' ? '수기 수정' : '미확정'}
                   {registration ? ` | ${registration.tableId} / ${registration.status}` : ''}
                 </span>
                 {horizontal && vertical && (
@@ -498,6 +591,7 @@ export default function RecognitionReview({
                   </div>
                 )}
                 {diagnostic && <div style={{ color: 'var(--text-muted)' }}>{diagnostic}</div>}
+                {decisionTrace && <div style={{ color: 'var(--text-muted)' }}>{decisionTrace}</div>}
               </div>
             );
           })}
@@ -513,10 +607,12 @@ export default function RecognitionReview({
       <label style={{ display: 'block', fontSize: 14, fontWeight: 700, marginBottom: 7 }}>
         {label}
         {renderConfidenceBadge(badgeKey)}
+        {renderValueSourceBadge(badgeKey)}
       </label>
       {control}
       {renderCandidateSummary(badgeKey)}
       {renderFieldCropPreview(badgeKey)}
+      {renderDecisionTrace(badgeKey)}
     </div>
   );
 
@@ -619,6 +715,7 @@ export default function RecognitionReview({
                 <label style={{ display: 'block', fontSize: 13, fontWeight: 700, marginBottom: 7 }}>
                   CAGI {num}
                   {renderConfidenceBadge(`cagi.q${num}`)}
+                  {renderValueSourceBadge(`cagi.q${num}`)}
                 </label>
                 <select value={val !== undefined ? val : ''} onChange={(e) => handleCagiChange(key, parseInt(e.target.value, 10))}>
                   <option value="">선택</option>
@@ -629,6 +726,7 @@ export default function RecognitionReview({
                 </select>
                 {renderCandidateSummary(`cagi.q${num}`)}
                 {renderFieldCropPreview(`cagi.q${num}`)}
+                {renderDecisionTrace(`cagi.q${num}`)}
               </div>
             );
           })}
@@ -642,6 +740,7 @@ export default function RecognitionReview({
             <label style={{ display: 'block', fontSize: 13, fontWeight: 700, marginBottom: 7 }}>
               문항1 교육 참여 횟수
               {renderConfidenceBadge('satisfaction.q01')}
+              {renderValueSourceBadge('satisfaction.q01')}
             </label>
             <select value={draft.satisfaction.q01 !== undefined ? draft.satisfaction.q01 : ''} onChange={(e) => handleSatisfactionChange('q01', parseInt(e.target.value, 10))}>
               <option value="">선택</option>
@@ -652,6 +751,7 @@ export default function RecognitionReview({
             </select>
             {renderCandidateSummary('satisfaction.q01')}
             {renderFieldCropPreview('satisfaction.q01')}
+            {renderDecisionTrace('satisfaction.q01')}
           </div>
 
           {Array.from({ length: 5 }).map((_, idx) => {
@@ -664,6 +764,7 @@ export default function RecognitionReview({
                 <label style={{ display: 'block', fontSize: 13, fontWeight: 700, marginBottom: 7 }}>
                   문항{num} 예/아니오
                   {renderConfidenceBadge(`satisfaction.q0${num}`)}
+                  {renderValueSourceBadge(`satisfaction.q0${num}`)}
                 </label>
                 <select value={val !== undefined ? val : ''} onChange={(e) => handleSatisfactionChange(key, parseInt(e.target.value, 10))}>
                   <option value="">선택</option>
@@ -672,6 +773,7 @@ export default function RecognitionReview({
                 </select>
                 {renderCandidateSummary(`satisfaction.q0${num}`)}
                 {renderFieldCropPreview(`satisfaction.q0${num}`)}
+                {renderDecisionTrace(`satisfaction.q0${num}`)}
               </div>
             );
           })}
@@ -686,6 +788,7 @@ export default function RecognitionReview({
                 <label style={{ display: 'block', fontSize: 13, fontWeight: 700, marginBottom: 7 }}>
                   문항{num} 만족도
                   {renderConfidenceBadge(`satisfaction.${key}`)}
+                  {renderValueSourceBadge(`satisfaction.${key}`)}
                 </label>
                 <select value={val !== undefined ? val : ''} onChange={(e) => handleSatisfactionChange(key, parseInt(e.target.value, 10))}>
                   <option value="">선택</option>
@@ -697,6 +800,7 @@ export default function RecognitionReview({
                 </select>
                 {renderCandidateSummary(`satisfaction.${key}`)}
                 {renderFieldCropPreview(`satisfaction.${key}`)}
+                {renderDecisionTrace(`satisfaction.${key}`)}
               </div>
             );
           })}

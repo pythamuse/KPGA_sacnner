@@ -15,6 +15,21 @@ export interface OcrOptions {
 
 export interface DigitOcrOptions extends OcrOptions {}
 
+export type DigitOcrStatus =
+  | 'accepted'
+  | 'invalid_input'
+  | 'worker_pending'
+  | 'deadline_exhausted'
+  | 'invalid_crop'
+  | 'timeout_or_error'
+  | 'parse_or_confidence_rejected';
+
+export interface DigitOcrResult {
+  value?: number;
+  status: DigitOcrStatus;
+  diagnostic: string;
+}
+
 export interface DigitTemplateReference {
   image: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>;
   rect: PixelRect;
@@ -120,33 +135,68 @@ export async function recognizeDigitsInRegion(
   options?: DigitOcrOptions,
   templateReference?: DigitTemplateReference,
 ): Promise<number | undefined> {
+  const result = await recognizeDigitsInRegionDetailed(
+    imageBuffer,
+    imageWidth,
+    imageHeight,
+    rect,
+    options,
+    templateReference,
+  );
+
+  return result.value;
+}
+
+export async function recognizeDigitsInRegionDetailed(
+  imageBuffer: Buffer,
+  imageWidth: number,
+  imageHeight: number,
+  rect: PixelRect,
+  options?: DigitOcrOptions,
+  templateReference?: DigitTemplateReference,
+): Promise<DigitOcrResult> {
   try {
     if (!Buffer.isBuffer(imageBuffer) || imageWidth <= 0 || imageHeight <= 0) {
-      return undefined;
-    }
-
-    if (digitWorkerPromise && !digitWorkerReady) {
-      return undefined;
+      return {
+        status: 'invalid_input',
+        diagnostic: 'Age OCR was skipped because the input image was invalid.',
+      };
     }
 
     const remainingMs = options?.deadlineAt
       ? Math.min(DIGIT_OCR_TOTAL_TIMEOUT_MS, options.deadlineAt - Date.now())
       : DIGIT_OCR_TOTAL_TIMEOUT_MS;
     if (remainingMs <= 0) {
-      return undefined;
+      return {
+        status: 'deadline_exhausted',
+        diagnostic: 'Age OCR was skipped because the per-student deadline had expired.',
+      };
+    }
+
+    if (digitWorkerPromise && !digitWorkerReady) {
+      return {
+        status: 'worker_pending',
+        diagnostic: 'Age OCR was skipped because the shared OCR worker was still initializing.',
+      };
     }
 
     const crop = buildPixelCropBounds(imageWidth, imageHeight, rect);
     if (!crop) {
-      return undefined;
+      return {
+        status: 'invalid_crop',
+        diagnostic: 'Age OCR was skipped because the age-number box was invalid.',
+      };
     }
 
     return await withTimeout(
-      recognizeDigitsCrop(imageBuffer, crop, templateReference),
+      recognizeDigitsCropDetailed(imageBuffer, crop, templateReference),
       remainingMs,
     );
   } catch {
-    return undefined;
+    return {
+      status: 'timeout_or_error',
+      diagnostic: 'Age OCR did not finish within the allowed time.',
+    };
   }
 }
 
@@ -206,11 +256,11 @@ async function recognizeCrop(
   }
 }
 
-async function recognizeDigitsCrop(
+async function recognizeDigitsCropDetailed(
   imageBuffer: Buffer,
   crop: { left: number; top: number; width: number; height: number },
   templateReference?: DigitTemplateReference,
-): Promise<number | undefined> {
+): Promise<DigitOcrResult> {
   try {
     const targetWidth = Math.max(crop.width * 4, 320);
     // Preserve the small age box's natural aspect ratio. Stretching a
@@ -244,9 +294,24 @@ async function recognizeDigitsCrop(
 
     const worker = await getDigitWorker();
     const result = await worker.recognize(croppedBuffer, {}, { text: true });
-    return parseTrustedAgeOcrText(result.data.text, result.data.confidence);
+    const value = parseTrustedAgeOcrText(result.data.text, result.data.confidence);
+    if (value !== undefined) {
+      return {
+        value,
+        status: 'accepted',
+        diagnostic: 'Age OCR was accepted after template subtraction and confidence checks.',
+      };
+    }
+
+    return {
+      status: 'parse_or_confidence_rejected',
+      diagnostic: 'Age OCR result did not pass the digit range or confidence check.',
+    };
   } catch {
-    return undefined;
+    return {
+      status: 'timeout_or_error',
+      diagnostic: 'Age OCR failed while processing the digit box.',
+    };
   }
 }
 

@@ -196,6 +196,8 @@ export async function POST(req: Request) {
         recognitionCropDiagnostic,
         recognitionRegistration,
         recognitionRejectedCandidateRects,
+        recognitionValueSource,
+        recognitionDecisionTrace,
         ...recognizedDraft
       } = draft;
       const preview = await buildSourcePreview(
@@ -220,6 +222,8 @@ export async function POST(req: Request) {
           recognitionCropSource: preview.recognitionCropSource,
           recognitionCropDiagnostic: preview.recognitionCropDiagnostic,
           recognitionRegistration,
+          recognitionValueSource,
+          recognitionDecisionTrace,
         },
       });
     }

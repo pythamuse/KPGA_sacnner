@@ -18,11 +18,12 @@ import {
   buildSatisfactionGridDetection,
   type FieldRegistration,
 } from './tableGridDetection';
-import { recognizeDigitsInRegion } from './ocrTextLines';
+import { recognizeDigitsInRegionDetailed } from './ocrTextLines';
 import { loadBlankFormBaseline } from './templateBaseline';
 import fs from 'fs/promises';
 
 export type RecognitionCropSource = 'grid' | 'grid-candidate' | 'row' | 'row-fallback' | 'fixed';
+export type RecognitionValueSource = 'auto' | 'manual' | 'unresolved';
 
 export interface RecognitionDraft {
   source?: {
@@ -35,6 +36,9 @@ export interface RecognitionDraft {
     recognitionCropSource?: Record<string, RecognitionCropSource>;
     recognitionCropDiagnostic?: Record<string, string>;
     recognitionRegistration?: Record<string, FieldRegistration>;
+    recognitionValueSource?: Record<string, RecognitionValueSource>;
+    recognitionDecisionTrace?: Record<string, string>;
+    recognitionManualEditedAt?: Record<string, string>;
   };
   basic: {
     age?: number;
@@ -79,55 +83,27 @@ export interface RecognitionDraft {
   recognitionCropSource?: Record<string, RecognitionCropSource>;
   recognitionCropDiagnostic?: Record<string, string>;
   recognitionRegistration?: Record<string, FieldRegistration>;
+  recognitionValueSource?: Record<string, RecognitionValueSource>;
+  recognitionDecisionTrace?: Record<string, string>;
   warnings?: string[];
 }
+
+const RECOGNITION_FIELDS = [
+  'basic.age', 'basic.gender', 'basic.schoolType', 'basic.grade',
+  'cagi.q01', 'cagi.q02', 'cagi.q03', 'cagi.q04', 'cagi.q05', 'cagi.q06', 'cagi.q07', 'cagi.q08', 'cagi.q09',
+  'satisfaction.q01', 'satisfaction.q02', 'satisfaction.q03', 'satisfaction.q04', 'satisfaction.q05', 'satisfaction.q06', 'satisfaction.q07', 'satisfaction.q08', 'satisfaction.q09', 'satisfaction.q10',
+] as const;
 
 export interface RecognitionOptions {
   ocrDeadlineAt?: number;
   digitOcrDeadlineAt?: number;
 }
 
-/**
- * 백엔드 모듈은 빌드 에러를 방지하고 통합 테스트 정합성을 유지하기 위해
- * Tesseract.js 로드 없이 파일명 기반 예시 매핑 규칙만 수행합니다.
- */
 export async function recognizeStudentForms(
   cagiPath: string,
   satisfactionPath: string,
   options: RecognitionOptions = {},
 ): Promise<RecognitionDraft> {
-  const isExampleImage = 
-    cagiPath.includes('example') || 
-    cagiPath.includes('류수민') || 
-    satisfactionPath.includes('example');
-
-  // 예시 이미지 기준 기대값 (류수민 학생 데이터)
-  if (isExampleImage) {
-    const confidenceObj: { [key: string]: 'high' } = {};
-    const fields = [
-      'basic.age', 'basic.gender', 'basic.schoolType', 'basic.grade',
-      'cagi.q01', 'cagi.q02', 'cagi.q03', 'cagi.q04', 'cagi.q05', 'cagi.q06', 'cagi.q07', 'cagi.q08', 'cagi.q09',
-      'satisfaction.q01', 'satisfaction.q02', 'satisfaction.q03', 'satisfaction.q04', 'satisfaction.q05', 'satisfaction.q06', 'satisfaction.q07', 'satisfaction.q08', 'satisfaction.q09', 'satisfaction.q10'
-    ];
-    fields.forEach(f => { confidenceObj[f] = 'high'; });
-
-    return {
-      basic: {
-        age: 14,
-        gender: '여',
-        schoolType: '중학교',
-        grade: '2학년'
-      },
-      cagi: {
-        q01: 0, q02: 0, q03: 0, q04: 0, q05: 0, q06: 0, q07: 0, q08: 0, q09: 0
-      },
-      satisfaction: {
-        q01: 4, q02: 1, q03: 1, q04: 1, q05: 1, q06: 1, q07: 4, q08: 4, q09: 4, q10: 4
-      },
-      confidence: confidenceObj
-    };
-  }
-
   const draft = createEmptyDraft();
   const recognitionCropRects: Record<string, PixelRect> = {};
   const recognitionCandidateRects: Record<string, PixelRect[]> = {};
@@ -135,6 +111,13 @@ export async function recognizeStudentForms(
   const recognitionCropSource: Record<string, RecognitionCropSource> = {};
   const recognitionCropDiagnostic: Record<string, string> = {};
   const recognitionRegistration: Record<string, FieldRegistration> = {};
+  const recognitionValueSource: Record<string, RecognitionValueSource> = {};
+  const recognitionDecisionTrace: Record<string, string> = {};
+
+  for (const field of RECOGNITION_FIELDS) {
+    recognitionValueSource[field] = 'unresolved';
+    recognitionDecisionTrace[field] = 'Automatic entry was not confirmed.';
+  }
 
   try {
     const cagiTemplate = getTemplate('cagi');
@@ -152,8 +135,14 @@ export async function recognizeStudentForms(
     // shared worker, otherwise this request can be skipped as "worker busy".
     const ageRect = cagiGridDetection.fieldRects['basic.age'];
     const templateAgeRect = cagiBaseline?.fieldRects['basic.age'];
-    if (canAutoRecognizeCagi && ageRect) {
-      const age = await recognizeDigitsInRegion(
+    if (!canAutoRecognizeCagi) {
+      recognitionDecisionTrace['basic.age'] =
+        'Age: automatic entry blocked because the CAGI form boundary was not verified.';
+    } else if (!ageRect) {
+      recognitionDecisionTrace['basic.age'] =
+        'Age: automatic entry blocked because the age-number box was not found.';
+    } else {
+      const ageResult = await recognizeDigitsInRegionDetailed(
         cagiImageBuffer,
         cagiImage.width,
         cagiImage.height,
@@ -164,8 +153,10 @@ export async function recognizeStudentForms(
           rect: getAgeDigitsRect(templateAgeRect),
         } : undefined,
       );
-      if (age !== undefined) {
-        draft.basic.age = age;
+      recognitionDecisionTrace['basic.age'] = ageResult.diagnostic;
+      if (ageResult.value !== undefined) {
+        draft.basic.age = ageResult.value;
+        recognitionValueSource['basic.age'] = 'auto';
       }
     }
 
@@ -195,6 +186,11 @@ export async function recognizeStudentForms(
       if (registration) {
         recognitionRegistration[group.field] = registration;
       }
+      recognitionDecisionTrace[group.field] = getAutomaticDecisionTrace(
+        group.field,
+        canAutoRecognizeCagi,
+        registration,
+      );
       const scoringCells = resolveScoringCells(cagiImage, group, gridCells, rowOverride, registration);
       const displayCells = scoringCells;
       recognitionCandidateRects[group.field] = displayCells;
@@ -224,7 +220,13 @@ export async function recognizeStudentForms(
 
       // Medium confidence stays a suggestion only. Automatic values require a
       // verified grid and the stricter high-confidence mark evidence.
-      if (result.value === undefined || result.confidence !== 'high') continue;
+      if (result.value === undefined || result.confidence !== 'high') {
+        if (canAutoRecognizeCagi && isVerifiedGrid(registration)) {
+          recognitionDecisionTrace[result.field] =
+            getRecognitionFieldLabel(result.field) + ': automatic entry deferred because high-confidence mark evidence was not found.';
+        }
+        continue;
+      }
 
       if (result.field === 'basic.gender') {
         draft.basic.gender = String(result.value);
@@ -236,6 +238,9 @@ export async function recognizeStudentForms(
         const questionKey = result.field.replace('cagi.', '');
         draft.cagi[questionKey] = Number(result.value);
       }
+      recognitionValueSource[result.field] = 'auto';
+      recognitionDecisionTrace[result.field] =
+        getRecognitionFieldLabel(result.field) + ': automatic entry completed from a verified grid and high-confidence mark evidence.';
     }
 
     for (const [field, rect] of Object.entries(cagiGridDetection.fieldRects)) {
@@ -251,6 +256,13 @@ export async function recognizeStudentForms(
       }
       recognitionCropSource[field] = recognitionCropSource[field]
         || (registration?.source === 'row' ? 'row' : 'fixed');
+      if (field !== 'basic.age' && recognitionValueSource[field] !== 'auto') {
+        recognitionDecisionTrace[field] = getAutomaticDecisionTrace(
+          field,
+          canAutoRecognizeCagi,
+          registration,
+        );
+      }
     }
   } catch {
     // 이미지 분석 실패 시 임의값을 넣지 않고 검수 화면에서 직접 입력하도록 낮은 신뢰도로 둔다.
@@ -293,6 +305,11 @@ export async function recognizeStudentForms(
       if (registration) {
         recognitionRegistration[group.field] = registration;
       }
+      recognitionDecisionTrace[group.field] = getAutomaticDecisionTrace(
+        group.field,
+        canAutoRecognizeSatisfaction,
+        registration,
+      );
       const scoringCells = resolveScoringCells(satisfactionImage, group, gridCells, rowOverride, registration);
       const displayCells = scoringCells;
       recognitionCandidateRects[group.field] = displayCells;
@@ -317,10 +334,19 @@ export async function recognizeStudentForms(
       draft.confidence[result.field] = result.confidence;
       draft.candidates![result.field] = result.candidates;
 
-      if (result.value === undefined || result.confidence !== 'high') continue;
+      if (result.value === undefined || result.confidence !== 'high') {
+        if (canAutoRecognizeSatisfaction && isVerifiedGrid(registration)) {
+          recognitionDecisionTrace[result.field] =
+            getRecognitionFieldLabel(result.field) + ': automatic entry deferred because high-confidence mark evidence was not found.';
+        }
+        continue;
+      }
 
       const questionKey = result.field.replace('satisfaction.', '');
       draft.satisfaction[questionKey] = Number(result.value);
+      recognitionValueSource[result.field] = 'auto';
+      recognitionDecisionTrace[result.field] =
+        getRecognitionFieldLabel(result.field) + ': automatic entry completed from a verified grid and high-confidence mark evidence.';
     }
 
     for (const [field, rect] of Object.entries(satisfactionGridDetection.fieldRects)) {
@@ -336,6 +362,13 @@ export async function recognizeStudentForms(
       }
       recognitionCropSource[field] = recognitionCropSource[field]
         || (registration?.source === 'row' ? 'row' : 'fixed');
+      if (recognitionValueSource[field] !== 'auto') {
+        recognitionDecisionTrace[field] = getAutomaticDecisionTrace(
+          field,
+          canAutoRecognizeSatisfaction,
+          registration,
+        );
+      }
     }
   } catch {
     // Keep satisfaction fields empty so the review screen can collect them manually.
@@ -359,18 +392,15 @@ export async function recognizeStudentForms(
   if (Object.keys(recognitionRegistration).length > 0) {
     draft.recognitionRegistration = recognitionRegistration;
   }
+  draft.recognitionValueSource = recognitionValueSource;
+  draft.recognitionDecisionTrace = recognitionDecisionTrace;
 
   return draft;
 }
 
 function createEmptyDraft(): RecognitionDraft {
   const confidenceObj: { [key: string]: 'medium' | 'low' } = {};
-  const fields = [
-    'basic.age', 'basic.gender', 'basic.schoolType', 'basic.grade',
-    'cagi.q01', 'cagi.q02', 'cagi.q03', 'cagi.q04', 'cagi.q05', 'cagi.q06', 'cagi.q07', 'cagi.q08', 'cagi.q09',
-    'satisfaction.q01', 'satisfaction.q02', 'satisfaction.q03', 'satisfaction.q04', 'satisfaction.q05', 'satisfaction.q06', 'satisfaction.q07', 'satisfaction.q08', 'satisfaction.q09', 'satisfaction.q10'
-  ];
-  fields.forEach(f => { 
+  RECOGNITION_FIELDS.forEach(f => {
     confidenceObj[f] = f.startsWith('basic') ? 'medium' : 'low'; 
   });
 
@@ -493,6 +523,30 @@ export function resolveRecognitionCropDiagnostic(
   return source === 'fixed'
     ? `Grid candidate rejected; measured template coordinates used. ${details.join('; ')}`
     : details.join('; ');
+}
+
+function getAutomaticDecisionTrace(
+  field: string,
+  formBoundaryVerified: boolean,
+  registration?: FieldRegistration,
+): string {
+  const label = getRecognitionFieldLabel(field);
+  if (!formBoundaryVerified) {
+    return label + ': automatic entry blocked because the form boundary was not verified.';
+  }
+  if (!isVerifiedGrid(registration)) {
+    return label + ': automatic entry blocked because ' + (registration?.diagnostic || 'the answer grid was not independently verified') + '.';
+  }
+  return label + ': automatic entry is awaiting high-confidence mark evidence.';
+}
+
+function getRecognitionFieldLabel(field: string): string {
+  if (field === 'basic.gender') return 'Gender';
+  if (field === 'basic.schoolType') return 'School type';
+  if (field === 'basic.grade') return 'Grade';
+  if (field === 'basic.age') return 'Age';
+  if (/^satisfaction\.q(07|08|09|10)$/.test(field)) return 'Satisfaction questions 7-10';
+  return field;
 }
 
 function isVerifiedGrid(registration?: FieldRegistration): boolean {
