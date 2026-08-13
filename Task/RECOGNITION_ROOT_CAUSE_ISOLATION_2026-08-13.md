@@ -35,22 +35,49 @@
 **실제 스캔과 정답표는 모두 학생 응답이므로 저장소에 절대 커밋하지 않는다.** 스캔 경로는 환경변수로 주입하고, 정답표는 gitignore된 `local-scans/answer-key.json`에 둔다. 변수가 없으면 스킵되어 `npm test`는 그대로 통과한다.
 
 ```bash
-REAL_SCAN_CAGI_PDF="C:/Users/night/Desktop/선별검사 샘플1.pdf" REAL_SCAN_SAT_PDF="C:/Users/night/Desktop/만족도조사1.pdf" REAL_SCAN_PAGES=2 npx vitest run tests/real-scan-measure.test.ts
+REAL_SCAN_CAGI_PDF="C:/Users/night/Desktop/선별검사 샘플1.pdf" REAL_SCAN_SAT_PDF="C:/Users/night/Desktop/만족도조사1.pdf" REAL_SCAN_PAGES=6 npx vitest run tests/real-scan-measure.test.ts
 ```
 
 ---
 
 ## 3. 기준선 (main, `34538ce` / v2026-08-12.1, 2026-08-13 측정)
 
+**6페이지 표본 (2026-08-13 확대 후, 현재 기준선)**
+
 ```
-CORRECT 34/46   WRONG 0   BLANK 12   OFF 6   MISSING 1
-  page 1: CORRECT 19/23  (blank: age, gender, schoolType, grade)
-  page 2: CORRECT 15/23  (blank: age, gender, schoolType, grade, sat.q01, q03, q07, q08)
+CORRECT 86/135   WRONG 1   BLANK 51   OFF 13   MISSING 14
+  p1 19/23  W0   p2 15/23  W0   p3 12/21  W1
+  p4 14/23  W0   p5 13/22  W0   p6 13/23  W0
 ```
 
-**현재 자동 입력되는 34개는 전부 정답이다.** 즉 지금 배포본은 "덜 채우지만 틀리지는 않는" 상태다. 개선의 정의는 **BLANK를 CORRECT로 옮기는 것**이며, BLANK를 WRONG으로 바꾸는 변경은 개선이 아니라 회귀다.
+**표본을 늘리자마자 배포본의 오답이 드러났다.**
 
-정답표는 실제 양식 이미지를 직접 판독해 작성했다(`local-scans/answer-key.json`, 미커밋). 두 페이지 모두 성별 여·학교유형 중학교·학년 2학년·나이 14, CAGI 1~9 전부 0. 만족도는 p1이 4/1·1·1·1·1/4·4·4·4, p2가 3/1·1·1·0·1/4·4·4·4.
+```
+p3 satisfaction.q01: got 3, but the form is unmarked, conf=high
+```
+
+3페이지 만족도 1번은 **양식에 표시가 없는데** 시스템이 `3`을 `높음` 신뢰도로 채운다. 즉 지금 배포본은 "덜 채우지만 틀리지는 않는" 상태가 **아니다** — 표시가 없는 칸에 값을 만들어내며, 그 값은 사람이 확인한 것처럼 저장된다. 2페이지 표본으로는 보이지 않던 결함이고, [Docs/BUG_REPORTS.md](../Docs/BUG_REPORTS.md) 20번으로 등재했다.
+
+분모가 페이지마다 다른 이유는 **정답표의 `null`**(양식 자체가 미기재) 항목을 제외하기 때문이다. `null` 칸은 비어 있는 것이 정답이므로 CORRECT로 세지 않되, 값이 채워지면 WRONG이다.
+
+`OFF 13`, `MISSING 14`도 2페이지 때(6, 1)보다 크게 늘었다 — 원인 C1의 규모가 예상보다 크다.
+
+**정답표 (`local-scans/answer-key.json`, 미커밋)**
+
+실제 양식 이미지를 직접 판독해 작성했다. 6페이지 모두 학교유형 중학교, CAGI 1~9 전부 0.
+
+| 페이지 | 나이 | 성별 | 학년 | 만족도 q1 | q2~q6 |
+|---|---|---|---|---|---|
+| 1 | 14 | 여 | 2학년 | 4 | 1,1,1,1,1 |
+| 2 | 14 | 여 | 2학년 | 3 | 1,1,1,0,1 |
+| 3 | 15 | **미기재** | 3학년 | **미기재** | 1,1,1,1,1 |
+| 4 | 15 | 여 | 3학년 | 4 | 1,1,1,1,1 |
+| 5 | 12 | **남** | 1학년 | **미기재** | 1,1,1,0,1 |
+| 6 | 13 | 여 | 1학년 | 4 | 1,1,1,1,1 |
+
+만족도 q7~q10은 6페이지 모두 4다. **표본에 남학생 1명과 미기재 3건이 포함되어 있어, "항상 여" 같은 편향이나 표시 없는 칸을 채우는 방식은 통과할 수 없다.**
+
+**이전 2페이지 기준선** (참고): `CORRECT 34/46, WRONG 0`. 이 표본은 위 결함을 볼 수 없었다.
 
 ---
 
@@ -108,10 +135,10 @@ page 2 만족도 q07·q08은 좌표 오차가 −0.0049 / −0.0054로 **허용 
 
 | 순서 | 브랜치 | 원인 | 기대 결과 | 상태 |
 |---|---|---|---|---|
-| 1 | `exp/cause-c2-mark-evidence` | C2 | A와 합쳤을 때 WRONG 0 | **1차 기각** (필드명 하드코딩, 재시도 필요) |
-| 2 | `exp/cause-a-basic-registration` | A | C2 이후 재측정 → **40** | **보류** (C2 선행 필요) |
-| 3 | `exp/cause-b-age-ocr` | B | CORRECT 34 → **36** | 대기 |
-| 4 | `exp/cause-c1-grid-fallback` | C1 | CORRECT 34 → **36** | 대기 |
+| 1 | `exp/cause-c2-mark-evidence` | C2 | **WRONG 1 → 0**, A와 합쳐도 WRONG 0 | 2차 진행 중 (1차는 필드명 하드코딩으로 기각) |
+| 2 | `exp/cause-a-basic-registration` | A | C2 이후 재측정, WRONG 0 | **보류** (C2 선행 필요) |
+| 3 | `exp/cause-b-age-ocr` | B | age 6건 자동 입력 | 대기 |
+| 4 | `exp/cause-c1-grid-fallback` | C1 | OFF 13 / MISSING 14 감소 | 대기 |
 
 **각 브랜치는 `main`에서 분기하고 원인 하나만 건드린다.** 두 원인을 한 브랜치에서 고치면 어느 쪽이 효과를 냈는지 판정할 수 없으므로 금지한다. 규칙 전문은 [README의 "원인 격리 실험 브랜치 규칙"](../README.md#원인-격리-실험-브랜치-규칙).
 
@@ -147,7 +174,7 @@ page 2 만족도 q07·q08은 좌표 오차가 −0.0049 / −0.0054로 **허용 
 수정 전후로 아래를 실행해 **AUTO / HIGH / OFF / MISSING 네 숫자를 모두** 적는다.
 
 ```bash
-REAL_SCAN_CAGI_PDF="<경로>" REAL_SCAN_SAT_PDF="<경로>" REAL_SCAN_PAGES=2 npx vitest run tests/real-scan-measure.test.ts
+REAL_SCAN_CAGI_PDF="<경로>" REAL_SCAN_SAT_PDF="<경로>" REAL_SCAN_PAGES=6 npx vitest run tests/real-scan-measure.test.ts
 ```
 
 - (a) 선택한 방향과 이유
@@ -162,9 +189,15 @@ REAL_SCAN_CAGI_PDF="<경로>" REAL_SCAN_SAT_PDF="<경로>" REAL_SCAN_PAGES=2 npx
 
 ## 6-2. 작업지시서 — 원인 C2 (코덱스, 루나-최대)
 
-### 목표
+### 목표 (2026-08-13 갱신 — 6페이지 표본 기준)
 
-마킹 판별을 고쳐 `CORRECT 34 → 36`, `WRONG 0` 유지. 대상은 만족도 p2 문항 7·8(좌표는 정상인데 값이 비어 있음).
+기준선: `CORRECT 86/135, WRONG 1, BLANK 51`
+
+1. **`WRONG 1 → 0`.** 3페이지 만족도 1번은 양식에 표시가 없는데 `3`이 `높음`으로 채워진다. 표시가 없으면 비워야 한다. **이것이 1순위이며, 나머지가 전혀 개선되지 않아도 이것만 고치면 성공이다.**
+2. **`CORRECT` 상승** — 2페이지 문항 7·8처럼 좌표는 정상인데 비어 있는 항목들.
+3. **`exp/cause-a-basic-registration`과 합쳤을 때 `WRONG 0`** — C2가 메커니즘을 고쳤는지 판정하는 유일한 시험이다. 1차 시도는 이 시험에서 오답 4개가 그대로 남아 기각됐다.
+
+세 조건은 같은 뿌리를 공유한다: **표시가 있는지 없는지를 잉크 총량으로 판단하고 있다.** 표시가 없는 칸에 값을 만들어내는 것(1)과 얇은 표시를 놓치는 것(2)은 같은 결함의 양면이다.
 
 ### 가장 중요한 사실 — 새 메커니즘을 만들지 마라
 
@@ -210,7 +243,7 @@ REAL_SCAN_CAGI_PDF="<경로>" REAL_SCAN_SAT_PDF="<경로>" REAL_SCAN_PAGES=2 npx
 ### 보고에 반드시 포함할 것
 
 ```bash
-REAL_SCAN_CAGI_PDF="<경로>" REAL_SCAN_SAT_PDF="<경로>" REAL_SCAN_PAGES=2 npx vitest run tests/real-scan-measure.test.ts
+REAL_SCAN_CAGI_PDF="<경로>" REAL_SCAN_SAT_PDF="<경로>" REAL_SCAN_PAGES=6 npx vitest run tests/real-scan-measure.test.ts
 ```
 
 - (a) 조사 순서 1~3의 각 결과 — 특히 `usesBaseline`이 대상 필드에서 참이었는지

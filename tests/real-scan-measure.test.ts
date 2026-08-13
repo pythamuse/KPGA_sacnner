@@ -150,6 +150,7 @@ describe.skipIf(!CAGI_PDF || !SAT_PDF)('real scan measurement', () => {
       report.push(`(no answer key at ${KEY_PATH} — correctness not judged)`);
     }
     let tCorrect = 0;
+    let tAnswerable = 0;
     let tWrong = 0;
     let tBlank = 0;
     let tOff = 0;
@@ -173,15 +174,27 @@ describe.skipIf(!CAGI_PDF || !SAT_PDF)('real scan measurement', () => {
       let wrong = 0;
       let blank = 0;
       const rows: string[] = [];
+      // A null answer means the form itself carries no mark there, so the only
+      // right behaviour is to leave the field blank. It is not scored as
+      // CORRECT (there is nothing to get right) but filling it is WRONG.
+      const answerable = key
+        ? ALL_FIELDS.filter((f) => f in key && key[f] !== null).length
+        : ALL_FIELDS.length;
+
       for (const field of ALL_FIELDS) {
         const got = values[field];
+        const hasKey = key ? field in key : false;
         const want = key?.[field];
         let verdict = '-';
         if (got === undefined || got === null || got === '') {
           blank += 1;
-          verdict = 'BLANK';
-        } else if (want === undefined) {
+          verdict = hasKey && want === null ? 'blank (unmarked, correct)' : 'BLANK';
+        } else if (!hasKey) {
           verdict = 'filled';
+        } else if (want === null) {
+          wrong += 1;
+          verdict = 'WRONG (the form is unmarked here)';
+          wrongDetail.push(`p${i + 1} ${field}: got ${got}, but the form is unmarked, conf=${draft.confidence?.[field]}`);
         } else if (String(got) === String(want)) {
           correct += 1;
           verdict = 'ok';
@@ -193,16 +206,16 @@ describe.skipIf(!CAGI_PDF || !SAT_PDF)('real scan measurement', () => {
         rows.push(`  ${field.padEnd(18)} got=${String(got ?? '-').padEnd(7)} conf=${String(draft.confidence?.[field] ?? '-').padEnd(7)} src=${String(draft.recognitionCropSource?.[field] ?? '-').padEnd(12)} ${verdict}`);
       }
 
-      tCorrect += correct; tWrong += wrong; tBlank += blank;
+      tCorrect += correct; tWrong += wrong; tBlank += blank; tAnswerable += answerable;
       tOff += coords.off; tMissing += coords.missing;
 
       report.push(`\n--- student page ${i + 1} ---`);
-      report.push(`CORRECT ${correct}/23   WRONG ${wrong}   BLANK ${blank}   OFF ${coords.off}   MISSING ${coords.missing}`);
+      report.push(`CORRECT ${correct}/${answerable}   WRONG ${wrong}   BLANK ${blank}   OFF ${coords.off}   MISSING ${coords.missing}`);
       report.push(...rows);
     }
 
     report.push('\n================ TOTAL ================');
-    report.push(`CORRECT ${tCorrect}/${23 * PAGES}   WRONG ${tWrong}   BLANK ${tBlank}   OFF ${tOff}   MISSING ${tMissing}`);
+    report.push(`CORRECT ${tCorrect}/${tAnswerable}   WRONG ${tWrong}   BLANK ${tBlank}   OFF ${tOff}   MISSING ${tMissing}`);
     if (wrongDetail.length) {
       report.push('\n!!! WRONG AUTO-FILLED VALUES !!!');
       report.push(...wrongDetail.map((d) => `  ${d}`));
