@@ -44,6 +44,20 @@ export interface ChoiceGroupBaseline {
   candidatePixelOverrides: PixelRect[];
 }
 
+interface TemplateInkShape {
+  largestComponentSize: number;
+  largestComponentRatio: number;
+  diagonalRatio: number;
+}
+
+interface TemplateInkFeatures extends TemplateInkShape {
+  score: number;
+}
+
+interface ScoredCandidate extends CandidateScore {
+  shape?: TemplateInkShape;
+}
+
 export async function loadImageAnalysisData(filePath: string): Promise<ImageAnalysisData> {
   const { data: pixels, info } = await sharp(filePath)
     .rotate()
@@ -558,30 +572,36 @@ export function analyzeChoiceGroup(
 ): ChoiceGroupResult {
   const usesGridCells = candidatePixelOverrides?.length === group.candidates.length;
   const usesBaseline = baseline?.candidatePixelOverrides.length === group.candidates.length;
-  const candidates = group.candidates
-    .map((candidate, index) => ({
-      value: candidate.value,
-      score: roundScore(
-        usesBaseline
-          ? calculateTemplateInkDifference(
-            image,
-            usesGridCells ? candidatePixelOverrides![index] : toPixelRect(image, candidate.rect, yOverride),
-            baseline!.image,
-            baseline!.candidatePixelOverrides[index],
-          )
-          : calculateDarkPixelDensity(
+  const scoredCandidates: ScoredCandidate[] = group.candidates
+    .map((candidate, index) => {
+      const templateEvidence = usesBaseline
+        ? calculateTemplateInkFeatures(
+          image,
+          usesGridCells ? candidatePixelOverrides![index] : toPixelRect(image, candidate.rect, yOverride),
+          baseline!.image,
+          baseline!.candidatePixelOverrides[index],
+        )
+        : undefined;
+
+      return {
+        value: candidate.value,
+        score: roundScore(
+          templateEvidence?.score ?? calculateDarkPixelDensity(
             image,
             candidate.rect,
             150,
             yOverride,
             usesGridCells ? candidatePixelOverrides[index] : undefined,
           ),
-      ),
-    }))
+        ),
+        shape: templateEvidence,
+      };
+    })
     .sort((a, b) => b.score - a.score);
+  const candidates: CandidateScore[] = scoredCandidates.map(({ value, score }) => ({ value, score }));
 
-  const best = candidates[0];
-  const second = candidates[1];
+  const best = scoredCandidates[0];
+  const second = scoredCandidates[1];
 
   if (!best) {
     return {
@@ -602,12 +622,17 @@ export function analyzeChoiceGroup(
   }
 
   const gap = best.score - (second?.score || 0);
-  const highScoreThreshold = usesBaseline ? 0.018 : 0.35;
-  const highGapThreshold = usesBaseline ? 0.009 : 0.12;
+  // The baseline score now acts only as a minimum signal floor. For a real
+  // mark, the residual must also form a compact, stroke-like shape. This is
+  // deliberately shared by every baseline-backed candidate; it does not know
+  // the field name or the candidate index.
+  const highScoreThreshold = usesBaseline ? 0.012 : 0.35;
+  const highGapThreshold = usesBaseline ? 0.004 : 0.12;
   const mediumScoreThreshold = usesBaseline ? 0.007 : 0.1;
   const mediumGapThreshold = usesBaseline ? 0.003 : 0.025;
+  const hasStructuredMark = !usesBaseline || hasStructuredTemplateMark(best.shape);
 
-  if (best.score >= highScoreThreshold && gap >= highGapThreshold) {
+  if (best.score >= highScoreThreshold && gap >= highGapThreshold && hasStructuredMark) {
     return {
       field: group.field,
       value: best.value,
@@ -646,18 +671,33 @@ export function calculateTemplateInkDifference(
   baseline: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>,
   baselineRect: PixelRect,
 ): number {
+  return calculateTemplateInkFeatures(image, actualRect, baseline, baselineRect).score;
+}
+
+function calculateTemplateInkFeatures(
+  image: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>,
+  actualRect: PixelRect,
+  baseline: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>,
+  baselineRect: PixelRect,
+): TemplateInkFeatures {
   const sampleWidth = 36;
   const sampleHeight = 28;
   const actual = sampleRect(image, actualRect, sampleWidth, sampleHeight);
   const blank = sampleRect(baseline, baselineRect, sampleWidth, sampleHeight);
   if (actual.length === 0 || blank.length === 0) {
-    return 0;
+    return {
+      score: 0,
+      largestComponentSize: 0,
+      largestComponentRatio: 0,
+      diagonalRatio: 0,
+    };
   }
 
   // Different scanners change the paper's overall brightness. Normalize only
   // the light background before comparing dark ink, keeping local pen strokes.
   const brightnessOffset = percentile(blank, 0.82) - percentile(actual, 0.82);
   const alignment = findBestBaselineAlignment(actual, blank, sampleWidth, sampleHeight, brightnessOffset);
+  const residual = new Float32Array(sampleWidth * sampleHeight);
   let difference = 0;
 
   for (let y = 1; y < sampleHeight - 1; y++) {
@@ -668,12 +708,96 @@ export function calculateTemplateInkDifference(
       const baselineInk = darkness(blank[baselineIndex]);
       // Ignore the narrow anti-aliasing and scanner-noise band around the
       // printed form. A handwritten circle or check remains well above it.
-      difference += Math.max(0, actualInk - baselineInk - 0.08);
+      const residualInk = Math.max(0, actualInk - baselineInk - 0.08);
+      residual[index] = residualInk;
+      difference += residualInk;
     }
   }
 
   const usablePixels = Math.max((sampleWidth - 2) * (sampleHeight - 2), 1);
-  return difference / usablePixels;
+  const shape = analyzeResidualShape(residual, sampleWidth, sampleHeight);
+  return {
+    score: difference / usablePixels,
+    ...shape,
+  };
+}
+
+function hasStructuredTemplateMark(shape?: TemplateInkShape): boolean {
+  return Boolean(
+    shape
+    && shape.largestComponentSize >= 7
+    && shape.largestComponentRatio >= 0.2
+    && shape.diagonalRatio >= 0.2,
+  );
+}
+
+function analyzeResidualShape(
+  residual: Float32Array,
+  width: number,
+  height: number,
+): TemplateInkShape {
+  const shapeThreshold = 0.08;
+  const visited = new Uint8Array(residual.length);
+  let activePixels = 0;
+  let largestComponentSize = 0;
+
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      const start = y * width + x;
+      if (visited[start] || residual[start] <= shapeThreshold) continue;
+
+      const queue = [start];
+      visited[start] = 1;
+      let componentSize = 0;
+      while (queue.length > 0) {
+        const current = queue.pop()!;
+        const currentX = current % width;
+        const currentY = Math.floor(current / width);
+        componentSize += 1;
+        activePixels += 1;
+
+        for (let offsetY = -1; offsetY <= 1; offsetY++) {
+          for (let offsetX = -1; offsetX <= 1; offsetX++) {
+            if (offsetX === 0 && offsetY === 0) continue;
+            const neighborX = currentX + offsetX;
+            const neighborY = currentY + offsetY;
+            if (
+              neighborX < 1
+              || neighborX >= width - 1
+              || neighborY < 1
+              || neighborY >= height - 1
+            ) continue;
+            const neighbor = neighborY * width + neighborX;
+            if (visited[neighbor] || residual[neighbor] <= shapeThreshold) continue;
+            visited[neighbor] = 1;
+            queue.push(neighbor);
+          }
+        }
+      }
+      largestComponentSize = Math.max(largestComponentSize, componentSize);
+    }
+  }
+
+  let diagonalEdges = 0;
+  let orthogonalEdges = 0;
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      const index = y * width + x;
+      if (residual[index] <= shapeThreshold) continue;
+      for (const [offsetX, offsetY] of [[1, 0], [0, 1], [1, 1], [-1, 1]]) {
+        const neighbor = (y + offsetY) * width + x + offsetX;
+        if (residual[neighbor] <= shapeThreshold) continue;
+        if (offsetX === 0 || offsetY === 0) orthogonalEdges += 1;
+        else diagonalEdges += 1;
+      }
+    }
+  }
+
+  return {
+    largestComponentSize,
+    largestComponentRatio: activePixels > 0 ? largestComponentSize / activePixels : 0,
+    diagonalRatio: diagonalEdges / Math.max(diagonalEdges + orthogonalEdges, 1),
+  };
 }
 
 function toPixelRect(
