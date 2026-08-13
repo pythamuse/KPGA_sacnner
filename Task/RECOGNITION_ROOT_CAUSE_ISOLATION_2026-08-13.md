@@ -135,8 +135,8 @@ page 2 만족도 q07·q08은 좌표 오차가 −0.0049 / −0.0054로 **허용 
 
 | 순서 | 브랜치 | 원인 | 기대 결과 | 상태 |
 |---|---|---|---|---|
-| 1 | `exp/cause-c2-mark-evidence` | C2 | **WRONG 1 → 0**, A와 합쳐도 WRONG 0 | 2차 진행 중 (1차는 필드명 하드코딩으로 기각) |
-| 2 | `exp/cause-a-basic-registration` | A | C2 이후 재측정, WRONG 0 | **보류** (C2 선행 필요) |
+| 1 | ~~`exp/cause-c2-mark-evidence`~~ | C2 | WRONG 1 → 0, CORRECT +6 | **병합 완료** (`main`, v2026-08-13.1). 브랜치 삭제 |
+| 2 | `exp/cause-a-basic-registration` | A + **A2(셀 기하)** | 합본 WRONG 0 | 재작업 중 — 방향 2 무효 확인, 셀 기하부터 수정 |
 | 3 | `exp/cause-b-age-ocr` | B | age 6건 자동 입력 | 대기 |
 | 4 | `exp/cause-c1-grid-fallback` | C1 | OFF 13 / MISSING 14 감소 | 대기 |
 
