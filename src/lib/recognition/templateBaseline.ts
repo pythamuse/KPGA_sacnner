@@ -15,11 +15,13 @@ import {
   buildCagiGridDetection,
   buildSatisfactionGridDetection,
 } from './tableGridDetection';
+import { detectBlankBasicCheckboxes } from './basicCheckboxDetection';
 
 export interface BlankFormBaseline {
   image: ImageAnalysisData;
   candidateRects: Record<string, PixelRect[]>;
   fieldRects: Record<string, PixelRect>;
+  basicCheckboxCandidateRects?: Record<string, PixelRect[]>;
 }
 
 const baselinePromises = new Map<FormType, Promise<BlankFormBaseline | undefined>>();
@@ -57,6 +59,10 @@ async function createBlankFormBaseline(formType: FormType): Promise<BlankFormBas
   const grid = formType === 'cagi'
     ? buildCagiGridDetection(image)
     : buildSatisfactionGridDetection(image);
+  const basicGroups = template.choiceGroups.filter((group) => group.field.startsWith('basic.'));
+  const basicCheckboxes = formType === 'cagi'
+    ? detectBlankBasicCheckboxes(image, basicGroups)
+    : undefined;
 
   return {
     image,
@@ -65,6 +71,7 @@ async function createBlankFormBaseline(formType: FormType): Promise<BlankFormBas
       group.field,
       grid.overrides[group.field] || buildTemplateCandidateRects(image, group),
     ])),
+    ...(basicCheckboxes ? { basicCheckboxCandidateRects: basicCheckboxes.candidateRects } : {}),
   };
 }
 
