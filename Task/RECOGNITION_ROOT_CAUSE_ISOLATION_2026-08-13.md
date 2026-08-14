@@ -138,7 +138,8 @@ page 2 만족도 q07·q08은 좌표 오차가 −0.0049 / −0.0054로 **허용 
 | 1 | ~~`exp/cause-c2-mark-evidence`~~ | C2 | WRONG 1 → 0, CORRECT +6 | **병합 완료** (`main`, v2026-08-13.1). 브랜치 삭제 |
 | 2 | `exp/cause-a-basic-registration` | A | 미정 | **방향 2 최종 기각** — 체크박스 직접 검출(방향 1) 착수 여부 판단 대기 |
 | 3 | `exp/cause-b-age-ocr` | B | age 6건 자동 입력 | 대기 |
-| 4 | `exp/cause-c1-grid-fallback` | C1 | OFF 13 / MISSING 14 감소 | 대기 |
+| 4a | ~~`exp/cause-c1a-invalid-cell-size`~~ | C1-a 가짜 선으로 인한 격자 전체 폐기 | MISSING 14 → 6, CORRECT +8 | **병합 완료** (`main`, v2026-08-13.2). 브랜치 삭제 |
+| 4b | `exp/cause-c1b-grid-drift` | C1-b 격자 Y 드리프트 (OFF 13) | 미정 | 대기 — 다음 후보 |
 
 **각 브랜치는 `main`에서 분기하고 원인 하나만 건드린다.** 두 원인을 한 브랜치에서 고치면 어느 쪽이 효과를 냈는지 판정할 수 없으므로 금지한다. 규칙 전문은 [README의 "원인 격리 실험 브랜치 규칙"](../README.md#원인-격리-실험-브랜치-규칙).
 
