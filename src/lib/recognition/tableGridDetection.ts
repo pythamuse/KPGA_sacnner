@@ -446,11 +446,20 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
     };
   }
 
+  // A false line can sit only a few pixels from another detected line. If that
+  // creates a sliver cell, discard the ambiguous measured row pattern and
+  // rebuild the table from its expected row geometry. The normal quality gate
+  // below still decides whether the rebuilt grid is safe to score.
+  const rowsForGrid = hasInvalidCellSize(groups, resolvedRows, resolvedColumns)
+    && hasNearbyLinePair(horizontalLines)
+    ? expectedY
+    : resolvedRows;
+
   const overrides: FieldCellOverrides = {};
   for (let rowIndex = 0; rowIndex < groups.length; rowIndex++) {
     const group = groups[rowIndex];
-    const top = resolvedRows[rowIndex];
-    const bottom = resolvedRows[rowIndex + 1];
+    const top = rowsForGrid[rowIndex];
+    const bottom = rowsForGrid[rowIndex + 1];
     const candidates = group.candidates.map((_, columnIndex) => buildCellCenterRect(
       resolvedColumns[columnIndex],
       resolvedColumns[columnIndex + 1],
@@ -495,7 +504,7 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
   }
 
   const quality = calculateGridQuality(
-    resolvedRows,
+    rowsForGrid,
     expectedY,
     resolvedColumns,
     expectedX,
@@ -1236,6 +1245,26 @@ function buildCellCenterRect(
   };
 }
 
+function hasInvalidCellSize(
+  groups: ChoiceGroup[],
+  rows: number[],
+  columns: number[],
+): boolean {
+  return groups.some((group, rowIndex) => {
+    const top = rows[rowIndex];
+    const bottom = rows[rowIndex + 1];
+    if (top === undefined || bottom === undefined) return true;
+
+    const cells = group.candidates.map((_, columnIndex) => buildCellCenterRect(
+      columns[columnIndex],
+      columns[columnIndex + 1],
+      top,
+      bottom,
+    ));
+    return cells.some((cell) => cell.right - cell.left < 4 || cell.bottom - cell.top < 4);
+  });
+}
+
 function groupLinePositions(values: number[]): number[] {
   const lines: number[] = [];
   let start: number | undefined;
@@ -1263,6 +1292,11 @@ function groupLinePositions(values: number[]): number[] {
   }
 
   return lines;
+}
+
+function hasNearbyLinePair(values: number[], maximumGap = 4): boolean {
+  const sorted = [...values].sort((first, second) => first - second);
+  return sorted.some((value, index) => index > 0 && value - sorted[index - 1] < maximumGap);
 }
 
 function getBounds(image: ImageAnalysisData): PixelBounds {

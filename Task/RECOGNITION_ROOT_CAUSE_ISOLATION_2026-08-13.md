@@ -258,6 +258,53 @@ REAL_SCAN_CAGI_PDF="<경로>" REAL_SCAN_SAT_PDF="<경로>" REAL_SCAN_PAGES=6 npx
 
 ## 7. 사이클 기록
 
+### 사이클 8 — 원인 C1-a invalid_cell_size (코덱스) (2026-08-14)
+
+**조사 1 — 실제 resolved 선 배열**
+
+수정 전 동일한 PDF 렌더 경로에서 `satisfaction.scale`의 실제 배열을 확인했다. 값은 픽셀 좌표이며, p6의 열은 부분 검출 후 affine 복원된 `resolvedColumns`다.
+
+```text
+p5 resolvedRows    [1218, 1398.5, 1417.5, 1421, 1520]
+p5 resolvedColumns [633, 723, 814, 887, 974.5, 1075]
+p5 column gaps     [90, 91, 73, 87.5, 100.5]
+p5 invalid pair    resolvedRows[2] → resolvedRows[3] = 3.5px (q09 행)
+
+p6 resolvedRows    [1123.5, 1221, 1398, 1415, 1418]
+p6 resolvedColumns [631, 720.3, 806.275, 887.975, 973, 1062.3]
+p6 column gaps     [89.3, 85.975, 81.7, 85.025, 89.3]
+p6 invalid pair    resolvedRows[3] → resolvedRows[4] = 3px (q10 행)
+```
+
+따라서 p5·p6 모두 문제는 열이 아니라 행이다. 열의 최소 간격은 각각 73px, 81.7px이고, `buildCellCenterRect`의 inset 뒤에도 4px보다 훨씬 크다. p5는 수평선 8/5개·수직선 6/6개, p6는 수평선 11/5개·수직선 5/6개(부분 열 복원)였다.
+
+**조사 2 — 선의 실체**
+
+원본 표를 시각 대조한 결과 3px·3.5px 쌍은 인쇄된 q07~q10 행 경계가 아니다. 실제 인쇄 행 높이는 약 40~50px로 균등하며, 붙은 쌍은 q10 아래 안내 문구/스캔 잔상에서 검출된 가짜 수평선이다. 즉 `invalid_cell_size`는 진짜 세로 열 문제가 아니라, 가까운 가짜 수평선 하나가 행 배열에 들어온 결과다.
+
+**선택한 방향 — 1. 중복/가짜 선 제거 후 격자 재구성**
+
+부분 폐기 방향은 가짜 선이 만든 행 배열의 나머지 좌표까지 신뢰하게 만들 수 있어 선택하지 않았다. `resolvedRows`에서 기존의 실제 셀 크기 판정이 실패하고 원시 수평선에 4px 미만 인접 쌍이 있을 때만, 모호한 행 배열을 격자의 기대 행 기하로 재구성한다. 이후 기존 격자 품질 게이트가 계속 `verified` 여부를 판정하므로, 단순히 판정을 느슨하게 하지는 않는다. 필드명·후보 인덱스로 분기하지 않는다.
+
+**측정 결과**
+
+```text
+                         CORRECT   WRONG   BLANK   OFF   MISSING
+수정 전 기준선             92/135       0      46    13        14
+수정 후                    100/135      0      38    13         6
+```
+
+p5는 `13/22, WRONG 0, BLANK 10, OFF 0, MISSING 6`에서 `17/22, WRONG 0, BLANK 6, OFF 0, MISSING 2`가 됐다. p6는 `12/23, WRONG 0, BLANK 11, OFF 4, MISSING 5`에서 `16/23, WRONG 0, BLANK 7, OFF 4, MISSING 1`이 됐다. p5·p6의 만족도 q07~q10 정답은 모두 `4`로 복구됐다. p4의 q07~q10은 이번 C1-a 대상 배열 조건에 해당하지 않아 행 폴백으로 남았다.
+
+**변경 파일**
+
+- `src/lib/recognition/tableGridDetection.ts`: 실제 `invalid_cell_size`와 동일한 셀 크기 판정을 재사용해, 4px 미만 인접 수평선이 동반된 경우에만 가짜 행 배열을 버리고 기대 행 기하로 재구성한다. 품질 게이트와 기존 셀 크기 거부 경로는 유지했다.
+- 본 문서: 사이클 8 조사·측정 기록 추가.
+
+`npm test`: **101 passed, 실제 스캔 측정 1 skipped**. `npm run build`: **통과**.
+
+`tests/real-scan-measure.test.ts`, `local-scans/`, `templates/`는 수정하지 않았다. `src/lib/recognition/markDensity.ts`와 신뢰도 임계값도 수정하지 않았다. 필드명·인덱스 하드코딩 분기는 없으며, 버전 마커도 갱신하지 않았다.
+
 ### 사이클 7 — 원인 A2 셀 기하 수정 시도 → 방향 2 최종 기각 (2026-08-13, 코덱스 + 클로드 코드 검증)
 
 **시도 (코덱스)**
