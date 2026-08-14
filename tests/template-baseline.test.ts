@@ -11,6 +11,10 @@ describe('committed blank form baselines', () => {
     expect(baseline?.image.contentBoundsSource).toBe('template');
     if (formType === 'cagi') {
       expect(baseline?.fieldRects).toHaveProperty('basic.age');
+      const basicCheckboxRects = Object.values(baseline?.basicCheckboxCandidateRects || {}).flat();
+      expect(basicCheckboxRects).toHaveLength(12);
+      expect(new Set(basicCheckboxRects.map((rect) => `${rect.left},${rect.top},${rect.right},${rect.bottom}`)).size)
+        .toBe(12);
     }
 
     for (const group of template.choiceGroups) {

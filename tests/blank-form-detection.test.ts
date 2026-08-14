@@ -54,7 +54,7 @@ describe('real blank-form detection', () => {
     }
     for (const field of basicFields) {
       expect(sources[field], `${field}: ${draft.recognitionCropDiagnostic?.[field] || 'no source'}`)
-        .toBe('fixed');
+        .toBe('grid');
     }
   });
 

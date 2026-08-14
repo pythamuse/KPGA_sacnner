@@ -17,7 +17,14 @@ import {
   buildCagiGridDetection,
   buildSatisfactionGridDetection,
   type FieldRegistration,
+  type GridDetectionResult,
 } from './tableGridDetection';
+import {
+  matchBasicCheckboxes,
+  calculateCheckboxInteriorDifference,
+  normalizeBasicCheckboxRects,
+  type BasicCheckboxGridDetection,
+} from './basicCheckboxDetection';
 import { recognizeDigitsInRegionDetailed } from './ocrTextLines';
 import { loadBlankFormBaseline } from './templateBaseline';
 import fs from 'fs/promises';
@@ -128,7 +135,22 @@ export async function recognizeStudentForms(
     const cagiImage = applyTemplateRegistrationFrame(cagiImageData, cagiTemplate.registrationFrame);
     const cagiImageBuffer = await fs.readFile(cagiPath);
     const canAutoRecognizeCagi = hasUsableFormBounds(cagiImage);
-    const cagiGridDetection = buildCagiGridDetection(cagiImage);
+    const cagiGridBaseDetection = buildCagiGridDetection(cagiImage);
+    const basicGroups = cagiTemplate.choiceGroups.filter((group) => group.field.startsWith('basic.'));
+    const basicCheckboxDetection = cagiBaseline?.basicCheckboxCandidateRects
+      ? matchBasicCheckboxes(
+        cagiImage,
+        basicGroups,
+        cagiBaseline.image,
+        cagiBaseline.basicCheckboxCandidateRects,
+      )
+      : undefined;
+    const cagiGridDetection = mergeBasicCheckboxDetection(
+      cagiGridBaseDetection,
+      basicGroups,
+      basicCheckboxDetection,
+      Boolean(cagiBaseline?.basicCheckboxCandidateRects),
+    );
     const cagiGridOverrides = cagiGridDetection.overrides;
 
     // Start the small digit-only OCR before row detection initializes the
@@ -191,7 +213,10 @@ export async function recognizeStudentForms(
         canAutoRecognizeCagi,
         registration,
       );
-      const scoringCells = resolveScoringCells(cagiImage, group, gridCells, rowOverride, registration);
+      const directCheckboxGroup = basicGroups.includes(group);
+      const scoringCells = directCheckboxGroup && isVerifiedGrid(registration) && gridCells
+        ? normalizeBasicCheckboxRects(cagiImage, gridCells)
+        : resolveScoringCells(cagiImage, group, gridCells, rowOverride, registration);
       const displayCells = scoringCells;
       recognitionCandidateRects[group.field] = displayCells;
       recognitionCropRects[group.field] = unionPixelRects(displayCells);
@@ -212,15 +237,31 @@ export async function recognizeStudentForms(
         requiresHighVisualConfidence(group.field),
         cagiBaseline ? {
           image: cagiBaseline.image,
-          candidatePixelOverrides: cagiBaseline.candidateRects[group.field],
+          candidatePixelOverrides: cagiBaseline.basicCheckboxCandidateRects?.[group.field]
+            || cagiBaseline.candidateRects[group.field],
         } : undefined,
       );
       draft.confidence[result.field] = result.confidence;
       draft.candidates![result.field] = mapRecognizedCandidates(result.field, result.candidates);
+      const directCheckboxEvidence = directCheckboxGroup && cagiBaseline?.basicCheckboxCandidateRects?.[group.field]
+        ? hasUniqueDirectCheckboxEvidence(
+          cagiImage,
+          cagiBaseline.image,
+          group,
+          scoringCells,
+          cagiBaseline.basicCheckboxCandidateRects[group.field],
+          result.value,
+        )
+        : true;
 
       // Medium confidence stays a suggestion only. Automatic values require a
       // verified grid and the stricter high-confidence mark evidence.
-      if (result.value === undefined || result.confidence !== 'high') {
+      if (result.value === undefined || result.confidence !== 'high' || !directCheckboxEvidence) {
+        if (!directCheckboxEvidence) {
+          recognitionDecisionTrace[result.field] =
+            getRecognitionFieldLabel(result.field) + ': automatic entry deferred because direct checkbox ink evidence was absent or ambiguous.';
+          continue;
+        }
         if (canAutoRecognizeCagi && isVerifiedGrid(registration)) {
           recognitionDecisionTrace[result.field] =
             getRecognitionFieldLabel(result.field) + ': automatic entry deferred because high-confidence mark evidence was not found.';
@@ -551,6 +592,82 @@ function getRecognitionFieldLabel(field: string): string {
 
 function isVerifiedGrid(registration?: FieldRegistration): boolean {
   return registration?.source === 'grid' && registration.status === 'verified';
+}
+
+function mergeBasicCheckboxDetection(
+  base: GridDetectionResult,
+  groups: ChoiceGroup[],
+  detection: BasicCheckboxGridDetection | undefined,
+  baselineAvailable: boolean,
+): GridDetectionResult {
+  if (!baselineAvailable) {
+    return base;
+  }
+
+  if (!detection) {
+    const diagnostic = 'Checkbox geometry did not match the complete 12-box baseline; manual confirmation is required.';
+    const registrations = Object.fromEntries(groups.map((group) => [group.field, {
+      tableId: 'cagi.basic.checkbox',
+      source: 'fixed' as const,
+      status: 'failed' as const,
+      diagnostic,
+    } satisfies FieldRegistration]));
+    return {
+      ...base,
+      registrations: { ...base.registrations, ...registrations },
+      diagnostics: {
+        ...base.diagnostics,
+        ...Object.fromEntries(groups.map((group) => [group.field, diagnostic])),
+      },
+    };
+  }
+
+  const registrations = Object.fromEntries(groups.map((group) => [group.field, {
+    tableId: 'cagi.basic.checkbox',
+    source: 'grid' as const,
+    status: 'verified' as const,
+    independentRegistration: true,
+    diagnostic: detection.diagnostic,
+  } satisfies FieldRegistration]));
+  const fieldRects = Object.fromEntries(Object.entries(detection.overrides).map(([field, cells]) => [
+    field,
+    unionPixelRects(cells),
+  ]));
+
+  return {
+    ...base,
+    overrides: { ...base.overrides, ...detection.overrides },
+    fieldRects: { ...base.fieldRects, ...fieldRects },
+    registrations: { ...base.registrations, ...registrations },
+    diagnostics: {
+      ...base.diagnostics,
+      ...Object.fromEntries(groups.map((group) => [group.field, detection.diagnostic])),
+    },
+  };
+}
+
+function hasUniqueDirectCheckboxEvidence(
+  image: ImageAnalysisData,
+  baselineImage: ImageAnalysisData,
+  group: ChoiceGroup,
+  actualRects: PixelRect[],
+  baselineRects: PixelRect[],
+  value: number | string | undefined,
+): boolean {
+  if (value === undefined || actualRects.length !== group.candidates.length || baselineRects.length !== group.candidates.length) {
+    return false;
+  }
+  const signals = actualRects.map((rect, index) => calculateCheckboxInteriorDifference(
+    image,
+    rect,
+    baselineImage,
+    baselineRects[index],
+  ));
+  const markedIndexes = signals
+    .map((signal, index) => signal > 0 ? index : -1)
+    .filter((index) => index >= 0);
+  const valueIndex = group.candidates.findIndex((candidate) => candidate.value === value);
+  return markedIndexes.length === 1 && markedIndexes[0] === valueIndex;
 }
 
 /**
