@@ -58,6 +58,13 @@ interface ScoredCandidate extends CandidateScore {
   shape?: TemplateInkShape;
 }
 
+/**
+ * How far the best option must outscore the runner-up, as a multiple, before a
+ * baseline-backed group may be confirmed automatically. See `analyzeChoiceGroup`
+ * for why an absolute gap cannot carry this decision.
+ */
+const HIGH_RELATIVE_CONTRAST = 1.25;
+
 export async function loadImageAnalysisData(filePath: string): Promise<ImageAnalysisData> {
   const { data: pixels, info } = await sharp(filePath)
     .rotate()
@@ -622,6 +629,22 @@ export function analyzeChoiceGroup(
   }
 
   const gap = best.score - (second?.score || 0);
+  // Printed circles and rules do not cancel perfectly: the blank form is a
+  // 200dpi scan while an uploaded page is rendered at roughly half that, so
+  // every option keeps a similar floor of leftover ink. That floor makes the
+  // absolute gap meaningless -- on a real scan `satisfaction.q01` scored
+  // 0.0500 / 0.0439 / 0.0423 / 0.0225 and the unmarked option 1 won by 0.0077,
+  // well past the 0.004 gap rule. A real mark instead multiplies the runner-up
+  // (1.9x on the same field's correct pages) because the leftover floor is
+  // common to every option while pen ink is not.
+  //
+  // 1.25 is the largest threshold that costs no correct answer on the six-page
+  // answer key (1.15-1.25 both give CORRECT 92 WRONG 0; 1.35 drops to 87), so
+  // it maximizes the margin against unseen pages without trading accuracy. The
+  // one measured wrong answer sat at 1.14.
+  const relativeContrast = second && second.score > 0
+    ? best.score / second.score
+    : Number.POSITIVE_INFINITY;
   // The baseline score now acts only as a minimum signal floor. For a real
   // mark, the residual must also form a compact, stroke-like shape. This is
   // deliberately shared by every baseline-backed candidate; it does not know
@@ -632,7 +655,12 @@ export function analyzeChoiceGroup(
   const mediumGapThreshold = usesBaseline ? 0.003 : 0.025;
   const hasStructuredMark = !usesBaseline || hasStructuredTemplateMark(best.shape);
 
-  if (best.score >= highScoreThreshold && gap >= highGapThreshold && hasStructuredMark) {
+  if (
+    best.score >= highScoreThreshold
+    && gap >= highGapThreshold
+    && hasStructuredMark
+    && (!usesBaseline || relativeContrast >= HIGH_RELATIVE_CONTRAST)
+  ) {
     return {
       field: group.field,
       value: best.value,
