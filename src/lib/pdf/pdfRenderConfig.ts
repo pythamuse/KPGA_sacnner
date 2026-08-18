@@ -8,6 +8,34 @@ export const PDFJS_WORKER_SRC = `${PDFJS_CDN_BASE}/pdf.worker.min.mjs`;
 // JBIG2 scanner PDFs require these assets to initialize their decoder.
 export const PDFJS_WASM_URL = `${PDFJS_DIST_BASE}/wasm/`;
 
+/**
+ * Upload raster settings. The browser renders every PDF page through this
+ * ladder and uploads JPEG, so the recognition layer never sees a lossless
+ * page. `tests/real-scan-measure.test.ts` imports the same values: when the
+ * harness rendered at scale 2.0 PNG instead, it measured CORRECT 116/135
+ * WRONG 0 on the exact commit where the deployed setting measured
+ * CORRECT 92/135 WRONG 1. Keep the two bound to one source.
+ */
+export const MAX_UPLOAD_IMAGE_BYTES = 3.8 * 1024 * 1024;
+
+export interface PdfRenderOption {
+  scale: number;
+  quality: number;
+}
+
+export const PDF_RENDER_OPTIONS: PdfRenderOption[] = [
+  { scale: 1.5, quality: 0.86 },
+  { scale: 1.25, quality: 0.82 },
+  { scale: 1.0, quality: 0.78 },
+];
+
+export const IMAGE_SHRINK_OPTIONS: PdfRenderOption[] = [
+  { scale: 1.0, quality: 0.86 },
+  { scale: 0.85, quality: 0.82 },
+  { scale: 0.7, quality: 0.78 },
+  { scale: 0.55, quality: 0.74 },
+];
+
 export interface PdfDocumentOptions {
   data: ArrayBuffer;
   wasmUrl: string;

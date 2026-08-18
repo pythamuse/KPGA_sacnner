@@ -10,7 +10,10 @@ import {
   shouldCorrectBatchPerspective,
 } from '@/lib/documentScanner/perspectiveCorrectionPolicy';
 import {
+  IMAGE_SHRINK_OPTIONS,
+  MAX_UPLOAD_IMAGE_BYTES,
   PDFJS_WORKER_SRC,
+  PDF_RENDER_OPTIONS,
   buildPdfDocumentOptions,
   hasMeaningfulRenderedPixels,
 } from '@/lib/pdf/pdfRenderConfig';
@@ -48,7 +51,6 @@ type BatchUploadItem = {
   source: 'image' | 'pdf';
 };
 
-const MAX_UPLOAD_IMAGE_BYTES = 3.8 * 1024 * 1024;
 const PERSPECTIVE_CORRECTION_SCALE = 3;
 const MAX_DETECTION_DIMENSION = 1600;
 const PERSPECTIVE_CORRECTION_TIMEOUT_MS = 9000;
@@ -63,17 +65,6 @@ const BATCH_MIN_CORRECTION_CONFIDENCE = 0.62;
 // withTimeout-only approach, which could not protect against a genuine main-thread block.
 // See Task/MOBILE_CAPTURE_PERSPECTIVE_CORRECTION.md.
 const PERSPECTIVE_CORRECTION_ENABLED = true;
-const PDF_RENDER_OPTIONS = [
-  { scale: 1.5, quality: 0.86 },
-  { scale: 1.25, quality: 0.82 },
-  { scale: 1.0, quality: 0.78 },
-];
-const IMAGE_SHRINK_OPTIONS = [
-  { scale: 1.0, quality: 0.86 },
-  { scale: 0.85, quality: 0.82 },
-  { scale: 0.7, quality: 0.78 },
-  { scale: 0.55, quality: 0.74 },
-];
 
 const createBatchId = () => (
   globalThis.crypto?.randomUUID?.()

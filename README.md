@@ -89,3 +89,11 @@ npm run build
 ```bash
 REAL_SCAN_CAGI_PDF="<선별검사 PDF 경로>" REAL_SCAN_SAT_PDF="<만족도조사 PDF 경로>" REAL_SCAN_PAGES=2 npx vitest run tests/real-scan-measure.test.ts
 ```
+
+이 계측기는 **배포본과 동일한 래스터**(`PDF_RENDER_OPTIONS[0]` = scale 1.5, JPEG q0.86)로 렌더한다. 상수는 `src/lib/pdf/pdfRenderConfig.ts`에서 앱과 함께 import하므로 둘이 어긋날 수 없다. 예전에는 계측기만 `scale 2.0` PNG 무손실로 렌더해, 같은 커밋에서 계측기는 `CORRECT 116/135 WRONG 0`, 배포본은 `92/135 WRONG 1`을 내는 상태였다(2026-08-19 발견, [Task/MEASUREMENT_RENDER_PARITY_2026-08-19.md](Task/MEASUREMENT_RENDER_PARITY_2026-08-19.md)).
+
+업로드 해상도 변경안을 **측정할 때만** 스케일을 덮어쓴다. 덮어쓰면 보고서에 `OVERRIDDEN` 경고가 찍힌다.
+
+```bash
+REAL_SCAN_RENDER_SCALE=2.0 REAL_SCAN_RENDER_QUALITY=0.86 npx vitest run tests/real-scan-measure.test.ts
+```

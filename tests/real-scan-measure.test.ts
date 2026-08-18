@@ -9,6 +9,7 @@ import {
   buildSatisfactionGridDetection,
 } from '../src/lib/recognition/tableGridDetection';
 import { cagiTemplate, satisfactionTemplate } from '../src/lib/recognition/roiTemplates';
+import { MAX_UPLOAD_IMAGE_BYTES, PDF_RENDER_OPTIONS } from '../src/lib/pdf/pdfRenderConfig';
 
 /**
  * Root-cause isolation harness.
@@ -31,11 +32,32 @@ import { cagiTemplate, satisfactionTemplate } from '../src/lib/recognition/roiTe
  *
  * Counting filled fields instead of correct ones is what let a change that
  * added four wrong high-confidence values look like an improvement.
+ *
+ * RENDER PARITY (2026-08-19). This harness must consume the same raster the
+ * browser uploads. It previously rendered scale 2.0 PNG while the app renders
+ * PDF_RENDER_OPTIONS[0] (scale 1.5) and uploads JPEG. On one unchanged commit
+ * the two inputs disagreed completely:
+ *
+ *   scale 2.0 PNG   -> CORRECT 116/135  WRONG 0  BLANK 22  OFF 13
+ *   scale 1.5 JPEG  -> CORRECT  92/135  WRONG 1  BLANK 45  OFF 21
+ *   scale 1.0 JPEG  -> CORRECT  57/135  WRONG 5  BLANK 76  OFF 61
+ *
+ * Every local verification that passed while production kept failing ran on
+ * the first row. The render settings are imported, not copied, so the app and
+ * the instrument cannot drift apart again. Override the scale ONLY to measure
+ * a proposed upload-resolution change, never to make a number look better.
  */
 
 const CAGI_PDF = process.env.REAL_SCAN_CAGI_PDF;
 const SAT_PDF = process.env.REAL_SCAN_SAT_PDF;
 const PAGES = Number(process.env.REAL_SCAN_PAGES || 2);
+// Bound to the app's first render rung. A page whose JPEG exceeds
+// MAX_UPLOAD_IMAGE_BYTES is re-rendered smaller by the browser, so the byte
+// size reported below also tells us whether a page fell to a lower rung.
+const PRODUCTION_RENDER = PDF_RENDER_OPTIONS[0];
+const RENDER_SCALE = Number(process.env.REAL_SCAN_RENDER_SCALE || PRODUCTION_RENDER.scale);
+const RENDER_QUALITY = Number(process.env.REAL_SCAN_RENDER_QUALITY || PRODUCTION_RENDER.quality);
+const renderLog: string[] = [];
 const KEY_PATH = process.env.REAL_SCAN_ANSWER_KEY
   || path.join(process.cwd(), 'local-scans', 'answer-key.json');
 
@@ -97,14 +119,17 @@ async function renderPdfPages(pdfPath: string, pages: number, outDir: string, la
   const out: string[] = [];
   for (let n = 1; n <= Math.min(pages, doc.numPages); n += 1) {
     const page = await doc.getPage(n);
-    const viewport = page.getViewport({ scale: 2.0 });
+    const viewport = page.getViewport({ scale: RENDER_SCALE });
     const canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
     const ctx = canvas.getContext('2d');
     ctx.fillStyle = '#fff';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     await page.render({ canvasContext: ctx, viewport, canvas } as never).promise;
-    const file = path.join(outDir, `${label}-p${n}.png`);
-    fs.writeFileSync(file, canvas.toBuffer('image/png'));
+    const file = path.join(outDir, `${label}-p${n}.jpg`);
+    const buffer = canvas.toBuffer('image/jpeg', { quality: RENDER_QUALITY });
+    fs.writeFileSync(file, buffer);
+    const overBudget = buffer.length > MAX_UPLOAD_IMAGE_BYTES ? '  OVER UPLOAD LIMIT' : '';
+    renderLog.push(`  ${label} p${n}: ${canvas.width}x${canvas.height} ${(buffer.length / 1024).toFixed(0)}KB${overBudget}`);
     out.push(file);
   }
   return out;
@@ -146,6 +171,11 @@ describe.skipIf(!CAGI_PDF || !SAT_PDF)('real scan measurement', () => {
     const satPngs = await renderPdfPages(SAT_PDF!, PAGES, tmp, 'sat');
 
     const report: string[] = ['\n================ REAL SCAN MEASUREMENT ================'];
+    const parity = RENDER_SCALE === PRODUCTION_RENDER.scale
+      && RENDER_QUALITY === PRODUCTION_RENDER.quality;
+    report.push(`render: scale ${RENDER_SCALE}, JPEG q${RENDER_QUALITY}`
+      + (parity ? ' (production parity)' : ' (OVERRIDDEN - not what the app uploads)'));
+    report.push(...renderLog);
     if (!answerKey) {
       report.push(`(no answer key at ${KEY_PATH} — correctness not judged)`);
     }

@@ -31,6 +31,8 @@
     "@types/node": "^20.14.9",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
+    "canvas": "^3.2.3",
+    "pdfjs-dist": "^4.10.38",
     "typescript": "^5.5.2",
     "vitest": "^1.6.0"
   }
