@@ -23,7 +23,8 @@
 | 17 | 성별·학교유형·학년이 좌표가 정확해도 **구조적으로** 자동 입력되지 않음 | 원인 확정, 수정 착수 전 | [RECOGNITION_ROOT_CAUSE_ISOLATION_2026-08-13](../Task/RECOGNITION_ROOT_CAUSE_ISOLATION_2026-08-13.md) |
 | 18 | 연령대 OCR이 요청 예산 안에 끝나지 않아 항상 빈칸 | 원인 확정, 수정 착수 전 | [RECOGNITION_ROOT_CAUSE_ISOLATION_2026-08-13](../Task/RECOGNITION_ROOT_CAUSE_ISOLATION_2026-08-13.md) |
 | 19 | 격자 거부 시 템플릿 폴백이 실제 페이지보다 부정확해 값 인식 실패 | 원인 확정, 수정 착수 전 | [RECOGNITION_ROOT_CAUSE_ISOLATION_2026-08-13](../Task/RECOGNITION_ROOT_CAUSE_ISOLATION_2026-08-13.md) |
-| 20 | 표시가 없는 칸에 값을 만들어내 `높음`으로 확정 (배포본에 존재) | 원인 확정, 수정 착수 전 | [RECOGNITION_ROOT_CAUSE_ISOLATION_2026-08-13](../Task/RECOGNITION_ROOT_CAUSE_ISOLATION_2026-08-13.md) |
+| 20 | 표시가 없는 칸에 값을 만들어내 `높음`으로 확정 (배포본에 존재) | 배포본 해상도에서 해소(`WRONG 0`), 실배포 재확인 필요 | [RECOGNITION_ROOT_CAUSE_ISOLATION_2026-08-13](../Task/RECOGNITION_ROOT_CAUSE_ISOLATION_2026-08-13.md), [MEASUREMENT_RENDER_PARITY_2026-08-19](../Task/MEASUREMENT_RENDER_PARITY_2026-08-19.md) |
+| 21 | 계측기가 배포본과 다른 해상도·형식의 이미지를 측정해 모든 판정이 무효 | 계측기 수정 완료, 기준선 재설정 | [MEASUREMENT_RENDER_PARITY_2026-08-19](../Task/MEASUREMENT_RENDER_PARITY_2026-08-19.md) |
 
 ---
 
@@ -164,4 +165,14 @@
 **재현**: 실제 스캔 6페이지를 인식하면 3페이지 만족도 문항 1에 `3`이 자동 입력된다. 해당 양식의 그 문항은 ①②③④ 어디에도 표시가 없다(원본 이미지 확대 확인).
 **원인**: 마킹 판별이 "표시 유무"를 잉크 총량으로 판단한다. 인쇄된 보기 번호와 주변 괘선, 위 칸에서 번진 획이 남긴 잉크가 후보 간 점수 차를 만들어 `높음` 기준을 통과한다. 좌표 문제가 아니다(해당 페이지 OFF 0).
 **대응**: 미착수. 원인 C2(마킹 판별)와 같은 뿌리이며 [RECOGNITION_ROOT_CAUSE_ISOLATION_2026-08-13](../Task/RECOGNITION_ROOT_CAUSE_ISOLATION_2026-08-13.md)의 C2 2차 작업에서 1순위 목표로 다룬다.
-**상태**: 원인 확정, 배포본에 존재. **표본을 2페이지에서 6페이지로 늘리자마자 드러났다** — 2페이지 표본으로는 보이지 않던 결함이다.
+**상태**: **재발 확인(2026-08-19).** 2026-08-13 C2 형태 게이트 병합으로 `WRONG 1 → 0`이 되어 해소로 판정했으나, 그 판정은 배포본이 처리하지 않는 고해상도 무손실 이미지에서 내려진 것이었다. 배포본 렌더 설정(`scale 1.5` JPEG)에서 다시 측정하면 `p2 satisfaction.q01: got 1, want 3, conf=high`가 나오고, `scale 1.0`에서는 `conf=high` 오답이 5건이다. 상세는 21번과 [MEASUREMENT_RENDER_PARITY_2026-08-19](../Task/MEASUREMENT_RENDER_PARITY_2026-08-19.md) 참고.
+
+## 21. 계측기가 배포본과 다른 이미지를 측정해 모든 판정이 무효
+
+**재현**: 배포본 `v2026-08-14.1`에서 19페이지 배치를 검수하면 기본정보 3항목이 `12/12 정합 성공`인데도 전 페이지 보류되고 만족도 하단 표가 페이지마다 실패한다. 그러나 같은 커밋·같은 PDF를 `tests/real-scan-measure.test.ts`로 측정하면 `CORRECT 116/135, WRONG 0`이 나온다.
+
+**원인**: 계측기는 `page.getViewport({ scale: 2.0 })` + PNG 무손실로 렌더했고, 배포본은 `PDF_RENDER_OPTIONS[0]`(`scale 1.5`) + JPEG q0.86으로 렌더해 업로드한다. 인식 계층의 여러 상수(`MIN_COMPONENT_SIZE`, `insetRect` 여백, 베이스라인 ±1px 정렬, 괘선 `minDarkRatio`)가 절대 픽셀 값이라 이 축척 차이를 흡수하지 못한다. 같은 커밋에서 `scale 2.0` PNG는 `116/135, WRONG 0`, `scale 1.5` JPEG는 `92/135, WRONG 1`, `scale 1.0` JPEG는 `57/135, WRONG 5`였다.
+
+**대응**: 렌더 상수를 `src/lib/pdf/pdfRenderConfig.ts`로 올려 앱과 계측기가 **같은 값을 import**하게 했고, 계측기를 배포본과 동일한 JPEG 렌더로 교체했다. 새 기준선은 `CORRECT 92/135, WRONG 1`이다.
+
+**상태**: 계측기 수정 완료(`npm test` 101 passed, `npm run build` 통과). **2026-08-13 스레드에서 병합한 네 라운드가 배포본 조건에서도 개선이었는지는 재판정이 필요하다.**
