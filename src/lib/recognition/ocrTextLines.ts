@@ -58,6 +58,15 @@ const OCR_TOTAL_TIMEOUT_MS = 2_500;
 const DIGIT_OCR_TOTAL_TIMEOUT_MS = 6_000;
 const OCR_CACHE_PATH = path.join(os.tmpdir(), 'gambling-prevention-tesseract-cache');
 const DIGIT_OCR_CACHE_PATH = path.join(os.tmpdir(), 'gambling-prevention-digit-tesseract-cache');
+// `cachePath` points at the container's temp directory, which is empty on every
+// cold start, so tesseract.js re-downloaded the 5MB English model from its CDN
+// for each new serverless instance. That never finished inside the 6s first-page
+// budget, and once the first attempt timed out, `digitWorkerPromise` stayed
+// pending so every later page short-circuited on the `worker_pending` guard --
+// age came back blank for all 19 pages of a real batch. The model is committed
+// beside the blank-form assets and traced into the deployment bundle
+// (next.config.mjs), so worker creation is now a local file read.
+const DIGIT_OCR_LANG_PATH = path.join(process.cwd(), 'src', 'lib', 'recognition', 'assets');
 
 let workerPromise: Promise<Worker> | null = null;
 let workerReady = false;
@@ -402,7 +411,11 @@ function buildCropBounds(
 
 function getDigitWorker(): Promise<Worker> {
   if (!digitWorkerPromise) {
-    digitWorkerPromise = createWorker('eng', OEM.DEFAULT, { cachePath: DIGIT_OCR_CACHE_PATH })
+    digitWorkerPromise = createWorker('eng', OEM.DEFAULT, {
+      cachePath: DIGIT_OCR_CACHE_PATH,
+      langPath: DIGIT_OCR_LANG_PATH,
+      gzip: false,
+    })
       .then(async (worker) => {
         await worker.setParameters({
           tessedit_char_whitelist: '0123456789',
