@@ -8,6 +8,14 @@ import StudentTable from '@/components/StudentTable';
 import ErrorSummary from '@/components/ErrorSummary';
 import { RecognitionDraft } from '@/lib/recognition/detectCheckmarks';
 import { StudentData, ValidationError } from '@/lib/validation/types';
+import {
+  buildReviewSnapshot,
+  clearReviewSnapshot,
+  describeSnapshot,
+  loadReviewSnapshot,
+  saveReviewSnapshot,
+  type ReviewSnapshot,
+} from '@/lib/session/reviewSnapshot';
 
 function UsageModal({ onClose }: { onClose: () => void }) {
   return (
@@ -115,7 +123,7 @@ function BrandHeader() {
           whiteSpace: 'nowrap',
         }}
       >
-        테스트 버전 v2026-08-19.2
+        테스트 버전 v2026-08-19.3
       </span>
     </div>
   );
@@ -133,6 +141,16 @@ export default function Home() {
   const [drafts, setDrafts] = useState<RecognitionDraft[] | null>(null);
   const [currentDraftIndex, setCurrentDraftIndex] = useState<number>(0);
 
+  // Two different failures lose work, so they get two different safety nets.
+  // "검수 취소" keeps the page alive, so the discarded drafts -- images included
+  // -- are held in memory and can be restored completely. A refresh or a
+  // dropped connection wipes memory, so a value-only snapshot goes to
+  // localStorage; see Docs/00_PRD.md §10-2 for why images are excluded.
+  const discardedDraftsRef = useRef<{ drafts: RecognitionDraft[]; index: number } | null>(null);
+  const [canUndoDiscard, setCanUndoDiscard] = useState(false);
+  const [restorable, setRestorable] = useState<ReviewSnapshot | null>(null);
+  const [restoredFromSnapshot, setRestoredFromSnapshot] = useState(false);
+
   const [isRecognizing, setIsRecognizing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isUploadingFiles, setIsUploadingFiles] = useState(false);
@@ -148,7 +166,30 @@ export default function Home() {
     setShouldScrollToErrors(false);
   }, [errors, shouldScrollToErrors]);
 
-  const resetDraft = () => {
+  // Restore what was on screen the moment the page last loaded, if anything.
+  useEffect(() => {
+    const snapshot = loadReviewSnapshot();
+    if (snapshot) setRestorable(snapshot);
+  }, []);
+
+  // Keep the snapshot current. "검수 취소" deliberately does not clear it --
+  // that is exactly the case the user has to be able to come back from.
+  useEffect(() => {
+    if (!jobId) return;
+    saveReviewSnapshot(buildReviewSnapshot({
+      jobId,
+      uploadMode,
+      students,
+      drafts,
+      currentDraftIndex,
+    }));
+  }, [jobId, uploadMode, students, drafts, currentDraftIndex]);
+
+  const resetDraft = (captureUndo = true) => {
+    if (captureUndo && drafts && drafts.length > 0) {
+      discardedDraftsRef.current = { drafts, index: currentDraftIndex };
+      setCanUndoDiscard(true);
+    }
     setCagiImageId(null);
     setSatImageId(null);
     setDrafts(null);
@@ -158,15 +199,48 @@ export default function Home() {
     setNotices([]);
   };
 
+  const undoDiscard = () => {
+    const discarded = discardedDraftsRef.current;
+    if (!discarded) return;
+    setDrafts(discarded.drafts);
+    setCurrentDraftIndex(discarded.index);
+    discardedDraftsRef.current = null;
+    setCanUndoDiscard(false);
+  };
+
+  const restorePreviousSession = () => {
+    if (!restorable) return;
+    setJobId(restorable.jobId);
+    setUploadMode(restorable.uploadMode as UploadMode);
+    setStudents(restorable.students);
+    setDrafts(restorable.drafts.length > 0 ? restorable.drafts : null);
+    setCurrentDraftIndex(restorable.currentDraftIndex);
+    setRestoredFromSnapshot(restorable.drafts.length > 0);
+    setRestorable(null);
+    setErrors([]);
+    setNotices([]);
+  };
+
+  const dismissRestorable = () => {
+    clearReviewSnapshot();
+    setRestorable(null);
+  };
+
   const handleStartNewJob = async (selectedMode: UploadMode) => {
     try {
       const res = await fetch('/api/jobs', { method: 'POST' });
       if (!res.ok) throw new Error('서버 응답 오류');
       const data = await res.json();
+      // A new class must not inherit the previous one's recovery point.
+      clearReviewSnapshot();
+      discardedDraftsRef.current = null;
+      setCanUndoDiscard(false);
+      setRestorable(null);
+      setRestoredFromSnapshot(false);
       setJobId(data.jobId);
       setUploadMode(selectedMode);
       setStudents([]);
-      resetDraft();
+      resetDraft(false);
       setErrors([]);
       setNotices([]);
     } catch (err: any) {
@@ -359,11 +433,56 @@ export default function Home() {
         )}
       </header>
 
+      {restorable && (
+        <div className="notice" style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 12, marginBottom: 18 }}>
+          <div style={{ flex: '1 1 320px' }}>
+            <strong>이어서 할 수 있는 이전 작업이 있습니다.</strong>
+            <div style={{ marginTop: 4, fontSize: 14 }}>
+              {describeSnapshot(restorable)} — 원본 이미지는 복원되지 않으며 값과 진단만 복원됩니다.
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button type="button" className="btn-primary" onClick={restorePreviousSession}>
+              이어서 하기
+            </button>
+            <button type="button" className="btn-secondary" onClick={dismissRestorable}>
+              삭제하고 새로 시작
+            </button>
+          </div>
+        </div>
+      )}
+
       {!jobId ? (
         <UploadModeSelector onStart={handleStartNewJob} />
       ) : (
         <div className="work-grid">
           <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+            {canUndoDiscard && (
+              <div className="notice" style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 12 }}>
+                <div style={{ flex: '1 1 320px' }}>
+                  <strong>검수를 취소했습니다.</strong>
+                  <div style={{ marginTop: 4, fontSize: 14 }}>
+                    되돌리면 취소 직전 상태로 그대로 복귀합니다.
+                  </div>
+                </div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button type="button" className="btn-primary" onClick={undoDiscard}>
+                    되돌리기
+                  </button>
+                  <button type="button" className="btn-secondary" onClick={() => { discardedDraftsRef.current = null; setCanUndoDiscard(false); }}>
+                    닫기
+                  </button>
+                </div>
+              </div>
+            )}
+            {restoredFromSnapshot && (
+              <div className="notice">
+                <strong>이전 작업에서 복원한 값입니다.</strong>
+                <div style={{ marginTop: 4, fontSize: 14 }}>
+                  원본 이미지는 복원되지 않았습니다. 원본 대조가 필요한 학생은 다시 업로드해주세요.
+                </div>
+              </div>
+            )}
             <ErrorSummary ref={errorSummaryRef} errors={errors} />
             {notices.length > 0 && (
               <div className="notice">
