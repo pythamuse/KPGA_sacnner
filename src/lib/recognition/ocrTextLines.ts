@@ -105,6 +105,11 @@ const DIGIT_RULE_MAX_THICKNESS_FRACTION = 0.14;
 // written into each other. Anything that does is printed structure, possibly
 // with handwriting fused onto it.
 const DIGIT_MAX_STROKE_WIDTH_FRACTION = 0.9;
+// How much ink may lie beyond a printed line before it stops being a wall of
+// the box and starts being a rule the digits are written across. Beyond a real
+// wall there is only the outside of the field, so this is scanner speckle and
+// the odd stroke overshooting the box, not a digit.
+const DIGIT_WALL_OUTSIDE_INK_FRACTION = 0.1;
 // The box's own left/right edges and its dashed centre divider are thin columns
 // spanning nearly the full height. Handwritten digits are wider than this.
 const DIGIT_RULE_COLUMN_HEIGHT_FRACTION = 0.85;
@@ -447,6 +452,9 @@ interface DigitShape {
   inkPermille: number;
   /** Left to right, in the same order the per-digit reader reads them. */
   strokes: Array<{ width: number; height: number }>;
+  /** Printed lines fitted across the box, and how many were its own walls. */
+  rules: number;
+  walls: number;
   /** Shapes dropped for covering the whole width of the field. */
   framesRemoved: number;
   /** Set when frame removal emptied the box and the raw ink was read instead. */
@@ -468,10 +476,14 @@ function describeShape(shape: DigitShape): string {
 
   const frames = shape.framesRemoved > 0 ? ` frames-removed=${shape.framesRemoved}` : '';
   const raw = shape.readRawInk ? ' read=raw-ink' : '';
+  // Whether the box's own walls were found at all. Without this a stroke still
+  // reaching the full height cannot be told apart from a wall that was never
+  // detected, which is the next question either outcome raises.
+  const lines = ` rules=${shape.rules}(walls=${shape.walls})`;
 
   return `[crop=${shape.cropWidth}x${shape.cropHeight} work=${shape.workWidth}x${shape.workHeight}`
     + ` tmpl=${shape.template} otsu=${shape.otsu} ink=${shape.inkPermille}/1000`
-    + ` strokes=${shape.strokes.length}(${strokes}${extra})${frames}${raw}]`;
+    + ` strokes=${shape.strokes.length}(${strokes}${extra})${lines}${frames}${raw}]`;
 }
 
 /**
@@ -631,6 +643,8 @@ async function buildDigitStrokes(
     otsu: threshold,
     inkPermille: Math.round((inkCount / mask.data.length) * 1000),
     strokes: [],
+    rules: 0,
+    walls: 0,
     framesRemoved: 0,
     readRawInk: false,
   };
@@ -640,7 +654,9 @@ async function buildDigitStrokes(
   }
 
   const rawInk = mask.data.slice();
-  eraseHorizontalRules(mask);
+  const erased = eraseHorizontalRules(mask);
+  shape.rules = erased.rules;
+  shape.walls = erased.walls;
   const strokes = keepDigitStrokes(mask);
   if (strokes.length === 0) {
     return { shape };
@@ -828,17 +844,31 @@ function otsuThreshold(pixels: Buffer): number {
  * Only thin ink columns are erased where the line passes. Where a digit crosses
  * a rule the ink column runs the height of the stroke, so a "4" standing on the
  * line keeps its stem and is released as its own shape once the rule is gone.
+ *
+ * That protection is right for a rule inside the field and wrong for the box's
+ * own top and bottom walls, where it leaves a stub of printed line standing at
+ * the digit's columns all the way to the edge of the crop. Measured on real
+ * scans, every stroke that reached the full height of the working image was
+ * read as nothing, and the one that did not reach it read at confidence 90 --
+ * the reader was being handed a digit welded to two rails. A wall is therefore
+ * cleared out to the edge regardless of what crosses it; see `classifyRuleLine`.
  */
-function eraseHorizontalRules(mask: InkMask): void {
+function eraseHorizontalRules(mask: InkMask): { rules: number; walls: number } {
   const { width, height } = mask;
   const minRun = Math.max(8, Math.round(width * DIGIT_RULE_RUN_FRACTION));
   const maxSlant = Math.max(1, Math.round(height * DIGIT_RULE_MAX_SLANT_FRACTION));
   const maxThickness = Math.max(2, Math.round(height * DIGIT_RULE_MAX_THICKNESS_FRACTION));
   const columns = measureInkColumns(mask);
+  const lines = findRuleLines(mask, minRun, maxSlant, maxThickness);
+  let walls = 0;
 
-  for (const line of findRuleLines(mask, minRun, maxSlant, maxThickness)) {
-    eraseRuleLine(mask, columns, line, maxThickness);
+  for (const line of lines) {
+    if (eraseRuleLine(mask, columns, line, maxThickness) !== 'crossing') {
+      walls++;
+    }
   }
+
+  return { rules: lines.length, walls };
 }
 
 interface RuleLine {
@@ -927,17 +957,107 @@ function findRuleLines(mask: InkMask, minRun: number, maxSlant: number, maxThick
   return distinct;
 }
 
+/**
+ * Whether a rule is one of the box's own walls rather than a line the digits
+ * are written across. A wall's ink reaches the edge of the crop; a rule the
+ * writing sits on has paper on both sides of it.
+ *
+ * The distinction decides whether the crossing protection applies. It must
+ * apply to a rule inside the field, or cutting it would take a digit's stem
+ * with it. It must *not* apply to a wall: there is no handwriting beyond the
+ * edge of the field to protect, so the protection only preserves a stub of
+ * printed line at the digit's own columns -- and a stub reaching the edge of
+ * the crop is what welds a rail onto the glyph handed to the reader.
+ */
+function classifyRuleLine(
+  mask: InkMask,
+  line: RuleLine,
+  maxThickness: number,
+): 'top-wall' | 'bottom-wall' | 'crossing' {
+  const { data, width, height } = mask;
+  const lastColumn = Math.max(1, width - 1);
+  let above = 0;
+  let band = 0;
+  let below = 0;
+
+  for (let x = 0; x < width; x++) {
+    const centre = line.top + Math.round((line.slant * x) / lastColumn);
+    for (let y = 0; y < height; y++) {
+      if (!data[y * width + x]) {
+        continue;
+      }
+      // The line's own ink is as deep as a rule may be, not one row. Counting
+      // it as ink beyond the line is what made a wall look like a crossing.
+      if (y < centre - maxThickness) {
+        above++;
+      } else if (y > centre + maxThickness) {
+        below++;
+      } else {
+        band++;
+      }
+    }
+  }
+
+  const total = above + band + below;
+  if (total === 0) {
+    return 'crossing';
+  }
+
+  // A wall sits at the edge of the field with the writing all on one side of
+  // it. A rule the digits are written across has ink on both sides, and the
+  // crossing protection has to hold there or cutting the rule would take a
+  // stem with it.
+  const outside = total * DIGIT_WALL_OUTSIDE_INK_FRACTION;
+  const middle = line.top + line.slant / 2;
+  if (middle <= height / 4 && above <= outside) {
+    return 'top-wall';
+  }
+  if (middle >= (height * 3) / 4 && below <= outside) {
+    return 'bottom-wall';
+  }
+  return 'crossing';
+}
+
 function eraseRuleLine(
   mask: InkMask,
   columns: { top: Int32Array; length: Int32Array },
   line: RuleLine,
   maxThickness: number,
-): void {
+): 'top-wall' | 'bottom-wall' | 'crossing' {
   const { data, width, height } = mask;
   const lastColumn = Math.max(1, width - 1);
+  const role = classifyRuleLine(mask, line, maxThickness);
 
   for (let x = 0; x < width; x++) {
     const centre = line.top + Math.round((line.slant * x) / lastColumn);
+
+    // A wall bounds the field. Everything between it and the edge of the crop
+    // is outside the box, so it goes whether or not a stroke crosses -- which
+    // is what frees the digit's top or foot from the printed line it was
+    // touching, and lets its own extent decide the shape handed to the reader.
+    if (role === 'top-wall') {
+      // Down to the far side of the wall's own ink, but never deeper than a
+      // rule can be -- so where a digit is fused to the wall it gives up a
+      // rule's thickness off its head instead of the whole stroke.
+      let last = Math.min(centre + 1, height - 1);
+      const limit = Math.min(centre + maxThickness, height - 1);
+      while (last < limit && data[(last + 1) * width + x]) {
+        last++;
+      }
+      for (let row = 0; row <= last; row++) {
+        data[row * width + x] = 0;
+      }
+    } else if (role === 'bottom-wall') {
+      let first = Math.max(centre - 1, 0);
+      const limit = Math.max(centre - maxThickness, 0);
+      while (first > limit && data[(first - 1) * width + x]) {
+        first--;
+      }
+      for (let row = first; row < height; row++) {
+        data[row * width + x] = 0;
+      }
+    }
+
     for (let offset = -1; offset <= 1; offset++) {
       const y = centre + offset;
       if (y < 0 || y >= height) {
@@ -954,6 +1074,8 @@ function eraseRuleLine(
       }
     }
   }
+
+  return role;
 }
 
 /**
