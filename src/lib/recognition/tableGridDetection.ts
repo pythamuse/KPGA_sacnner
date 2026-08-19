@@ -523,6 +523,13 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
     baseWidth,
     rowCenters.map((value) => bounds.top + value * baseHeight),
   );
+  // Instrumentation, attached only to a refusal: whether the rule a boundary
+  // needed was detected at all decides between a mis-selection and a genuine
+  // misdetection, and those two want opposite responses.
+  const lineEvidence = describeLineEvidence(
+    { detected: horizontalLines, selected: rowsForGrid, expected: expectedY },
+    { detected: verticalLines, selected: resolvedColumns, expected: expectedX },
+  );
   const registrations: Record<string, FieldRegistration> = Object.fromEntries(groups.map((group) => {
     const candidateCenter = getCandidateCenterQuality(group, overrides[group.field], bounds);
     const status: RegistrationStatus = isVerifiedGridQuality(
@@ -531,7 +538,7 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
       spec.maxUniformCandidateOffsetY,
     ) ? 'verified' : 'candidate';
     const diagnostic = status === 'candidate'
-      ? formatGridQualityDiagnostic(quality, candidateCenter, spec.maxUniformCandidateOffsetY)
+      ? formatGridQualityDiagnostic(quality, candidateCenter, spec.maxUniformCandidateOffsetY) + lineEvidence
       : undefined;
     return [group.field, {
       tableId: spec.id,
@@ -789,6 +796,47 @@ function describeFailingClauses(
     : '';
   return ` [refused=${failing.join(',') || 'none'}${gaps}]`;
 }
+
+/**
+ * Where the rules actually were, against where the template expected them.
+ *
+ * A boundary check can fail two ways that look identical in the numbers: the
+ * rule was there and the matcher took a different one, or the rule was never
+ * detected and the matcher had nothing else to take. On the committed blank
+ * satisfaction form the binary table detects exactly three rules for its three
+ * boundaries, so it has no alternative selection available at all -- one
+ * missing rule and the refusal is forced. Distinguishing the two cases on a
+ * real page needs the detected set, not just the residual it produced.
+ *
+ *   sel   selected rule minus expected boundary, in pixels, per boundary
+ *   det   every rule detected in the search window, as pixels from the first
+ *         expected boundary; a `sel` entry with no nearby `det` neighbour is a
+ *         rule that was never found rather than one that lost a selection
+ */
+function describeLineEvidence(
+  rows: { detected: number[]; selected: number[]; expected: number[] },
+  columns: { detected: number[]; selected: number[]; expected: number[] },
+): string {
+  return ` [rows ${describeAxisEvidence(rows)}; cols ${describeAxisEvidence(columns)}]`;
+}
+
+function describeAxisEvidence(
+  axis: { detected: number[]; selected: number[]; expected: number[] },
+): string {
+  const origin = axis.expected[0] ?? 0;
+  const selected = axis.selected.length === axis.expected.length
+    ? axis.selected.map((value, index) => Math.round(value - axis.expected[index])).join(',')
+    : 'unresolved';
+  const detected = axis.detected
+    .slice(0, MAX_REPORTED_LINES)
+    .map((value) => Math.round(value - origin))
+    .join(',');
+  const truncated = axis.detected.length > MAX_REPORTED_LINES ? `+${axis.detected.length - MAX_REPORTED_LINES}` : '';
+  return `sel=${selected} det=${detected}${truncated}`;
+}
+
+/** Keeps a diagnostic readable on a page whose tables detect many rules. */
+const MAX_REPORTED_LINES = 16;
 
 function formatGridQualityDiagnostic(
   quality: GridQuality,
