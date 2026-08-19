@@ -230,6 +230,7 @@ export async function recognizeStudentForms(
           cagiBaseline?.image,
           cagiBaseline?.basicCheckboxCandidateRects?.[group.field],
           isVerifiedGrid(registration),
+          basicCheckboxDetection?.corrections?.[group.field],
         );
       }
       const displayCells = scoringCells;
@@ -692,6 +693,10 @@ function mergeBasicCheckboxDetection(
  *         a window off its box has that outline running through the middle
  *   dark  dark pixels inside the window, so a share of almost nothing reads
  *         as such
+ *   fix   how far this window was moved to agree with the layout the other
+ *         eleven boxes fit; 0 where the match was believed as found. `off` is
+ *         reported after that move, so a large `fix` beside a small `off` is
+ *         a window that was thrown and put back
  *   sig   the residual the gate's own predicate measured, times 1000
  *
  * Nothing here changes a decision, and it carries no answer, only geometry.
@@ -703,6 +708,7 @@ function describeBasicCheckboxPlacement(
   baselineImage: ImageAnalysisData | undefined,
   baselineRects: PixelRect[] | undefined,
   matched: boolean,
+  corrections: number[] | undefined,
 ): string {
   if (!baselineImage || !baselineRects || baselineRects.length !== scoringCells.length) {
     return `[match=${matched ? 1 : 0} win=none]`;
@@ -733,6 +739,7 @@ function describeBasicCheckboxPlacement(
       + ` ink=${round1(placement.inkX)},${round1(placement.inkY)}`
       + ` ext=${placement.extendLeft},${placement.extendRight},${placement.extendTop},${placement.extendBottom}`
       + ` core=${placement.corePercent} dark=${placement.darkCount}`
+      + ` fix=${round1(corrections?.[index] || 0)}`
       + ` sig=${Math.round(signal * 1000)}`;
   });
 
