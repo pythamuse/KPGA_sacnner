@@ -283,7 +283,16 @@ export function buildSatisfactionGridDetection(image: ImageAnalysisData): GridDe
       // registration.
       rowSearchToleranceRatio: 0.1,
       verticalLineDarkRatio: 0.3,
-      horizontalLineDarkRatio: 0.3,
+      // The inner rules of this table are the thinnest on either form, and at
+      // 0.3 some pages lose one or two of them entirely: on three real scans
+      // the rules expected at y=943 and y=976 were absent from the detected
+      // set, so the matcher substituted a rule 27-38px away and the resulting
+      // gap pattern missed by 16-35%. It was never a selection problem -- the
+      // real boundary simply was not there to select. At 0.2 every expected
+      // rule is found and the worst residual drops to 6-8px, which is the
+      // table's genuine downward shift on those pages and well inside the
+      // uniform-translation allowance below.
+      horizontalLineDarkRatio: 0.2,
       // At the default 200 threshold, the photographed paper texture merges
       // adjacent rules into one broad band. The darkest printed rules remain
       // distinct at 180 and preserve the actual five-by-four cell pattern.

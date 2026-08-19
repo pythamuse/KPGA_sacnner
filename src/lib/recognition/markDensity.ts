@@ -65,6 +65,14 @@ interface ScoredCandidate extends CandidateScore {
  */
 const HIGH_RELATIVE_CONTRAST = 1.25;
 
+/**
+ * Minimum residual ink a baseline-backed option must carry before it may be
+ * confirmed at all. Chosen as the lowest value that removes the measured wrong
+ * answer (its winning score was 0.0200) while costing the fewest correct ones:
+ * 0.021 gives CORRECT 102 WRONG 0, where 0.023 drops to 99 and 0.026 to 97.
+ */
+const HIGH_ABSOLUTE_SIGNAL = 0.021;
+
 export async function loadImageAnalysisData(filePath: string): Promise<ImageAnalysisData> {
   const { data: pixels, info } = await sharp(filePath)
     .rotate()
@@ -649,7 +657,13 @@ export function analyzeChoiceGroup(
   // mark, the residual must also form a compact, stroke-like shape. This is
   // deliberately shared by every baseline-backed candidate; it does not know
   // the field name or the candidate index.
-  const highScoreThreshold = usesBaseline ? 0.012 : 0.35;
+  // The relative-contrast rule below compares the best option with the runner
+  // up, which is meaningless when both are noise. On one real page the
+  // satisfaction marks were six times fainter than normal (0.011 against 0.067
+  // elsewhere), the printed residue at 0.020 outscored the real mark, and the
+  // 1.8x ratio confirmed it as a wrong answer. A floor keeps that comparison
+  // from running at all until there is a real signal to compare.
+  const highScoreThreshold = usesBaseline ? HIGH_ABSOLUTE_SIGNAL : 0.35;
   const highGapThreshold = usesBaseline ? 0.004 : 0.12;
   const mediumScoreThreshold = usesBaseline ? 0.007 : 0.1;
   const mediumGapThreshold = usesBaseline ? 0.003 : 0.025;
