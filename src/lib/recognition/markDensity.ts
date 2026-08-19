@@ -78,6 +78,10 @@ interface TemplateInkFeatures extends TemplateInkShape {
   /** The reach the search was actually given for this cell, per axis. */
   radiusX: number;
   radiusY: number;
+  /** Mean disagreement per sample once the baseline was placed. */
+  fit: number;
+  /** Where a much wider search would have gone. Only measured while tracing. */
+  probe?: { x: number; y: number; fit: number; chosenFit: number; radius: number };
 }
 
 interface ScoredCandidate extends CandidateScore {
@@ -695,10 +699,20 @@ function describeDecision(evidence: DecisionEvidence, outcome: string, refused: 
       // of room rather than finding the best fit.
       const pinned = Math.abs(features.alignX) >= features.radiusX
         || Math.abs(features.alignY) >= features.radiusY;
+      // Where a wider search wanted to go, and whether going there would have
+      // fitted materially better. `want` pinned at its own radius, or a gain
+      // near zero, both mean translation is not what is missing.
+      const probe = features.probe;
+      const wanted = probe
+        ? ` want=${probe.x},${probe.y}`
+          + `${Math.abs(probe.x) >= probe.radius || Math.abs(probe.y) >= probe.radius ? '!' : ''}`
+          + `/${probe.radius} gain=${(probe.chosenFit - probe.fit).toFixed(4)}`
+        : '';
       return `${candidate.position}:scr=${candidate.score.toFixed(3)}`
         + ` page=${features.actualInk.toFixed(3)} blank=${features.baselineInk.toFixed(3)}`
         + ` shift=${features.brightnessOffset.toFixed(0)}`
-        + ` align=${features.alignX},${features.alignY}${pinned ? '!' : ''}`;
+        + ` align=${features.alignX},${features.alignY}${pinned ? '!' : ''}`
+        + ` fit=${features.fit.toFixed(4)}${wanted}`;
     });
     parts.push(`boxes=[${rows.join(' | ')}]`);
     // How far the alignment search can physically reach. It moves in whole
@@ -725,8 +739,12 @@ function describeDecision(evidence: DecisionEvidence, outcome: string, refused: 
  * measurement run without any other file changing. It is off unless
  * `MARK_DECISION_TRACE` is set, so nothing is written in a normal request.
  */
+function isTracing(): boolean {
+  return typeof process !== 'undefined' && Boolean(process.env?.MARK_DECISION_TRACE);
+}
+
 function emitDecisionTrace(trace: string): void {
-  if (typeof process === 'undefined' || !process.env?.MARK_DECISION_TRACE) {
+  if (!isTracing()) {
     return;
   }
   // eslint-disable-next-line no-console
@@ -950,6 +968,7 @@ function calculateTemplateInkFeatures(
       blankPitchY: 0,
       radiusX: BASELINE_ALIGNMENT_RADIUS,
       radiusY: BASELINE_ALIGNMENT_RADIUS,
+      fit: 0,
     };
   }
 
@@ -1013,6 +1032,10 @@ function calculateTemplateInkFeatures(
     blankPitchY: (baselineRect.bottom - baselineRect.top) / sampleHeight,
     radiusX,
     radiusY,
+    fit: alignment.fit,
+    probe: isTracing()
+      ? probeAlignment(actual, blank, sampleWidth, sampleHeight, brightnessOffset, alignment.x, alignment.y)
+      : undefined,
   };
 }
 
@@ -1156,6 +1179,13 @@ const BASELINE_ALIGNMENT_RADIUS = 1;
 const BASELINE_ALIGNMENT_MAX_RADIUS = 4;
 
 /**
+ * Reach given to the diagnostic probe only. Wide enough that a table-sized
+ * registration error lands inside it, so an optimum that still sits on this
+ * boundary means something other than translation is separating the two images.
+ */
+const PROBE_ALIGNMENT_RADIUS = 4;
+
+/**
  * Samples needed to cover one source pixel, so a cell resampled far above its
  * own resolution can still be shifted a whole pixel.
  */
@@ -1198,8 +1228,9 @@ function findBestBaselineAlignment(
   brightnessOffset: number,
   radiusX: number,
   radiusY: number,
-): { x: number; y: number } {
+): { x: number; y: number; fit: number } {
   let best = { x: 0, y: 0, score: Number.POSITIVE_INFINITY };
+  const compared = Math.max((width - 2 * radiusX) * (height - 2 * radiusY), 1);
 
   for (let offsetY = -radiusY; offsetY <= radiusY; offsetY++) {
     for (let offsetX = -radiusX; offsetX <= radiusX; offsetX++) {
@@ -1217,7 +1248,63 @@ function findBestBaselineAlignment(
     }
   }
 
-  return best;
+  // Mean disagreement per sample at the offset chosen. A cell that is merely
+  // shifted comes to near-agreement once it is shifted back; a cell that cannot
+  // be made to agree by any shift keeps a floor here, and no amount of reach
+  // will help it.
+  return { x: best.x, y: best.y, fit: best.score / compared };
+}
+
+/**
+ * Where the alignment would have gone with far more room, and how much better
+ * it would have fitted.
+ *
+ * This decides the shape of the next fix and nothing else, so it is measured
+ * rather than reasoned about: a consistent direction across a table means the
+ * two images disagree about where the table is, and belongs upstream of this
+ * file; scattered directions mean per-cell jitter and want more reach; an
+ * optimum that is itself pinned, or one that barely improves the fit, means
+ * translation is not the missing operation at all.
+ *
+ * It runs only while tracing, so it costs a measurement run and nothing else.
+ * Both fits are computed over the same probe-inset region so the two are
+ * comparable.
+ */
+function probeAlignment(
+  actual: number[],
+  baseline: number[],
+  width: number,
+  height: number,
+  brightnessOffset: number,
+  chosenX: number,
+  chosenY: number,
+): { x: number; y: number; fit: number; chosenFit: number; radius: number } {
+  const radius = PROBE_ALIGNMENT_RADIUS;
+  const fitAt = (offsetX: number, offsetY: number): number => {
+    let score = 0;
+    let compared = 0;
+    for (let y = radius; y < height - radius; y++) {
+      for (let x = radius; x < width - radius; x++) {
+        const actualInk = darkness(actual[y * width + x] + brightnessOffset);
+        const baselineInk = darkness(baseline[(y + offsetY) * width + (x + offsetX)]);
+        score += Math.abs(actualInk - baselineInk);
+        compared++;
+      }
+    }
+    return score / Math.max(compared, 1);
+  };
+
+  let best = { x: 0, y: 0, fit: Number.POSITIVE_INFINITY };
+  for (let offsetY = -radius; offsetY <= radius; offsetY++) {
+    for (let offsetX = -radius; offsetX <= radius; offsetX++) {
+      const fit = fitAt(offsetX, offsetY);
+      if (fit < best.fit) {
+        best = { x: offsetX, y: offsetY, fit };
+      }
+    }
+  }
+
+  return { ...best, chosenFit: fitAt(chosenX, chosenY), radius };
 }
 
 function darkness(value: number): number {
