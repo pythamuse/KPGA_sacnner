@@ -234,19 +234,18 @@ export default function RecognitionReview({
         userSelect: 'none',
       }}
     >
+      {/* globals.css styles every `input` as a full-width form field, which
+          stretched this checkbox to the width of the panel and pushed the label
+          off the right edge of the page. Size it explicitly. */}
       <input
         type="checkbox"
         checked={showRoiBoxes}
         onChange={(e) => setShowRoiBoxes(e.target.checked)}
-        style={{ cursor: 'pointer', flexShrink: 0 }}
+        style={{ cursor: 'pointer', flexShrink: 0, width: 16, height: 16, minHeight: 0, margin: 0 }}
       />
-      {/* Broken deliberately so the label keeps a fixed two-line footprint
-          instead of rewrapping into three lines as the row gets tighter. */}
-      <span style={{ display: 'block', lineHeight: 1.3, whiteSpace: 'nowrap' }}>
-        인식 영역
-        <br />
-        상자 표시
-      </span>
+      {/* nowrap so the label can never be squeezed to zero width and vanish,
+          which is what happened while it shared the header row. */}
+      <span style={{ whiteSpace: 'nowrap' }}>인식 영역 상자 표시</span>
     </label>
   );
 
@@ -658,26 +657,24 @@ export default function RecognitionReview({
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 16, borderBottom: '1px solid var(--border-subtle)', paddingBottom: 16 }}>
         <div style={{ minWidth: 0 }}>
           <h2 style={{ fontSize: 22, marginBottom: 6 }}>인식 결과 검수</h2>
-          {/* Two explicit lines rather than one long sentence: the header row is
-              shared with the toggle and the cancel button, and a single line
-              squeezed both of them until their labels broke mid-word. */}
+          {/* Two explicit lines rather than one long sentence, so the title
+              block claims about half the row instead of all of it. */}
           <p style={{ color: 'var(--text-muted)', fontSize: 14, lineHeight: 1.45, margin: 0 }}>
             <span style={{ display: 'block' }}>{currentIndex} / {totalCount}번째 학생 데이터입니다.</span>
             <span style={{ display: 'block' }}>저장 전 값을 확인해주세요.</span>
           </p>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
-          {renderRoiBoxToggle()}
-          <button
-            className="btn-secondary"
-            type="button"
-            onClick={onReset}
-            style={{ whiteSpace: 'nowrap', fontSize: 13, padding: '8px 12px', minHeight: 38 }}
-          >
-            검수 취소
-          </button>
-        </div>
+        <button
+          className="btn-secondary"
+          type="button"
+          onClick={onReset}
+          style={{ whiteSpace: 'nowrap', fontSize: 13, padding: '8px 12px', minHeight: 38, flexShrink: 0 }}
+        >
+          검수 취소
+        </button>
       </div>
+
+      {renderRoiBoxToggle()}
 
       {attentionFields.length > 0 && (
         <div
