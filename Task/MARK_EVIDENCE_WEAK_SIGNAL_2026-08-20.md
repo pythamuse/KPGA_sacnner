@@ -600,3 +600,51 @@ registrationFrame  x=0.0931  w=0.8857  ->  right 0.9788
 | `form-boundary-unverified` 6칸 | **미착수.** 한 페이지의 만족도 전체가 전제 조건에서 막힌다 |
 
 **`form-boundary-unverified` 6칸이 남은 최대 단일 덩어리다.** 이 칸들은 증거가 약해서가 아니라 **전제 조건**에서 막힌다 — 점수는 오히려 좋다(하한 7.8~8.8배, 간격 6.75~10.75배).
+
+---
+
+## 15. 사이클 12 — 그 6칸은 "나쁜 스캔"이 아니었다 (진단 라벨 정정)
+
+### 15.1 라벨 하나가 6칸을 하루 종일 잘못 읽게 했다
+
+호출부는 두 조건의 **논리곱**을 넘긴다.
+
+```
+allowAutoValue = hasUsableFormBounds(satisfactionImage) && Boolean(verifiedGridCells)
+```
+
+`analyzeChoiceGroup`은 합쳐진 값만 받는데, 사이클 7에서 그 분기를 `form-boundary-unverified`로 이름 붙였다 — **한쪽 절반을 전체인 것처럼.** 그 결과 6칸이 "페이지가 나빠 위치를 못 잡는다"로 읽혔다.
+
+### 15.2 나쁜 페이지일 수 없다는 것이 스캔 없이 증명된다
+
+- `contentBoundsSource === 'template'`은 `applyTemplateRegistrationFrame`의 **성공 반환에서만** 설정된다. 그러려면 `pageBounds`가 존재하고 `isPlausiblePaperBounds`와 `isPlausibleTemplateContentBounds`가 모두 통과해야 한다
+- `hasUsableFormBounds`는 **같은 값에 같은 순수 술어 둘을 다시** 돌린다 — 동의할 수밖에 없다
+- 호출부는 **같은 이미지 객체**를 양쪽에 넘긴다
+
+실측 132행이 전부 `bounds=template`이다. 따라서 `hasUsableFormBounds`는 **참을 반환했고**, 거부한 것은 **`verifiedGridCells`** — 격자 검증이다.
+
+### 15.3 수정
+
+`hasUsableFormBounds`가 `resolveFormBoundsStatus`의 한 줄 포장이 되어, **판정과 그 판정을 내린 절을 한 번의 평가에서 함께** 반환한다. 보고되는 이유가 적용된 이유와 어긋날 수 없다 — 이번 라운드를 만든 실패 방식 자체를 구조적으로 막았다.
+
+구성한 도형 **10,025개**를 이전 로직과 대조: **불일치 0.** 실측 `CORRECT 107, WRONG 0` 무변화, 라벨만 `grid-unverified`로 바뀜.
+
+### 15.4 정정된 결론
+
+| 이전 | 정정 |
+|---|---|
+| 6칸은 스캔이 나빠 정당하게 수기 | **틀림.** 페이지는 멀쩡하다 |
+| `hasUsableFormBounds`를 완화해야 한다 | **틀림.** 이 함수는 거부 방향으로 호출된 적이 없다 |
+| — | **6칸은 격자 검증에서 막힌다.** `tableGridDetection.ts` 소관 |
+
+**엉뚱한 단계를 잰 사례로 네 번째다.** 이번엔 계측기가 아니라 **계측기가 붙인 이름**이 틀렸다. 그리고 그것을 잡아낸 것도 같은 계측기다.
+
+### 15.5 남은 거부 (109 통과 / 23 거부)
+
+| 사유 | 칸 |
+|---|---:|
+| `grid-unverified` | 6 |
+| `mark-shape` 포함 | 5 |
+| `absolute-floor` 포함 | 5 |
+| `relative-contrast` 포함 | 5 |
+| `gap` 포함 | 4 |
