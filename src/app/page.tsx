@@ -16,6 +16,12 @@ import {
   saveReviewSnapshot,
   type ReviewSnapshot,
 } from '@/lib/session/reviewSnapshot';
+import {
+  clearDraftImages,
+  loadDraftImages,
+  mergeDraftImages,
+  saveDraftImages,
+} from '@/lib/session/imageCache';
 
 function UsageModal({ onClose }: { onClose: () => void }) {
   return (
@@ -123,7 +129,7 @@ function BrandHeader() {
           whiteSpace: 'nowrap',
         }}
       >
-        테스트 버전 v2026-08-19.5
+        테스트 버전 v2026-08-19.6
       </span>
     </div>
   );
@@ -145,7 +151,7 @@ export default function Home() {
   // "검수 취소" keeps the page alive, so the discarded drafts -- images included
   // -- are held in memory and can be restored completely. A refresh or a
   // dropped connection wipes memory, so a value-only snapshot goes to
-  // localStorage; see Docs/00_PRD.md §10-2 for why images are excluded.
+  // localStorage and the images to an expiring IndexedDB cache; see PRD §10-2.
   const discardedDraftsRef = useRef<{ drafts: RecognitionDraft[]; index: number } | null>(null);
   const [canUndoDiscard, setCanUndoDiscard] = useState(false);
   const [restorable, setRestorable] = useState<ReviewSnapshot | null>(null);
@@ -185,6 +191,14 @@ export default function Home() {
     }));
   }, [jobId, uploadMode, students, drafts, currentDraftIndex]);
 
+  // The images go to IndexedDB instead: a batch is ~30MB, past what
+  // localStorage holds. They expire on their own (imageCache TTL) because they
+  // are scanned student responses.
+  useEffect(() => {
+    if (!jobId || !drafts || drafts.length === 0) return;
+    void saveDraftImages(jobId, drafts);
+  }, [jobId, drafts]);
+
   const resetDraft = (captureUndo = true) => {
     if (captureUndo && drafts && drafts.length > 0) {
       discardedDraftsRef.current = { drafts, index: currentDraftIndex };
@@ -208,21 +222,30 @@ export default function Home() {
     setCanUndoDiscard(false);
   };
 
-  const restorePreviousSession = () => {
+  const restorePreviousSession = async () => {
     if (!restorable) return;
-    setJobId(restorable.jobId);
-    setUploadMode(restorable.uploadMode as UploadMode);
-    setStudents(restorable.students);
-    setDrafts(restorable.drafts.length > 0 ? restorable.drafts : null);
-    setCurrentDraftIndex(restorable.currentDraftIndex);
-    setRestoredFromSnapshot(restorable.drafts.length > 0);
+    const snapshot = restorable;
+    // Values come back from localStorage; the originals and the field crops
+    // come back from the IndexedDB cache, which drops anything past its TTL.
+    const cached = await loadDraftImages(snapshot.jobId);
+    const restoredDrafts = snapshot.drafts.map((draft, index) => mergeDraftImages(draft, cached.get(index)));
+    const missingImages = restoredDrafts.length > 0 && cached.size === 0;
+
+    setJobId(snapshot.jobId);
+    setUploadMode(snapshot.uploadMode as UploadMode);
+    setStudents(snapshot.students);
+    setDrafts(restoredDrafts.length > 0 ? restoredDrafts : null);
+    setCurrentDraftIndex(snapshot.currentDraftIndex);
+    setRestoredFromSnapshot(missingImages);
     setRestorable(null);
     setErrors([]);
     setNotices([]);
   };
 
   const dismissRestorable = () => {
-    clearReviewSnapshot();
+    const jobToClear = restorable?.jobId;
+    clearReviewSnapshot(jobToClear);
+    void clearDraftImages(jobToClear);
     setRestorable(null);
   };
 
@@ -233,6 +256,7 @@ export default function Home() {
       const data = await res.json();
       // A new class must not inherit the previous one's recovery point.
       clearReviewSnapshot();
+      void clearDraftImages();
       discardedDraftsRef.current = null;
       setCanUndoDiscard(false);
       setRestorable(null);
@@ -442,7 +466,7 @@ export default function Home() {
             </div>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
-            <button type="button" className="btn-primary" onClick={restorePreviousSession}>
+            <button type="button" className="btn-primary" onClick={() => { void restorePreviousSession(); }}>
               이어서 하기
             </button>
             <button type="button" className="btn-secondary" onClick={dismissRestorable}>

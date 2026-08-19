@@ -13,14 +13,27 @@ import type { StudentData } from '../validation/types';
  * diagnostics come to 3KB, or 61KB for the batch. Dropping the images also
  * keeps scanned responses out of browser storage, which §10 requires.
  */
-export const REVIEW_SNAPSHOT_KEY = 'kpga.review.session.v1';
-export const REVIEW_SNAPSHOT_VERSION = 1;
+export const REVIEW_SNAPSHOT_VERSION = 2;
+/** Points at the job whose snapshot the start screen should offer to resume. */
+export const REVIEW_SNAPSHOT_POINTER_KEY = 'kpga.review.session.latest';
+const SNAPSHOT_PREFIX = 'kpga.review.session.v2.';
+const LEGACY_SNAPSHOT_KEY = 'kpga.review.session.v1';
+
+export const snapshotKeyFor = (jobId: string) => `${SNAPSHOT_PREFIX}${jobId}`;
+
+/**
+ * Identifies the page that wrote a snapshot. One tab is the normal case, but
+ * two tabs sharing a single key silently overwrote each other's batch, so a
+ * writer that finds a newer snapshot from a different tab leaves it alone.
+ */
+const WRITER_ID = `w_${Math.random().toString(36).slice(2, 10)}_${Date.now().toString(36)}`;
 
 export type UploadModeValue = 'sequential' | 'batch';
 
 export interface ReviewSnapshot {
   version: number;
   savedAt: number;
+  writerId?: string;
   jobId: string;
   uploadMode: UploadModeValue;
   students: StudentData[];
@@ -64,6 +77,7 @@ export function buildReviewSnapshot(input: {
   return {
     version: REVIEW_SNAPSHOT_VERSION,
     savedAt: Date.now(),
+    writerId: WRITER_ID,
     jobId: input.jobId,
     uploadMode: input.uploadMode,
     students: input.students,
@@ -80,22 +94,26 @@ export function isRestorableSnapshot(snapshot: ReviewSnapshot | null): snapshot 
 }
 
 /**
+ * True when the stored snapshot for this job was written by another page more
+ * recently than ours. Overwriting it would discard that tab's review.
+ */
+export function isForeignerNewer(existing: ReviewSnapshot | null, incoming: ReviewSnapshot): boolean {
+  return Boolean(
+    existing
+    && existing.writerId
+    && existing.writerId !== incoming.writerId
+    && existing.savedAt > incoming.savedAt,
+  );
+}
+
+/**
  * Every call is guarded: private-browsing modes and full quotas throw on
  * localStorage access, and losing the ability to save a snapshot must never
  * take down the review screen itself.
  */
-export function saveReviewSnapshot(snapshot: ReviewSnapshot): boolean {
+function readSnapshotAt(key: string): ReviewSnapshot | null {
   try {
-    window.localStorage.setItem(REVIEW_SNAPSHOT_KEY, JSON.stringify(snapshot));
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-export function loadReviewSnapshot(): ReviewSnapshot | null {
-  try {
-    const raw = window.localStorage.getItem(REVIEW_SNAPSHOT_KEY);
+    const raw = window.localStorage.getItem(key);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as ReviewSnapshot;
     return isRestorableSnapshot(parsed) ? parsed : null;
@@ -104,9 +122,40 @@ export function loadReviewSnapshot(): ReviewSnapshot | null {
   }
 }
 
-export function clearReviewSnapshot(): void {
+export function saveReviewSnapshot(snapshot: ReviewSnapshot): boolean {
   try {
-    window.localStorage.removeItem(REVIEW_SNAPSHOT_KEY);
+    const key = snapshotKeyFor(snapshot.jobId);
+    if (isForeignerNewer(readSnapshotAt(key), snapshot)) {
+      return false;
+    }
+    window.localStorage.setItem(key, JSON.stringify(snapshot));
+    window.localStorage.setItem(REVIEW_SNAPSHOT_POINTER_KEY, snapshot.jobId);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function loadReviewSnapshot(): ReviewSnapshot | null {
+  try {
+    const jobId = window.localStorage.getItem(REVIEW_SNAPSHOT_POINTER_KEY);
+    if (jobId) {
+      const snapshot = readSnapshotAt(snapshotKeyFor(jobId));
+      if (snapshot) return snapshot;
+    }
+    // A snapshot written before jobs had their own key.
+    return readSnapshotAt(LEGACY_SNAPSHOT_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function clearReviewSnapshot(jobId?: string): void {
+  try {
+    const target = jobId || window.localStorage.getItem(REVIEW_SNAPSHOT_POINTER_KEY);
+    if (target) window.localStorage.removeItem(snapshotKeyFor(target));
+    window.localStorage.removeItem(REVIEW_SNAPSHOT_POINTER_KEY);
+    window.localStorage.removeItem(LEGACY_SNAPSHOT_KEY);
   } catch {
     // ignore
   }

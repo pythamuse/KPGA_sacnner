@@ -116,3 +116,42 @@ describe('review snapshot', () => {
     expect(describeSnapshot(snapshot)).toBe('저장 완료 2명 · 검수 대기 3명 중 2번째');
   });
 });
+
+describe('multi-tab and image separation', () => {
+  it('leaves a newer snapshot from another tab alone', async () => {
+    const { isForeignerNewer } = await import('../src/lib/session/reviewSnapshot');
+    const mine = { ...buildReviewSnapshot({
+      jobId: 'job-1', uploadMode: 'batch', students: [student], drafts: null, currentDraftIndex: 0,
+    }), writerId: 'tab-A', savedAt: 1000 };
+    const otherNewer = { ...mine, writerId: 'tab-B', savedAt: 2000 };
+    const otherOlder = { ...mine, writerId: 'tab-B', savedAt: 10 };
+    const sameTab = { ...mine, savedAt: 2000 };
+
+    expect(isForeignerNewer(otherNewer, mine)).toBe(true);
+    expect(isForeignerNewer(otherOlder, mine)).toBe(false);
+    expect(isForeignerNewer(sameTab, mine)).toBe(false);
+    expect(isForeignerNewer(null, mine)).toBe(false);
+  });
+
+  it('gives each job its own key so two batches cannot collide', async () => {
+    const { snapshotKeyFor } = await import('../src/lib/session/reviewSnapshot');
+    expect(snapshotKeyFor('job-1')).not.toBe(snapshotKeyFor('job-2'));
+    expect(snapshotKeyFor('job-1')).toContain('job-1');
+  });
+
+  it('splits a draft into values for localStorage and images for the cache', async () => {
+    const { extractDraftImages, mergeDraftImages } = await import('../src/lib/session/imageCache');
+    const draft = makeDraft();
+    const images = extractDraftImages(draft);
+    const slim = stripDraftImages(draft);
+
+    // Nothing is lost: what one side drops, the other keeps.
+    expect(images.cagiImageDataUrl).toBe('data:image/jpeg;base64,AAAA');
+    expect(images.cropDataUrls).toEqual({ 'basic.gender': 'data:image/png;base64,CCCC' });
+    expect(JSON.stringify(slim)).not.toContain('data:image');
+
+    const rebuilt = mergeDraftImages(slim, images);
+    expect((rebuilt.source as Record<string, unknown>).cagiImageDataUrl).toBe('data:image/jpeg;base64,AAAA');
+    expect(rebuilt.basic).toEqual(draft.basic);
+  });
+});
