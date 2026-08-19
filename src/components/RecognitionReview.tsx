@@ -238,9 +238,15 @@ export default function RecognitionReview({
         type="checkbox"
         checked={showRoiBoxes}
         onChange={(e) => setShowRoiBoxes(e.target.checked)}
-        style={{ cursor: 'pointer' }}
+        style={{ cursor: 'pointer', flexShrink: 0 }}
       />
-      인식 영역 상자 표시
+      {/* Broken deliberately so the label keeps a fixed two-line footprint
+          instead of rewrapping into three lines as the row gets tighter. */}
+      <span style={{ display: 'block', lineHeight: 1.3, whiteSpace: 'nowrap' }}>
+        인식 영역
+        <br />
+        상자 표시
+      </span>
     </label>
   );
 
@@ -650,15 +656,24 @@ export default function RecognitionReview({
   return (
     <section className="panel panel-pad animate-fade-in" style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 16, borderBottom: '1px solid var(--border-subtle)', paddingBottom: 16 }}>
-        <div>
+        <div style={{ minWidth: 0 }}>
           <h2 style={{ fontSize: 22, marginBottom: 6 }}>인식 결과 검수</h2>
-          <p style={{ color: 'var(--text-muted)', fontSize: 14 }}>
-            {currentIndex} / {totalCount}번째 학생 데이터입니다. 저장 전 값을 확인해주세요.
+          {/* Two explicit lines rather than one long sentence: the header row is
+              shared with the toggle and the cancel button, and a single line
+              squeezed both of them until their labels broke mid-word. */}
+          <p style={{ color: 'var(--text-muted)', fontSize: 14, lineHeight: 1.45, margin: 0 }}>
+            <span style={{ display: 'block' }}>{currentIndex} / {totalCount}번째 학생 데이터입니다.</span>
+            <span style={{ display: 'block' }}>저장 전 값을 확인해주세요.</span>
           </p>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
           {renderRoiBoxToggle()}
-          <button className="btn-secondary" type="button" onClick={onReset}>
+          <button
+            className="btn-secondary"
+            type="button"
+            onClick={onReset}
+            style={{ whiteSpace: 'nowrap', fontSize: 13, padding: '8px 12px', minHeight: 38 }}
+          >
             검수 취소
           </button>
         </div>
