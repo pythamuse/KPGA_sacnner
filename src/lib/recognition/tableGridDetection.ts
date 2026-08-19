@@ -39,6 +39,10 @@ const GRID_MAX_UNIFORM_CANDIDATE_OFFSET_Y = 0.02;
 const GRID_MAX_CANDIDATE_CENTER_SPREAD = 0.012;
 const GRID_MAX_INTRA_TABLE_OFFSET_DELTA = 0.02;
 const GRID_MAX_RECOVERED_LINE_SCALE_DEVIATION = 0.15;
+const DEFAULT_VERTICAL_LINE_DARK_RATIO = 0.32;
+const DEFAULT_HORIZONTAL_LINE_DARK_RATIO = 0.3;
+const DEFAULT_DARK_THRESHOLD = 200;
+const LINE_SIGNAL_RADIUS_PX = 6;
 
 export type RegistrationStatus = 'verified' | 'candidate' | 'failed';
 export type RegistrationSource = 'grid' | 'row' | 'fixed';
@@ -87,8 +91,8 @@ export function detectVerticalLines(
   searchBottom: number,
   xLeft: number,
   xRight: number,
-  minDarkRatio = 0.32,
-  darkThreshold = 200,
+  minDarkRatio = DEFAULT_VERTICAL_LINE_DARK_RATIO,
+  darkThreshold = DEFAULT_DARK_THRESHOLD,
 ): VerticalLine[] {
   const top = clamp(Math.floor(searchTop), 0, image.height - 1);
   const bottom = clamp(Math.ceil(searchBottom), top + 1, image.height);
@@ -357,6 +361,9 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
 
   const expectedX = expectedColumnLines.map((value) => bounds.left + value * baseWidth);
   const expectedY = expectedRowLines.map((value) => bounds.top + value * baseHeight);
+  const verticalLineDarkRatio = spec.verticalLineDarkRatio ?? DEFAULT_VERTICAL_LINE_DARK_RATIO;
+  const horizontalLineDarkRatio = spec.horizontalLineDarkRatio ?? DEFAULT_HORIZONTAL_LINE_DARK_RATIO;
+  const darkThreshold = spec.darkThreshold ?? DEFAULT_DARK_THRESHOLD;
   // The template supplies both the search anchor and the expected uneven gap
   // pattern. The latter is important because two-line questions create rows
   // that are intentionally taller than their neighbours.
@@ -368,8 +375,8 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
     expectedY[expectedY.length - 1] + yTolerance,
     expectedX[0] - xTolerance,
     expectedX[expectedX.length - 1] + xTolerance,
-    spec.verticalLineDarkRatio,
-    spec.darkThreshold,
+    verticalLineDarkRatio,
+    darkThreshold,
   ).map((line) => line.x);
   const matchedColumns = matchTemplateLinePattern(verticalLines, expectedX);
   const partialColumnMatch = matchedColumns
@@ -394,8 +401,8 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
     expectedY[expectedY.length - 1] + yTolerance,
     horizontalSearchLeft,
     horizontalSearchRight,
-    spec.horizontalLineDarkRatio ?? 0.3,
-    spec.darkThreshold,
+    horizontalLineDarkRatio,
+    darkThreshold,
   ).map((line) => line.y);
   const matchedRows = matchTemplateLinePattern(horizontalLines, expectedY);
   const partialRowMatch = shouldRecoverPartialTemplateLinePattern(
@@ -412,6 +419,26 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
     )
     : undefined;
   const resolvedRows = partialRowMatch?.lines || matchedRows;
+  const verticalLineSignals = measureVerticalLineSignals(
+    image,
+    expectedY[0] - yTolerance,
+    expectedY[expectedY.length - 1] + yTolerance,
+    expectedX,
+    darkThreshold,
+    verticalLineDarkRatio,
+    Math.max(LINE_SIGNAL_RADIUS_PX, Math.round(baseWidth * 0.01)),
+  );
+  const lineEvidence = describeLineEvidence(
+    { detected: horizontalLines, selected: resolvedRows || horizontalLines, expected: expectedY },
+    {
+      detected: verticalLines,
+      selected: resolvedColumns || verticalLines,
+      expected: expectedX,
+    },
+  ) + describeVerticalLineSignals(verticalLineSignals);
+  const lineEvidenceSuffix = horizontalLines.length > 0 || verticalLines.length > 0
+    ? lineEvidence
+    : '';
 
   const lineFailure = classifyGridLineFailure(
     horizontalLines.length,
@@ -430,9 +457,9 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
         status: 'failed',
         horizontalLines: { found: horizontalLines.length, expected: expectedY.length },
         verticalLines: { found: verticalLines.length, expected: expectedX.length },
-        diagnostic: lineFailure,
+        diagnostic: lineFailure + lineEvidenceSuffix,
       }),
-      diagnostics: diagnosticsForGroups(groups, lineFailure),
+      diagnostics: diagnosticsForGroups(groups, lineFailure + lineEvidenceSuffix),
     };
   }
 
@@ -448,11 +475,11 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
         status: 'failed',
         horizontalLines: { found: horizontalLines.length, expected: expectedY.length },
         verticalLines: { found: verticalLines.length, expected: expectedX.length },
-        diagnostic,
+        diagnostic: diagnostic + lineEvidenceSuffix,
       }),
       diagnostics: diagnosticsForGroups(
         groups,
-        diagnostic,
+        diagnostic + lineEvidenceSuffix,
       ),
     };
   }
@@ -522,13 +549,6 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
     baseHeight,
     baseWidth,
     rowCenters.map((value) => bounds.top + value * baseHeight),
-  );
-  // Instrumentation, attached only to a refusal: whether the rule a boundary
-  // needed was detected at all decides between a mis-selection and a genuine
-  // misdetection, and those two want opposite responses.
-  const lineEvidence = describeLineEvidence(
-    { detected: horizontalLines, selected: rowsForGrid, expected: expectedY },
-    { detected: verticalLines, selected: resolvedColumns, expected: expectedX },
   );
   const registrations: Record<string, FieldRegistration> = Object.fromEntries(groups.map((group) => {
     const candidateCenter = getCandidateCenterQuality(group, overrides[group.field], bounds);
@@ -833,6 +853,79 @@ function describeAxisEvidence(
     .join(',');
   const truncated = axis.detected.length > MAX_REPORTED_LINES ? `+${axis.detected.length - MAX_REPORTED_LINES}` : '';
   return `sel=${selected} det=${detected}${truncated}`;
+}
+
+interface VerticalLineSignalEvidence {
+  darkThreshold: number;
+  minimumDarkRatio: number;
+  radius: number;
+  samples: Array<{
+    expected: number;
+    atRatio: number;
+    peakRatio: number;
+    peakOffset: number;
+  }>;
+}
+
+/**
+ * Measures the signal that the current vertical-line detector would use at
+ * each expected boundary. The exact-column ratio and a small local peak make
+ * a refusal actionable: a peak below the active ratio limit supports a
+ * sensitivity investigation, while a passing peak with a displaced detected
+ * rule points to geometry or selection instead.
+ */
+function measureVerticalLineSignals(
+  image: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>,
+  searchTop: number,
+  searchBottom: number,
+  expected: number[],
+  darkThreshold: number,
+  minimumDarkRatio: number,
+  radius: number,
+): VerticalLineSignalEvidence {
+  const top = clamp(Math.floor(searchTop), 0, image.height - 1);
+  const bottom = clamp(Math.ceil(searchBottom), top + 1, image.height);
+  const height = bottom - top;
+  const ratioAt = (x: number): number => {
+    let darkCount = 0;
+    for (let y = top; y < bottom; y++) {
+      if (image.pixels[y * image.width + x] < darkThreshold) {
+        darkCount++;
+      }
+    }
+    return darkCount / height;
+  };
+  const samples = expected.map((expectedX) => {
+    const centerX = clamp(Math.round(expectedX), 0, image.width - 1);
+    const atRatio = ratioAt(centerX);
+    let peakRatio = atRatio;
+    let peakOffset = 0;
+    for (let offset = -radius; offset <= radius; offset++) {
+      const x = centerX + offset;
+      if (x < 0 || x >= image.width) continue;
+      const ratio = ratioAt(x);
+      if (ratio > peakRatio || (ratio === peakRatio && Math.abs(offset) < Math.abs(peakOffset))) {
+        peakRatio = ratio;
+        peakOffset = offset;
+      }
+    }
+    return { expected: expectedX, atRatio, peakRatio, peakOffset };
+  });
+
+  return { darkThreshold, minimumDarkRatio, radius, samples };
+}
+
+function describeVerticalLineSignals(signal: VerticalLineSignalEvidence): string {
+  const origin = signal.samples[0]?.expected ?? 0;
+  const samples = signal.samples.map((sample) => {
+    const expected = Math.round(sample.expected - origin);
+    const offset = sample.peakOffset >= 0 ? '+' + sample.peakOffset : String(sample.peakOffset);
+    return expected + ':' + (sample.atRatio * 100).toFixed(1)
+      + '/' + (sample.peakRatio * 100).toFixed(1) + '@' + offset;
+  }).join(',');
+  return ' signal(t=' + signal.darkThreshold
+    + ',min=' + (signal.minimumDarkRatio * 100).toFixed(1)
+    + '%,radius=' + signal.radius + 'px; at/peak@offset ' + samples + ')';
 }
 
 /** Keeps a diagnostic readable on a page whose tables detect many rules. */
