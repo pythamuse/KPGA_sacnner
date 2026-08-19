@@ -45,3 +45,6 @@ pnpm-debug.log*
 
 # Real scans and their answer keys: student responses, never committed
 local-scans/
+
+# Subagent worktrees (branches carry the work; the checkouts are disposable)
+.claude/worktrees/
