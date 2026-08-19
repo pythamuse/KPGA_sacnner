@@ -89,6 +89,9 @@ interface TemplateInkFeatures extends TemplateInkShape {
   /** The reach the search was actually given for this cell, per axis. */
   radiusX: number;
   radiusY: number;
+  /** Steps per sample the offset was resolved to, per axis. */
+  stepsX: number;
+  stepsY: number;
   /** Mean disagreement per sample once the baseline was placed. */
   fit: number;
   /** Where a much wider search would have gone. Only measured while tracing. */
@@ -817,11 +820,13 @@ function describeDecision(evidence: DecisionEvidence, outcome: string, refused: 
           + ` bal=${c.edgeBalance.toFixed(2)}`
           + ` sharp=${c.pageSharpness.toFixed(3)},${c.blankSharpness.toFixed(3)}`
           + ` soft=${c.fitSoftBlank.toFixed(4)},${c.fitSoftBoth.toFixed(4)}`
+          + ` mscore=${c.matchedScore.toFixed(4)}`
         : '';
       return `${candidate.position}@${candidate.atX.toFixed(2)}:scr=${candidate.score.toFixed(3)}`
         + ` page=${features.actualInk.toFixed(3)} blank=${features.baselineInk.toFixed(3)}`
         + ` shift=${features.brightnessOffset.toFixed(0)}`
-        + ` align=${features.alignX},${features.alignY}${pinned ? '!' : ''}`
+        + ` align=${features.alignX.toFixed(2)},${features.alignY.toFixed(2)}${pinned ? '!' : ''}`
+        + ` steps=${features.stepsX},${features.stepsY}`
         + ` fit=${features.fit.toFixed(4)}${wanted}${made}`;
     });
     parts.push(`boxes=[${rows.join(' | ')}]`);
@@ -1101,6 +1106,8 @@ function calculateTemplateInkFeatures(
       blankPitchY: 0,
       radiusX: BASELINE_ALIGNMENT_RADIUS,
       radiusY: BASELINE_ALIGNMENT_RADIUS,
+      stepsX: 1,
+      stepsY: 1,
       fit: 0,
     };
   }
@@ -1114,6 +1121,11 @@ function calculateTemplateInkFeatures(
   // to be absorbed is measured in the page's pixels.
   const radiusX = alignmentRadius(pagePitchX);
   const radiusY = alignmentRadius(pagePitchY);
+  // The offset is resolved to a fraction of a sample wherever the grid
+  // oversamples the page, because that is where a fractional misregistration
+  // can exist at all.
+  const stepsX = alignmentSteps(pagePitchX);
+  const stepsY = alignmentSteps(pagePitchY);
   const alignment = findBestBaselineAlignment(
     actual,
     blank,
@@ -1122,6 +1134,8 @@ function calculateTemplateInkFeatures(
     brightnessOffset,
     radiusX,
     radiusY,
+    stepsX,
+    stepsY,
   );
   const residual = new Float32Array(sampleWidth * sampleHeight);
   let difference = 0;
@@ -1134,9 +1148,10 @@ function calculateTemplateInkFeatures(
   for (let y = radiusY; y < sampleHeight - radiusY; y++) {
     for (let x = radiusX; x < sampleWidth - radiusX; x++) {
       const index = y * sampleWidth + x;
-      const baselineIndex = (y + alignment.y) * sampleWidth + (x + alignment.x);
       const actualInk = darkness(actual[index] + brightnessOffset);
-      const baselineInk = darkness(blank[baselineIndex]);
+      const baselineInk = darkness(
+        sampleGridAt(blank, sampleWidth, sampleHeight, x + alignment.x, y + alignment.y),
+      );
       actualTotal += actualInk;
       baselineTotal += baselineInk;
       // Ignore the narrow anti-aliasing and scanner-noise band around the
@@ -1165,6 +1180,8 @@ function calculateTemplateInkFeatures(
     blankPitchY: (baselineRect.bottom - baselineRect.top) / sampleHeight,
     radiusX,
     radiusY,
+    stepsX,
+    stepsY,
     fit: alignment.fit,
     probe: isTracing()
       ? probeAlignment(actual, blank, sampleWidth, sampleHeight, brightnessOffset, alignment.x, alignment.y)
@@ -1332,6 +1349,71 @@ const BASELINE_ALIGNMENT_MAX_RADIUS = 4;
 const PROBE_ALIGNMENT_RADIUS = 4;
 
 /**
+ * How finely the baseline offset is resolved, in steps per sample.
+ *
+ * The residual decomposition said the leftover disagreement sits on printed
+ * edges, is antisymmetric about them, and goes only when both images are
+ * matched rather than either one alone. Geometry makes the blank the
+ * higher-resolution image everywhere -- a 200dpi scan against a half-resolution
+ * render -- so a sharpness mismatch would have gone with softening the blank
+ * alone, and softening the blank alone changed nothing. What both-sided
+ * softening removes is sub-sample misregistration: the search moved in whole
+ * samples, so a fractional offset was invisible to it at any radius, and 23
+ * pinned cells gaining nothing from four times the reach is that showing.
+ *
+ * The operation that removes a fractional offset is a fractional shift, not a
+ * softer comparison. Softening the comparison was built, measured and rejected
+ * before shipping: on a blank-form checkbox where a whole-sample offset already
+ * fitted to 0.0012, the flattened objective could no longer see that minimum,
+ * took its neighbour at 0.0264, and turned an empty cell into a
+ * medium-confidence read. Choosing an offset on a softened objective and
+ * applying it to unsoftened images drifts the choice.
+ *
+ * Interpolating leaves the objective alone. The whole-sample offsets are still
+ * candidates, so the search minimises over a superset and the fit it finds can
+ * only match or beat the previous one -- and nothing that is scored is
+ * softened, so a faint mark keeps every bit of its ink and the shape test still
+ * sees it at full resolution.
+ *
+ * Steps come from the page's own pitch, the same quantity that sets the reach.
+ * Where the grid is at or coarser than the source pixels there is nothing
+ * between samples to find, the count is 1, and the search is exactly the one
+ * that ran before.
+ */
+const BASELINE_ALIGNMENT_MAX_STEPS = 4;
+
+function alignmentSteps(pitch: number): number {
+  if (!Number.isFinite(pitch) || pitch <= 0) {
+    return 1;
+  }
+  return clamp(Math.round(1 / pitch), 1, BASELINE_ALIGNMENT_MAX_STEPS);
+}
+
+/**
+ * Bilinear read of a sample grid at a fractional position. At a whole-number
+ * position it returns that sample exactly, which is what keeps a single-step
+ * search identical to the one that ran before.
+ */
+function sampleGridAt(grid: number[], width: number, height: number, x: number, y: number): number {
+  const x0 = Math.floor(x);
+  const y0 = Math.floor(y);
+  const fx = x - x0;
+  const fy = y - y0;
+  const left = clamp(x0, 0, width - 1);
+  const top = clamp(y0, 0, height - 1);
+  const right = clamp(x0 + 1, 0, width - 1);
+  const bottom = clamp(y0 + 1, 0, height - 1);
+  const topLeft = grid[top * width + left];
+  const topRight = grid[top * width + right];
+  const bottomLeft = grid[bottom * width + left];
+  const bottomRight = grid[bottom * width + right];
+  return topLeft
+    + (topRight - topLeft) * fx
+    + (bottomLeft - topLeft) * fy
+    + (topLeft - topRight - bottomLeft + bottomRight) * fx * fy;
+}
+
+/**
  * Gradient above which a sample counts as sitting on a printed edge. Darkness
  * runs 0 to 1, and the edge of a printed rule crosses most of that range, so
  * this separates structure from paper texture without being near either.
@@ -1381,22 +1463,51 @@ function findBestBaselineAlignment(
   brightnessOffset: number,
   radiusX: number,
   radiusY: number,
+  stepsX: number,
+  stepsY: number,
 ): { x: number; y: number; fit: number } {
   let best = { x: 0, y: 0, score: Number.POSITIVE_INFINITY };
   const compared = Math.max((width - 2 * radiusX) * (height - 2 * radiusY), 1);
 
+  const scoreAt = (offsetX: number, offsetY: number): number => {
+    let score = 0;
+    for (let y = radiusY; y < height - radiusY; y++) {
+      for (let x = radiusX; x < width - radiusX; x++) {
+        const actualInk = darkness(actual[y * width + x] + brightnessOffset);
+        const baselineInk = darkness(sampleGridAt(baseline, width, height, x + offsetX, y + offsetY));
+        score += Math.abs(actualInk - baselineInk);
+      }
+    }
+    return score;
+  };
+
+  // Whole samples first, over exactly the grid the previous search used, then
+  // fractions within one sample of the winner. Searching every fraction across
+  // the whole reach costs the fourth power of the radius; this costs its square
+  // and still evaluates the old grid in full, so the offset returned is at
+  // least as good as the one that grid would have given.
   for (let offsetY = -radiusY; offsetY <= radiusY; offsetY++) {
     for (let offsetX = -radiusX; offsetX <= radiusX; offsetX++) {
-      let score = 0;
-      for (let y = radiusY; y < height - radiusY; y++) {
-        for (let x = radiusX; x < width - radiusX; x++) {
-          const actualInk = darkness(actual[y * width + x] + brightnessOffset);
-          const baselineInk = darkness(baseline[(y + offsetY) * width + (x + offsetX)]);
-          score += Math.abs(actualInk - baselineInk);
-        }
-      }
+      const score = scoreAt(offsetX, offsetY);
       if (score < best.score) {
         best = { x: offsetX, y: offsetY, score };
+      }
+    }
+  }
+
+  if (stepsX > 1 || stepsY > 1) {
+    const coarse = { x: best.x, y: best.y };
+    for (let stepY = -stepsY; stepY <= stepsY; stepY++) {
+      for (let stepX = -stepsX; stepX <= stepsX; stepX++) {
+        if (stepX % stepsX === 0 && stepY % stepsY === 0) {
+          continue;
+        }
+        const offsetX = clamp(coarse.x + stepX / stepsX, -radiusX, radiusX);
+        const offsetY = clamp(coarse.y + stepY / stepsY, -radiusY, radiusY);
+        const score = scoreAt(offsetX, offsetY);
+        if (score < best.score) {
+          best = { x: offsetX, y: offsetY, score };
+        }
       }
     }
   }
@@ -1421,6 +1532,14 @@ interface ResidualComposition {
   /** Fit after softening the blank, and after softening both. */
   fitSoftBlank: number;
   fitSoftBoth: number;
+  /**
+   * What the score would be if the subtraction itself were taken at the common
+   * band. Measured, never applied: softening what is scored spreads a mark's
+   * ink and the residual's clip then eats proportionally more of a faint mark
+   * than a strong one. This is the number that says whether touching the
+   * subtraction is ever worth it, without touching it.
+   */
+  matchedScore: number;
 }
 
 /**
@@ -1488,6 +1607,7 @@ function analyzeResidualComposition(
   let blankGradient = 0;
   let softBlankTotal = 0;
   let softBothTotal = 0;
+  let matchedScoreTotal = 0;
 
   for (let y = radiusY; y < height - radiusY; y++) {
     for (let x = radiusX; x < width - radiusX; x++) {
@@ -1497,6 +1617,7 @@ function analyzeResidualComposition(
       total += Math.abs(difference);
       softBlankTotal += Math.abs(at(page, x, y) - at(softBase, bx, by));
       softBothTotal += Math.abs(at(softPage, x, y) - at(softBase, bx, by));
+      matchedScoreTotal += Math.max(0, at(softPage, x, y) - at(softBase, bx, by) - 0.08);
       pageGradient += gradient(page, x, y);
       blankGradient += gradient(base, bx, by);
       count++;
@@ -1517,6 +1638,7 @@ function analyzeResidualComposition(
     blankSharpness: blankGradient / samples,
     fitSoftBlank: softBlankTotal / samples,
     fitSoftBoth: softBothTotal / samples,
+    matchedScore: matchedScoreTotal / samples,
   };
 }
 
