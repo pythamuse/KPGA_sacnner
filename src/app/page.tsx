@@ -14,6 +14,7 @@ import {
   describeSnapshot,
   loadReviewSnapshot,
   saveReviewSnapshot,
+  stripDraftImages,
   type ReviewSnapshot,
 } from '@/lib/session/reviewSnapshot';
 import {
@@ -22,6 +23,25 @@ import {
   mergeDraftImages,
   saveDraftImages,
 } from '@/lib/session/imageCache';
+
+/**
+ * A rejected request does not necessarily answer in JSON. A body over the
+ * platform limit comes back as plain "Request Entity Too Large", and calling
+ * res.json() on it surfaced `Unexpected token 'R', "Request En"... is not valid
+ * JSON` instead of telling the reviewer what actually happened.
+ */
+async function readJsonResponse(res: Response): Promise<any> {
+  const contentType = res.headers.get('content-type') || '';
+  if (contentType.includes('application/json')) {
+    return res.json();
+  }
+
+  const body = (await res.text().catch(() => '')).slice(0, 200);
+  if (res.status === 413) {
+    throw new Error('전송 용량이 서버 한도를 넘었습니다. 저장된 학생 목록이 과도하게 커졌을 수 있으니 다운로드 후 새 작업으로 이어가주세요.');
+  }
+  throw new Error(`서버가 JSON이 아닌 응답을 보냈습니다 (HTTP ${res.status}). ${body}`);
+}
 
 function UsageModal({ onClose }: { onClose: () => void }) {
   return (
@@ -129,7 +149,7 @@ function BrandHeader() {
           whiteSpace: 'nowrap',
         }}
       >
-        테스트 버전 v2026-08-19.7
+        테스트 버전 v2026-08-19.8
       </span>
     </div>
   );
@@ -354,11 +374,14 @@ export default function Home() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           jobId,
-          students: [...students, currentDraft],
+          // The saved list is resent whole on every save, so nothing that only
+          // the review screen needs may travel with it. The draft's previews
+          // and crops are ~1.6MB per student and used to ride along.
+          students: [...students, stripDraftImages(currentDraft)],
         }),
       });
 
-      const data = await res.json();
+      const data = await readJsonResponse(res);
 
       if (!res.ok) {
         if (data.errors) {
@@ -407,7 +430,7 @@ export default function Home() {
       });
 
       if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
+        const data = await readJsonResponse(res).catch(() => ({}));
         throw new Error(data.error || '다운로드에 실패했습니다.');
       }
 

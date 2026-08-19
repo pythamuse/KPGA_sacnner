@@ -67,6 +67,17 @@ export function stripDraftImages(draft: RecognitionDraft): RecognitionDraft {
   return { ...draft, source: slimSource } as RecognitionDraft;
 }
 
+export function stripStudentImages(student: StudentData): StudentData {
+  const source = student.source as Record<string, unknown> | undefined;
+  if (!source) return student;
+
+  const slimSource: Record<string, unknown> = { ...source };
+  for (const key of IMAGE_SOURCE_KEYS) {
+    delete slimSource[key];
+  }
+  return { ...student, source: slimSource } as StudentData;
+}
+
 export function buildReviewSnapshot(input: {
   jobId: string;
   uploadMode: UploadModeValue;
@@ -80,7 +91,10 @@ export function buildReviewSnapshot(input: {
     writerId: WRITER_ID,
     jobId: input.jobId,
     uploadMode: input.uploadMode,
-    students: input.students,
+    // Saved students are meant to be small, but a build that spread the review
+    // draft into them once put 1.6MB of images in each. Strip them here too so
+    // an existing session cannot quietly blow the storage quota.
+    students: input.students.map(stripStudentImages),
     drafts: (input.drafts || []).map(stripDraftImages),
     currentDraftIndex: input.currentDraftIndex,
   };

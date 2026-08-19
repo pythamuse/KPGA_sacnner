@@ -37,10 +37,22 @@ export async function POST(req: Request) {
     newStudent.basic.age = normalizeAge(newStudent.basic.age);
 
     const targetRow = 3 + newIndex;
+    // Return only the persistence contract, never the review draft. Spreading
+    // the draft put its preview thumbnails and 23 crop images -- about 1.6MB
+    // per student -- into the saved list, the client kept that list and resent
+    // it whole on the next save, and the seventh student pushed the request
+    // past the platform's body limit. See
+    // Task/STUDENT_SAVE_PAYLOAD_GROWTH_AND_NON_JSON_RESPONSE_2026-08-12.md.
     const savedStudent: StudentData = {
-      ...newStudent,
       studentIndex: targetRow,
-      status: 'confirmed'
+      source: {
+        cagiImageId: newStudent.source?.cagiImageId,
+        satisfactionImageId: newStudent.source?.satisfactionImageId,
+      },
+      basic: newStudent.basic,
+      cagi: newStudent.cagi,
+      satisfaction: newStudent.satisfaction,
+      status: 'confirmed',
     };
     students[newIndex] = savedStudent;
 
