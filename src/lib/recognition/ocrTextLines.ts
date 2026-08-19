@@ -87,6 +87,40 @@ const DIGIT_TEMPLATE_INK_GAIN = 3;
 const DIGIT_MIN_INK_FRACTION = 0.004;
 // A printed rule runs across most of the box; a handwritten stroke does not.
 const DIGIT_RULE_RUN_FRACTION = 0.55;
+// A scanned rule is not perfectly horizontal, and the crop is enlarged about
+// six times before anything looks at it, so half a pixel of skew on the page
+// becomes several pixels here. Measured on real scans the rule then never has a
+// run of 55% of the width inside any single row -- it is broken into thirds,
+// each of which falls under the length test -- and it survived as a component
+// spanning the entire working image. The rule is therefore fitted as a line
+// with a slope, not as a row. The bound is the total vertical drift allowed
+// across the full width.
+const DIGIT_RULE_MAX_SLANT_FRACTION = 0.12;
+// A printed rule is thin. Only ink columns at most this tall are erased where
+// the fitted line passes, so a digit standing on the rule keeps its stem: the
+// ink column at the crossing runs the height of the stroke, far past this.
+const DIGIT_RULE_MAX_THICKNESS_FRACTION = 0.14;
+// Two digits sit side by side in this box, so no single connected shape inside
+// it can cover the field from one edge to the other -- not even two digits
+// written into each other. Anything that does is printed structure, possibly
+// with handwriting fused onto it.
+const DIGIT_MAX_STROKE_WIDTH_FRACTION = 0.9;
+// How much ink may lie beyond a printed line before it stops being a wall of
+// the box and starts being a rule the digits are written across. Beyond a real
+// wall there is only the outside of the field, so this is scanner speckle and
+// the odd stroke overshooting the box, not a digit.
+const DIGIT_WALL_OUTSIDE_INK_FRACTION = 0.1;
+// Among the ten digits only `1` can be drawn this narrow. Every other digit
+// carries a horizontal traverse -- a bowl, a crossbar, a top bar -- whose length
+// is a dimension of the glyph rather than of the pen, and in any legible hand
+// that traverse is at least a third of the glyph's height. `1` has no traverse,
+// so its width is the pen's width plus whatever slant the writer gives it. The
+// bound sits below the floor the other nine can reach, not at it.
+const DIGIT_ONE_MAX_ASPECT = 0.3;
+// Two digits written into one box share a baseline and a cap height. A fragment
+// of a broken glyph, a stray tick or a piece of printed structure does not, so a
+// shape that is not about as tall as its neighbour is not the other digit.
+const DIGIT_PAIR_HEIGHT_MATCH = 0.7;
 // The box's own left/right edges and its dashed centre divider are thin columns
 // spanning nearly the full height. Handwritten digits are wider than this.
 const DIGIT_RULE_COLUMN_HEIGHT_FRACTION = 0.85;
@@ -269,6 +303,99 @@ export function parseTrustedAgeOcrText(text: unknown, confidence: number): numbe
   return parseAgeOcrText(text);
 }
 
+type StrokeReading = NonNullable<DigitReading['perStroke']>[number];
+
+/**
+ * Reads the one digit the reader will not speak for.
+ *
+ * A stroke narrow enough can only be a `1`: see `DIGIT_ONE_MAX_ASPECT`. That
+ * is a property of the decimal glyphs, not of any page. But it is also the one
+ * place in this file that can put a digit into the draft that no reader ever
+ * saw, so it is gated to the case where the shape evidence is unambiguous and
+ * the rest of the number is not a guess:
+ *
+ *  - exactly two shapes, so there is nothing else the narrow one could be part
+ *    of, and only one of them is narrow enough to be the `1`
+ *  - the narrow shape is thicker than the printed structure this file already
+ *    erases by width, so a surviving rule or divider cannot pose as a digit
+ *  - the two shapes are about the same height, so a fragment cannot either
+ *  - the other shape was read on its own, as a single digit, at or above
+ *    `MIN_DIGIT_CONFIDENCE` -- the pair is never two inferences
+ *  - the reader did not itself read the narrow shape as something else; a
+ *    reading is only supplied where there was none
+ *
+ * The confidence carried forward is the other digit's own, because that is the
+ * only reading involved. Nothing here relaxes `MIN_DIGIT_CONFIDENCE`.
+ */
+function inferNarrowOne(
+  perDigit: DigitReading | undefined,
+  workWidth: number,
+): { value: number; text: string; read: string; confidence: number } | undefined {
+  const strokes = perDigit?.perStroke;
+  if (!strokes || strokes.length !== 2) {
+    return undefined;
+  }
+
+  const minPenWidth = workWidth * DIGIT_RULE_COLUMN_WIDTH_FRACTION;
+  const narrowFirst = isNarrowEnoughForOne(strokes[0], minPenWidth);
+  const narrowSecond = isNarrowEnoughForOne(strokes[1], minPenWidth);
+  if (narrowFirst === narrowSecond) {
+    return undefined;
+  }
+
+  const narrow = narrowFirst ? strokes[0] : strokes[1];
+  const other = narrowFirst ? strokes[1] : strokes[0];
+
+  const narrowText = digitsOf(narrow.text);
+  if (narrowText !== '' && narrowText !== '1') {
+    return undefined;
+  }
+
+  const shorter = Math.min(narrow.height, other.height);
+  const taller = Math.max(narrow.height, other.height);
+  if (taller <= 0 || shorter < taller * DIGIT_PAIR_HEIGHT_MATCH) {
+    return undefined;
+  }
+
+  const otherText = digitsOf(other.text);
+  if (otherText.length !== 1) {
+    return undefined;
+  }
+  if (!Number.isFinite(other.confidence) || other.confidence < MIN_DIGIT_CONFIDENCE) {
+    return undefined;
+  }
+
+  const text = narrowFirst ? `1${otherText}` : `${otherText}1`;
+  const value = parseAgeOcrText(text);
+  return value === undefined
+    ? undefined
+    : { value, text, read: otherText, confidence: other.confidence };
+}
+
+function isNarrowEnoughForOne(stroke: StrokeReading, minPenWidth: number): boolean {
+  return stroke.width > minPenWidth && stroke.width <= stroke.height * DIGIT_ONE_MAX_ASPECT;
+}
+
+function digitsOf(text: string): string {
+  return text.replace(/\D/g, '');
+}
+
+/**
+ * Whether a reading may be missing a digit that was thrown away with the
+ * printed structure.
+ *
+ * Handwriting that touches the box outline is one connected shape with it, and
+ * dropping that shape drops the digit too. A reading of a single digit taken
+ * from what is left cannot be told apart from a two-digit age whose other digit
+ * went with the frame, so it is shown blank for a reviewer instead of being
+ * written into the draft. A two-digit reading is unaffected, and so is every
+ * box the frame filter did not touch -- including one where it emptied the box
+ * and the raw ink was read instead, because there nothing was thrown away.
+ */
+function isPartialReading(shape: DigitShape, text: string): boolean {
+  return shape.framesRemoved > 0 && !shape.readRawInk && digitsOf(text).length < 2;
+}
+
 async function recognizeCrop(
   imageBuffer: Buffer,
   crop: { left: number; top: number; width: number; height: number },
@@ -334,11 +461,39 @@ async function recognizeDigitsCropDetailed(
     const wholeBoxValue = parseAgeOcrText(wholeBox.text);
     const perDigitValue = perDigit ? parseAgeOcrText(perDigit.text) : undefined;
 
+    // One shape the reader will not speak for, narrow enough that no digit but
+    // `1` can be drawn that way, beside one it read confidently. This is
+    // checked before the reader gates because those gates ask both readers for
+    // a whole number, and the whole-box reader has nothing to say about a box
+    // it could only half read.
+    const narrowOne = inferNarrowOne(perDigit, shape.workWidth);
+    if (narrowOne !== undefined) {
+      // Never overrule a reading this pipeline would have trusted on its own.
+      // A number the whole-box reader produced below the threshold is not one
+      // of those -- the rest of this function already refuses to act on it.
+      const contradicted = wholeBoxValue !== undefined
+        && wholeBox.confidence >= MIN_DIGIT_CONFIDENCE
+        && wholeBoxValue !== narrowOne.value;
+      if (!contradicted) {
+        return {
+          value: narrowOne.value,
+          status: 'accepted',
+          diagnostic: `Age OCR accepted ${narrowOne.value} [gate=narrow-stroke-is-one]: the wide shape read as ${narrowOne.read} at confidence ${Math.round(narrowOne.confidence)} of ${MIN_DIGIT_CONFIDENCE} needed, and the other is too narrow for any digit but 1. ${evidence}`,
+        };
+      }
+    }
+
     if (perDigit && wholeBoxValue !== undefined && perDigitValue !== undefined) {
       if (wholeBoxValue !== perDigitValue) {
         return {
           status: 'parse_or_confidence_rejected',
           diagnostic: `Age OCR rejected [gate=readers-disagreed]: the two readings were different numbers. ${evidence}`,
+        };
+      }
+      if (isPartialReading(shape, wholeBox.text)) {
+        return {
+          status: 'parse_or_confidence_rejected',
+          diagnostic: `Age OCR rejected [gate=one-digit-after-frame-removal]: both readings said ${wholeBoxValue}, but printed structure was removed from the box and a single digit cannot be told apart from the other one having gone with it. ${evidence}`,
         };
       }
       const confidence = Math.max(wholeBox.confidence, perDigit.confidence);
@@ -358,6 +513,12 @@ async function recognizeDigitsCropDetailed(
 
     // Only one reader produced digits -- fall back to the single-reading gate.
     if (wholeBoxValue !== undefined) {
+      if (isPartialReading(shape, wholeBox.text)) {
+        return {
+          status: 'parse_or_confidence_rejected',
+          diagnostic: `Age OCR rejected [gate=one-digit-after-frame-removal]: the only number read was ${wholeBoxValue}, but printed structure was removed from the box and a single digit cannot be told apart from the other one having gone with it. ${evidence}`,
+        };
+      }
       const value = parseTrustedAgeOcrText(wholeBox.text, wholeBox.confidence);
       if (value !== undefined) {
         return {
@@ -399,7 +560,20 @@ interface DigitShape {
   template: 0 | 1;
   otsu: number;
   inkPermille: number;
+  /** Left to right, in the same order the per-digit reader reads them. */
   strokes: Array<{ width: number; height: number }>;
+  /** Printed lines fitted across the box, and how many were its own walls. */
+  rules: number;
+  walls: number;
+  /** The closest the search came when it found nothing. */
+  bestRun: number;
+  minRun: number;
+  bestSlant: number;
+  maxSlant: number;
+  /** Shapes dropped for covering the whole width of the field. */
+  framesRemoved: number;
+  /** Set when frame removal emptied the box and the raw ink was read instead. */
+  readRawInk: boolean;
 }
 
 /**
@@ -415,9 +589,22 @@ function describeShape(shape: DigitShape): string {
     .join(',');
   const extra = shape.strokes.length > 4 ? `+${shape.strokes.length - 4}` : '';
 
+  const frames = shape.framesRemoved > 0 ? ` frames-removed=${shape.framesRemoved}` : '';
+  const raw = shape.readRawInk ? ' read=raw-ink' : '';
+  // Whether the box's own walls were found at all. Without this a stroke still
+  // reaching the full height cannot be told apart from a wall that was never
+  // detected, which is the next question either outcome raises.
+  // When nothing was found, how close the best candidate came and at what
+  // slope. That separates "the rule is there and the search cannot reach it"
+  // from "there is no rule and the stroke really is that tall".
+  const miss = shape.rules === 0
+    ? ` best=${shape.bestRun}/${shape.minRun}@s=${shape.bestSlant}/${shape.maxSlant}`
+    : '';
+  const lines = ` rules=${shape.rules}(walls=${shape.walls}${miss})`;
+
   return `[crop=${shape.cropWidth}x${shape.cropHeight} work=${shape.workWidth}x${shape.workHeight}`
     + ` tmpl=${shape.template} otsu=${shape.otsu} ink=${shape.inkPermille}/1000`
-    + ` strokes=${shape.strokes.length}(${strokes}${extra})]`;
+    + ` strokes=${shape.strokes.length}(${strokes}${extra})${lines}${frames}${raw}]`;
 }
 
 /**
@@ -439,18 +626,25 @@ function describeReading(reading: DigitReading): string {
   const shown = digits.slice(0, 8);
   const length = digits.length > shown.length ? ` len=${digits.length}` : '';
   const nonDigits = dropped > 0 ? ` nondigits=${dropped}` : '';
-  const parts = reading.parts && reading.parts.length > 1
-    ? `(${reading.parts.slice(0, 4).map((part) => Math.round(part)).join(',')})`
+  // Each shape paired with what it alone was read as. Without the pairing a
+  // confidence of `(0,92)` says one digit was silent but not which shape it
+  // came from, so "is the silent digit always the narrow one?" cannot be
+  // answered from a diagnostic on a scan nobody can share.
+  const perStroke = reading.perStroke && reading.perStroke.length > 0
+    ? ` (${reading.perStroke
+      .slice(0, 4)
+      .map((part) => `${part.width}x${part.height}="${part.text.replace(/\D/g, '').slice(0, 2)}"c${Math.round(part.confidence)}`)
+      .join(' ')})`
     : '';
 
-  return `"${shown}" conf=${Math.round(reading.confidence)}${parts}${length}${nonDigits}`;
+  return `"${shown}" conf=${Math.round(reading.confidence)}${perStroke}${length}${nonDigits}`;
 }
 
 interface DigitReading {
   text: string;
   confidence: number;
-  /** Confidence of each separately-read digit, when there was more than one. */
-  parts?: number[];
+  /** Each separately-read shape, left to right, with its own reading. */
+  perStroke?: Array<{ width: number; height: number; text: string; confidence: number }>;
 }
 
 /**
@@ -476,16 +670,21 @@ function readDigitStrokes(
     const ordered = [...strokes.strokes].sort((first, second) => first.left - second.left);
     let text = '';
     let confidence = 100;
-    const parts: number[] = [];
+    const perStroke: NonNullable<DigitReading['perStroke']> = [];
     for (const stroke of ordered) {
       const image = await renderStrokesForOcr(strokes.mask, [stroke]);
       const reading = await readWith(worker, image, PSM.SINGLE_CHAR);
       text += reading.text;
       confidence = Math.min(confidence, reading.confidence);
-      parts.push(reading.confidence);
+      perStroke.push({
+        width: stroke.right - stroke.left + 1,
+        height: stroke.bottom - stroke.top + 1,
+        text: reading.text,
+        confidence: reading.confidence,
+      });
     }
 
-    return { wholeBox, perDigit: { text, confidence, parts } };
+    return { wholeBox, perDigit: { text, confidence, perStroke } };
   });
 }
 
@@ -516,10 +715,19 @@ interface DigitStrokes {
  * Two failures were measured on real scans (Task/AGE_OCR_PREPROCESSING_2026-08-20.md):
  * the printed rule under the digits stayed inside the crop, and a fixed
  * `threshold(190)` broke thin strokes apart. Both are addressed here -- printed
- * structure is erased by shape (long horizontal runs, thin full-height columns)
- * and the black/white split is taken from the crop's own histogram. Nothing in
- * this path relaxes `MIN_DIGIT_CONFIDENCE`; a cleaner image is the only way a
- * value gets through.
+ * structure is erased by shape (sloping rules, thin full-height columns) and the
+ * black/white split is taken from the crop's own histogram.
+ *
+ * Instrumenting all six real pages then showed a shape as wide as the entire
+ * working image on four of them, and on one page the whole image was a single
+ * shape. That cannot be a handwritten digit: two digits sit side by side in this
+ * box, so neither of them -- nor both written into each other -- reaches from
+ * one edge of the field to the other. Such a shape is dropped here, after the
+ * rules that hold it together have been cut, which is what releases a digit that
+ * was touching the box outline.
+ *
+ * Nothing in this path relaxes `MIN_DIGIT_CONFIDENCE`; a cleaner image is the
+ * only way a value gets through.
  */
 async function buildDigitStrokes(
   imageBuffer: Buffer,
@@ -556,23 +764,72 @@ async function buildDigitStrokes(
     otsu: threshold,
     inkPermille: Math.round((inkCount / mask.data.length) * 1000),
     strokes: [],
+    rules: 0,
+    walls: 0,
+    bestRun: 0,
+    minRun: 0,
+    bestSlant: 0,
+    maxSlant: 0,
+    framesRemoved: 0,
+    readRawInk: false,
   };
 
   if (inkCount < mask.data.length * DIGIT_MIN_INK_FRACTION) {
     return { shape };
   }
 
-  eraseHorizontalRules(mask);
+  const rawInk = mask.data.slice();
+  const erased = eraseHorizontalRules(mask);
+  Object.assign(shape, erased);
   const strokes = keepDigitStrokes(mask);
-  shape.strokes = strokes.map((stroke) => ({
-    width: stroke.right - stroke.left + 1,
-    height: stroke.bottom - stroke.top + 1,
-  }));
   if (strokes.length === 0) {
     return { shape };
   }
 
-  return { found: { mask, strokes }, shape };
+  const maxStrokeWidth = mask.width * DIGIT_MAX_STROKE_WIDTH_FRACTION;
+  const digits: InkStroke[] = [];
+  const frames: InkStroke[] = [];
+  for (const stroke of strokes) {
+    (stroke.right - stroke.left + 1 < maxStrokeWidth ? digits : frames).push(stroke);
+  }
+  shape.framesRemoved = frames.length;
+
+  if (digits.length > 0) {
+    for (const stroke of frames) {
+      for (const index of stroke.pixels) {
+        mask.data[index] = 0;
+      }
+    }
+    return { found: { mask, strokes: digits }, shape: describeStrokes(shape, digits) };
+  }
+
+  // Every shape in the box covered the whole field, so there is nothing left to
+  // hand over. Removing printed structure must not turn a box that produced a
+  // reading into one that produces none, so the ink is read as it stood before
+  // any of it was erased.
+  shape.readRawInk = true;
+  mask.data.set(rawInk);
+  const rawStrokes = keepDigitStrokes(mask);
+  if (rawStrokes.length === 0) {
+    return { shape };
+  }
+
+  return { found: { mask, strokes: rawStrokes }, shape: describeStrokes(shape, rawStrokes) };
+}
+
+/**
+ * Records the shapes actually handed to the readers, left to right, which is
+ * the order the per-digit reader reads them in -- so a stroke in the diagnostic
+ * lines up with the confidence its own reading got.
+ */
+function describeStrokes(shape: DigitShape, strokes: InkStroke[]): DigitShape {
+  shape.strokes = [...strokes]
+    .sort((first, second) => first.left - second.left)
+    .map((stroke) => ({
+      width: stroke.right - stroke.left + 1,
+      height: stroke.bottom - stroke.top + 1,
+    }));
+  return shape;
 }
 
 async function subtractTemplateDigits(
@@ -699,65 +956,286 @@ function otsuThreshold(pixels: Buffer): number {
 }
 
 /**
- * Erases the printed rule that runs under the age digits. A rule is a dark run
- * covering most of the box width, which no handwritten stroke does. Where a
- * digit crosses the rule the pixels are kept, so a "4" that sits on the line
- * does not lose its stem.
+ * Erases the printed rules that run through the age box. A rule is a dark line
+ * covering most of the box width, which no handwritten stroke does -- but on a
+ * scan it is a *sloping* line, and the crop is enlarged about six times before
+ * this runs, so it never stays inside one row. Looking for a run within a
+ * single row therefore found nothing and the whole box outline survived as one
+ * connected shape spanning the working image, with the handwriting that touched
+ * it fused in. Lines are fitted with a slope instead, over the small range of
+ * skew a scanned page can have.
+ *
+ * Only thin ink columns are erased where the line passes. Where a digit crosses
+ * a rule the ink column runs the height of the stroke, so a "4" standing on the
+ * line keeps its stem and is released as its own shape once the rule is gone.
+ *
+ * That protection is right for a rule inside the field and wrong for the box's
+ * own top and bottom walls, where it leaves a stub of printed line standing at
+ * the digit's columns all the way to the edge of the crop. Measured on real
+ * scans, every stroke that reached the full height of the working image was
+ * read as nothing, and the one that did not reach it read at confidence 90 --
+ * the reader was being handed a digit welded to two rails. A wall is therefore
+ * cleared out to the edge regardless of what crosses it; see `classifyRuleLine`.
  */
-function eraseHorizontalRules(mask: InkMask): void {
-  const { data, width, height } = mask;
+function eraseHorizontalRules(mask: InkMask): RuleReport {
+  const { width, height } = mask;
   const minRun = Math.max(8, Math.round(width * DIGIT_RULE_RUN_FRACTION));
-  const bands: Array<{ top: number; bottom: number }> = [];
+  const maxSlant = Math.max(1, Math.round(height * DIGIT_RULE_MAX_SLANT_FRACTION));
+  const maxThickness = Math.max(2, Math.round(height * DIGIT_RULE_MAX_THICKNESS_FRACTION));
+  const columns = measureInkColumns(mask);
+  const search = findRuleLines(mask, minRun, maxSlant, maxThickness);
+  let walls = 0;
 
-  for (let y = 0; y < height; y++) {
-    let run = 0;
-    let longestRun = 0;
-    for (let x = 0; x < width; x++) {
-      run = data[y * width + x] ? run + 1 : 0;
-      if (run > longestRun) {
-        longestRun = run;
-      }
-    }
-    if (longestRun < minRun) {
-      continue;
-    }
-    const last = bands[bands.length - 1];
-    if (last && y <= last.bottom + 1) {
-      last.bottom = y;
-    } else {
-      bands.push({ top: y, bottom: y });
+  for (const line of search.lines) {
+    if (eraseRuleLine(mask, columns, line, maxThickness) !== 'crossing') {
+      walls++;
     }
   }
 
-  for (const band of bands) {
-    const above = band.top - 1;
-    const below = band.bottom + 1;
-    for (let x = 0; x < width; x++) {
-      const strokeCrosses = above >= 0
-        && below < height
-        && hasInkNear(mask, x, above)
-        && hasInkNear(mask, x, below);
-      if (strokeCrosses) {
-        continue;
-      }
-      for (let y = band.top; y <= band.bottom; y++) {
-        data[y * width + x] = 0;
-      }
-    }
-  }
+  return {
+    rules: search.lines.length,
+    walls,
+    bestRun: search.bestRun,
+    minRun,
+    bestSlant: search.bestSlant,
+    maxSlant,
+  };
 }
 
-function hasInkNear(mask: InkMask, x: number, y: number): boolean {
-  for (let offset = -1; offset <= 1; offset++) {
-    const column = x + offset;
-    if (column < 0 || column >= mask.width) {
-      continue;
-    }
-    if (mask.data[y * mask.width + column]) {
-      return true;
+/**
+ * What the rule search saw. The near-miss numbers matter only when nothing was
+ * found: a stroke still reaching the full height of the working image with no
+ * rule detected is either a rule the search cannot reach -- too broken for the
+ * run threshold, or sloping past the slant bound -- or handwriting that genuinely
+ * overshoots the crop, and those want opposite fixes.
+ */
+interface RuleReport {
+  rules: number;
+  walls: number;
+  bestRun: number;
+  minRun: number;
+  bestSlant: number;
+  maxSlant: number;
+}
+
+interface RuleLine {
+  /** Row the line starts on, at x = 0. */
+  top: number;
+  /** Total rows the line drifts across the full width; may be negative. */
+  slant: number;
+  /** Longest unbroken stretch of the line that was actually inked. */
+  run: number;
+}
+
+/**
+ * The unbroken vertical stretch of ink each pixel belongs to. A printed rule is
+ * a short stretch; a digit stroke crossing it is a long one.
+ */
+function measureInkColumns(mask: InkMask): { top: Int32Array; length: Int32Array } {
+  const { data, width, height } = mask;
+  const top = new Int32Array(data.length);
+  const length = new Int32Array(data.length);
+
+  for (let x = 0; x < width; x++) {
+    let y = 0;
+    while (y < height) {
+      if (!data[y * width + x]) {
+        y++;
+        continue;
+      }
+      let end = y;
+      while (end + 1 < height && data[(end + 1) * width + x]) {
+        end++;
+      }
+      for (let row = y; row <= end; row++) {
+        top[row * width + x] = y;
+        length[row * width + x] = end - y + 1;
+      }
+      y = end + 1;
     }
   }
-  return false;
+
+  return { top, length };
+}
+
+interface RuleSearch {
+  lines: RuleLine[];
+  /** Longest stretch any candidate line managed, accepted or not. */
+  bestRun: number;
+  bestSlant: number;
+}
+
+function findRuleLines(mask: InkMask, minRun: number, maxSlant: number, maxThickness: number): RuleSearch {
+  const { data, width, height } = mask;
+  const found: RuleLine[] = [];
+  const lastColumn = Math.max(1, width - 1);
+  let bestRun = 0;
+  let bestSlant = 0;
+
+  for (let slant = -maxSlant; slant <= maxSlant; slant++) {
+    for (let top = 0; top < height; top++) {
+      let run = 0;
+      let longestRun = 0;
+      for (let x = 0; x < width; x++) {
+        const y = top + Math.round((slant * x) / lastColumn);
+        // A single row of tolerance absorbs the rounding of the fitted line
+        // against where the rule's ink actually landed.
+        const inked = y >= 0
+          && y < height
+          && (data[y * width + x]
+            || (y > 0 && data[(y - 1) * width + x])
+            || (y + 1 < height && data[(y + 1) * width + x]));
+        run = inked ? run + 1 : 0;
+        if (run > longestRun) {
+          longestRun = run;
+        }
+      }
+      if (longestRun > bestRun) {
+        bestRun = longestRun;
+        bestSlant = slant;
+      }
+      if (longestRun >= minRun) {
+        found.push({ top, slant, run: longestRun });
+      }
+    }
+  }
+
+  // Neighbouring offsets and slopes all describe the same rule. Keep the
+  // best-covered one of each group so a thick rule is erased once.
+  found.sort((first, second) => second.run - first.run);
+  const distinct: RuleLine[] = [];
+  for (const line of found) {
+    const middle = line.top + line.slant / 2;
+    const overlaps = distinct.some(
+      (kept) => Math.abs(kept.top + kept.slant / 2 - middle) <= maxThickness,
+    );
+    if (!overlaps) {
+      distinct.push(line);
+    }
+  }
+
+  return { lines: distinct, bestRun, bestSlant };
+}
+
+/**
+ * Whether a rule is one of the box's own walls rather than a line the digits
+ * are written across. A wall's ink reaches the edge of the crop; a rule the
+ * writing sits on has paper on both sides of it.
+ *
+ * The distinction decides whether the crossing protection applies. It must
+ * apply to a rule inside the field, or cutting it would take a digit's stem
+ * with it. It must *not* apply to a wall: there is no handwriting beyond the
+ * edge of the field to protect, so the protection only preserves a stub of
+ * printed line at the digit's own columns -- and a stub reaching the edge of
+ * the crop is what welds a rail onto the glyph handed to the reader.
+ */
+function classifyRuleLine(
+  mask: InkMask,
+  line: RuleLine,
+  maxThickness: number,
+): 'top-wall' | 'bottom-wall' | 'crossing' {
+  const { data, width, height } = mask;
+  const lastColumn = Math.max(1, width - 1);
+  let above = 0;
+  let band = 0;
+  let below = 0;
+
+  for (let x = 0; x < width; x++) {
+    const centre = line.top + Math.round((line.slant * x) / lastColumn);
+    for (let y = 0; y < height; y++) {
+      if (!data[y * width + x]) {
+        continue;
+      }
+      // The line's own ink is as deep as a rule may be, not one row. Counting
+      // it as ink beyond the line is what made a wall look like a crossing.
+      if (y < centre - maxThickness) {
+        above++;
+      } else if (y > centre + maxThickness) {
+        below++;
+      } else {
+        band++;
+      }
+    }
+  }
+
+  const total = above + band + below;
+  if (total === 0) {
+    return 'crossing';
+  }
+
+  // A wall sits at the edge of the field with the writing all on one side of
+  // it. A rule the digits are written across has ink on both sides, and the
+  // crossing protection has to hold there or cutting the rule would take a
+  // stem with it.
+  const outside = total * DIGIT_WALL_OUTSIDE_INK_FRACTION;
+  const middle = line.top + line.slant / 2;
+  if (middle <= height / 4 && above <= outside) {
+    return 'top-wall';
+  }
+  if (middle >= (height * 3) / 4 && below <= outside) {
+    return 'bottom-wall';
+  }
+  return 'crossing';
+}
+
+function eraseRuleLine(
+  mask: InkMask,
+  columns: { top: Int32Array; length: Int32Array },
+  line: RuleLine,
+  maxThickness: number,
+): 'top-wall' | 'bottom-wall' | 'crossing' {
+  const { data, width, height } = mask;
+  const lastColumn = Math.max(1, width - 1);
+  const role = classifyRuleLine(mask, line, maxThickness);
+
+  for (let x = 0; x < width; x++) {
+    const centre = line.top + Math.round((line.slant * x) / lastColumn);
+
+    // A wall bounds the field. Everything between it and the edge of the crop
+    // is outside the box, so it goes whether or not a stroke crosses -- which
+    // is what frees the digit's top or foot from the printed line it was
+    // touching, and lets its own extent decide the shape handed to the reader.
+    if (role === 'top-wall') {
+      // Down to the far side of the wall's own ink, but never deeper than a
+      // rule can be -- so where a digit is fused to the wall it gives up a
+      // rule's thickness off its head instead of the whole stroke.
+      let last = Math.min(centre + 1, height - 1);
+      const limit = Math.min(centre + maxThickness, height - 1);
+      while (last < limit && data[(last + 1) * width + x]) {
+        last++;
+      }
+      for (let row = 0; row <= last; row++) {
+        data[row * width + x] = 0;
+      }
+    } else if (role === 'bottom-wall') {
+      let first = Math.max(centre - 1, 0);
+      const limit = Math.max(centre - maxThickness, 0);
+      while (first > limit && data[(first - 1) * width + x]) {
+        first--;
+      }
+      for (let row = first; row < height; row++) {
+        data[row * width + x] = 0;
+      }
+    }
+
+    for (let offset = -1; offset <= 1; offset++) {
+      const y = centre + offset;
+      if (y < 0 || y >= height) {
+        continue;
+      }
+      const index = y * width + x;
+      if (!data[index] || columns.length[index] > maxThickness) {
+        continue;
+      }
+      const first = columns.top[index];
+      const last = first + columns.length[index] - 1;
+      for (let row = first; row <= last; row++) {
+        data[row * width + x] = 0;
+      }
+    }
+  }
+
+  return role;
 }
 
 /**
