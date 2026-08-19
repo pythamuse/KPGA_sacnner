@@ -4,6 +4,7 @@ import {
   getRegistrationBounds,
   hasUsableFormBounds,
   loadImageAnalysisData,
+  type ChoiceGroupResult,
   type ImageAnalysisData,
   type PixelRect,
 } from './markDensity';
@@ -259,8 +260,8 @@ export async function recognizeStudentForms(
       );
       draft.confidence[result.field] = result.confidence;
       draft.candidates![result.field] = mapRecognizedCandidates(result.field, result.candidates);
-      const directCheckboxEvidence = directCheckboxGroup && cagiBaseline?.basicCheckboxCandidateRects?.[group.field]
-        ? hasUniqueDirectCheckboxEvidence(
+      const checkboxEvidence = directCheckboxGroup && cagiBaseline?.basicCheckboxCandidateRects?.[group.field]
+        ? evaluateDirectCheckboxEvidence(
           cagiImage,
           cagiBaseline.image,
           group,
@@ -268,7 +269,14 @@ export async function recognizeStudentForms(
           cagiBaseline.basicCheckboxCandidateRects[group.field],
           result.value,
         )
-        : true;
+        : undefined;
+      const directCheckboxEvidence = checkboxEvidence ? checkboxEvidence.accepted : true;
+      if (directCheckboxGroup) {
+        basicCheckboxMeasurement[group.field] = [
+          basicCheckboxMeasurement[group.field],
+          describeBasicCheckboxDecision(group, result, checkboxEvidence),
+        ].filter(Boolean).join(' ');
+      }
 
       // Medium confidence stays a suggestion only. Automatic values require a
       // verified grid and the stricter high-confidence mark evidence.
@@ -752,16 +760,107 @@ function round1(value: number): number {
   return Math.round(value * 10) / 10;
 }
 
-function hasUniqueDirectCheckboxEvidence(
+/**
+ * Which half of the decision refused, and on the numbers each half saw.
+ *
+ * The scorer and this gate do not measure the same thing: the scorer weighs
+ * the whole box at 36x28 samples with its own alignment search and shape
+ * test, the gate weighs only the inset interior at 8x8 with neither. They can
+ * therefore name different boxes, or the scorer can name none at all -- and
+ * until now all of that reached the reviewer as one sentence about ink
+ * evidence being "absent or ambiguous", including when the ink was neither.
+ *
+ *   pick  the option the scorer named, 1-based, or 0 when it named none
+ *   conf  the confidence it named it with
+ *   gate  which clause of the evidence check answered: ok, no-value (the
+ *         scorer offered nothing to confirm), named-box-empty (it named a box
+ *         with no ink), runner-up-inked, not-dominant, mismatched-cells
+ *   scr   the scorer's own score per option, times 1000, against the gate's
+ *         sig= above -- a pick that disagrees with the ink shows up as the
+ *         two lists peaking on different options
+ */
+function describeBasicCheckboxDecision(
+  group: ChoiceGroup,
+  result: ChoiceGroupResult,
+  evidence: DirectCheckboxEvidence | undefined,
+): string {
+  const scores = group.candidates.map((candidate) => {
+    const scored = result.candidates.find((entry) => entry.value === candidate.value);
+    return Math.round((scored?.score || 0) * 1000);
+  });
+  const pick = result.value === undefined
+    ? 0
+    : group.candidates.findIndex((candidate) => candidate.value === result.value) + 1;
+  return `[pick=${pick} conf=${result.confidence.charAt(0)}`
+    + ` gate=${evidence ? evidence.reason : 'not-applied'}`
+    + ` scr=${scores.join(',')}]`;
+}
+
+/**
+ * How far the named box must outweigh the heaviest other box. With the
+ * runner-up already held near zero below, this is what refuses a page where
+ * the winner is barely above the noise it is being compared with.
+ */
+const CHECKBOX_DOMINANCE_RATIO = 4;
+
+/**
+ * The most ink any other box may carry and still be dismissed as print rather
+ * than an answer. This is the number that keeps a form somebody marked twice
+ * out of the system, so it belongs below the faintest mark this project has
+ * measured, not merely below a typical one.
+ *
+ * A ratio cannot carry that on its own: two real marks give a large ratio
+ * whenever one is heavier than the other, so dominance alone would auto-fill
+ * a doubly-marked form. Bounding the runner-up in absolute terms is what
+ * makes a second mark disqualifying however light it is relative to the
+ * first.
+ */
+const CHECKBOX_RUNNER_UP_SIGNAL = 0.025;
+
+type DirectCheckboxRefusal =
+  | 'ok'
+  | 'no-value'
+  | 'mismatched-cells'
+  | 'named-box-empty'
+  | 'runner-up-inked'
+  | 'not-dominant';
+
+interface DirectCheckboxEvidence {
+  accepted: boolean;
+  reason: DirectCheckboxRefusal;
+  signals: number[];
+  valueIndex: number;
+}
+
+/**
+ * Confirms the box the scorer named, on the ink the page actually carries.
+ *
+ * It used to require that box to be the only one holding any ink at all. A
+ * correctly placed window still sees a little of its own printed border, so a
+ * single surviving pixel of print on any other option refused the field --
+ * one measured page had a mark outweighing its runner-up eleven and a half
+ * times and was held for manual entry.
+ *
+ * So the rule is dominance instead of exclusivity: the named box must carry
+ * ink, must outweigh every other box by `CHECKBOX_DOMINANCE_RATIO`, and no
+ * other box may carry more than `CHECKBOX_RUNNER_UP_SIGNAL`. Both conditions
+ * are needed and they refuse different things -- see the constants above.
+ *
+ * This is strictly weaker than the rule it replaces: a field that passed
+ * before had every other box at exactly zero, which satisfies both conditions
+ * outright. Nothing that fills today can stop filling because of this.
+ */
+function evaluateDirectCheckboxEvidence(
   image: ImageAnalysisData,
   baselineImage: ImageAnalysisData,
   group: ChoiceGroup,
   actualRects: PixelRect[],
   baselineRects: PixelRect[],
   value: number | string | undefined,
-): boolean {
-  if (value === undefined || actualRects.length !== group.candidates.length || baselineRects.length !== group.candidates.length) {
-    return false;
+): DirectCheckboxEvidence {
+  const empty = { accepted: false, signals: [] as number[], valueIndex: -1 };
+  if (actualRects.length !== group.candidates.length || baselineRects.length !== group.candidates.length) {
+    return { ...empty, reason: 'mismatched-cells' };
   }
   const signals = actualRects.map((rect, index) => calculateCheckboxInteriorDifference(
     image,
@@ -769,11 +868,27 @@ function hasUniqueDirectCheckboxEvidence(
     baselineImage,
     baselineRects[index],
   ));
-  const markedIndexes = signals
-    .map((signal, index) => signal > 0 ? index : -1)
-    .filter((index) => index >= 0);
-  const valueIndex = group.candidates.findIndex((candidate) => candidate.value === value);
-  return markedIndexes.length === 1 && markedIndexes[0] === valueIndex;
+  // Reported even when there is nothing to confirm, so the trace can tell a
+  // scorer that named no box apart from ink that contradicted the one it did.
+  const valueIndex = value === undefined
+    ? -1
+    : group.candidates.findIndex((candidate) => candidate.value === value);
+  if (valueIndex < 0) {
+    return { accepted: false, reason: 'no-value', signals, valueIndex };
+  }
+
+  const named = signals[valueIndex];
+  const runnerUp = Math.max(0, ...signals.filter((_, index) => index !== valueIndex));
+  if (named <= 0) {
+    return { accepted: false, reason: 'named-box-empty', signals, valueIndex };
+  }
+  if (runnerUp > CHECKBOX_RUNNER_UP_SIGNAL) {
+    return { accepted: false, reason: 'runner-up-inked', signals, valueIndex };
+  }
+  if (named < CHECKBOX_DOMINANCE_RATIO * runnerUp) {
+    return { accepted: false, reason: 'not-dominant', signals, valueIndex };
+  }
+  return { accepted: true, reason: 'ok', signals, valueIndex };
 }
 
 /**
