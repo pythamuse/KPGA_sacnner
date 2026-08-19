@@ -26,6 +26,12 @@ export interface BasicCheckboxGridDetection {
   matchedCount: number;
   maxResidual: number;
   translation: { x: number; y: number };
+  /**
+   * How far each option box had to be moved to agree with the layout the rest
+   * of the page fits, in page pixels, zero where the match was believed as
+   * found. Reported so the correction can be read back on real scans.
+   */
+  corrections: Record<string, number[]>;
   diagnostic: string;
 }
 
@@ -121,18 +127,177 @@ export function matchBasicCheckboxes(
     return undefined;
   }
 
-  const overrides = assignRectsToGroups(groups, candidates, match.matches);
-  if (!overrides) {
+  const fitted = constrainMatchesToLayout(image, references, candidates, match.matches);
+  if (!fitted) {
     return undefined;
   }
+  const overrides = splitIntoGroups(groups, fitted.rects);
+  const corrections = splitIntoGroups(groups, fitted.corrections);
+  if (!overrides || !corrections) {
+    return undefined;
+  }
+  const moved = fitted.corrections.filter((distance) => distance > 0);
+  const movedNote = moved.length > 0
+    ? ` ${moved.length} disagreed with that layout and were placed where it predicts (worst ${Math.max(...moved).toFixed(1)}px).`
+    : '';
   return {
     overrides,
     candidateCount: candidates.length,
     matchedCount: match.matches.length,
     maxResidual: match.maxDistance,
     translation: match.translation,
-    diagnostic: `Checkbox geometry matched ${match.matches.length}/${references.length} candidates; max normalized residual ${match.maxDistance.toFixed(4)}.`,
+    corrections,
+    diagnostic: `Checkbox geometry matched ${match.matches.length}/${references.length} candidates; max normalized residual ${match.maxDistance.toFixed(4)}.${movedNote}`,
   };
+}
+
+/**
+ * Multiples of the page's own placement spread beyond which a box counts as
+ * disagreeing with the layout rather than as ordinary jitter. For a normal
+ * spread the median absolute deviation is about two thirds of a standard
+ * deviation, so this is the usual clear-outlier line at roughly 2.7 sigma.
+ * The distance it is applied to is measured on the page, not chosen here.
+ */
+const LAYOUT_OUTLIER_FACTOR = 4;
+
+/**
+ * The twelve boxes are one rigid layout. The blank form fixes where they sit
+ * relative to each other, and a page can only shift that layout as a whole --
+ * which is exactly the single translation the match already estimates, and
+ * then discards, placing every window on its own matched candidate however
+ * far that candidate is from where the layout says the box is. A window
+ * thrown far enough lands on unrelated print, and the field it belongs to is
+ * then refused for appearing to hold two marks.
+ *
+ * So every box is answerable to the other eleven. The translation is
+ * re-estimated as the median of the twelve residuals, which a minority of
+ * thrown boxes cannot move, and the spread of those residuals about that
+ * median is the page's own placement accuracy -- tight on a clean scan, wider
+ * on a poor one, measured either way rather than assumed. A box further out
+ * than that spread allows is not believed: it is re-matched to a candidate
+ * sitting where the layout predicts, and placed there outright when no
+ * candidate is. A page whose boxes do not mostly agree has no layout left to
+ * appeal to and is rejected entirely.
+ */
+function constrainMatchesToLayout(
+  image: Pick<ImageAnalysisData, 'width' | 'height' | 'contentBounds'>,
+  references: NormalizedPoint[],
+  candidates: BasicCheckboxCandidate[],
+  matches: Match[],
+): { rects: PixelRect[]; corrections: number[] } | undefined {
+  const bounds = getRegistrationBounds(image);
+  const width = bounds.right - bounds.left;
+  const height = bounds.bottom - bounds.top;
+  if (matches.length !== references.length || width <= 0 || height <= 0) {
+    return undefined;
+  }
+
+  const matched = matches.map((match) => candidates[match.candidateIndex]);
+  if (matched.some((candidate) => !candidate)) {
+    return undefined;
+  }
+
+  const residualX = matched.map((candidate, index) => candidate.center.x - references[index].x);
+  const residualY = matched.map((candidate, index) => candidate.center.y - references[index].y);
+  const shiftX = median(residualX);
+  const shiftY = median(residualY);
+  const deviationX = residualX.map((value) => Math.abs(value - shiftX));
+  const deviationY = residualY.map((value) => Math.abs(value - shiftY));
+  // Floored at one page pixel: nothing locates a box centre more finely than
+  // that, so a smaller disagreement is never evidence of a wrong match.
+  const limitX = Math.max(LAYOUT_OUTLIER_FACTOR * median(deviationX), 1 / width);
+  const limitY = Math.max(LAYOUT_OUTLIER_FACTOR * median(deviationY), 1 / height);
+
+  const agrees = references.map((_, index) => deviationX[index] <= limitX && deviationY[index] <= limitY);
+  if (agrees.filter(Boolean).length * 2 <= references.length) {
+    return undefined;
+  }
+
+  const agreeing = matched.filter((_, index) => agrees[index]);
+  const boxWidth = median(agreeing.map((candidate) => candidate.rect.right - candidate.rect.left));
+  const boxHeight = median(agreeing.map((candidate) => candidate.rect.bottom - candidate.rect.top));
+  const used = new Set(matches.filter((_, index) => agrees[index]).map((match) => match.candidateIndex));
+
+  const rects: PixelRect[] = [];
+  const corrections: number[] = [];
+  for (let index = 0; index < references.length; index += 1) {
+    if (agrees[index]) {
+      rects.push(matched[index].rect);
+      corrections.push(0);
+      continue;
+    }
+
+    const predicted = { x: references[index].x + shiftX, y: references[index].y + shiftY };
+    let replacementIndex = -1;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex += 1) {
+      if (used.has(candidateIndex)) continue;
+      const offsetX = Math.abs(candidates[candidateIndex].center.x - predicted.x);
+      const offsetY = Math.abs(candidates[candidateIndex].center.y - predicted.y);
+      if (offsetX > limitX || offsetY > limitY) continue;
+      const distance = offsetX * width + offsetY * height;
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        replacementIndex = candidateIndex;
+      }
+    }
+    if (replacementIndex >= 0) {
+      used.add(replacementIndex);
+    }
+
+    const placed = replacementIndex >= 0
+      ? candidates[replacementIndex].rect
+      : rectAroundNormalizedPoint(bounds, predicted, boxWidth, boxHeight);
+    const movedX = (placed.left + placed.right) / 2 - (matched[index].rect.left + matched[index].rect.right) / 2;
+    const movedY = (placed.top + placed.bottom) / 2 - (matched[index].rect.top + matched[index].rect.bottom) / 2;
+    rects.push(placed);
+    corrections.push(Math.sqrt(movedX * movedX + movedY * movedY));
+  }
+
+  return { rects, corrections };
+}
+
+function rectAroundNormalizedPoint(
+  bounds: { left: number; top: number; right: number; bottom: number },
+  point: NormalizedPoint,
+  boxWidth: number,
+  boxHeight: number,
+): PixelRect {
+  const centerX = bounds.left + point.x * (bounds.right - bounds.left);
+  const centerY = bounds.top + point.y * (bounds.bottom - bounds.top);
+  const left = Math.round(centerX - boxWidth / 2);
+  const top = Math.round(centerY - boxHeight / 2);
+  return {
+    left,
+    top,
+    right: left + Math.max(1, Math.round(boxWidth)),
+    bottom: top + Math.max(1, Math.round(boxHeight)),
+  };
+}
+
+function median(values: number[]): number {
+  if (values.length === 0) {
+    return 0;
+  }
+  const sorted = values.slice().sort((first, second) => first - second);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? (sorted[middle - 1] + sorted[middle]) / 2
+    : sorted[middle];
+}
+
+function splitIntoGroups<T>(groups: ChoiceGroup[], items: T[]): Record<string, T[]> | undefined {
+  const expectedCount = groups.reduce((sum, group) => sum + group.candidates.length, 0);
+  if (items.length !== expectedCount) {
+    return undefined;
+  }
+  let offset = 0;
+  const result: Record<string, T[]> = {};
+  for (const group of groups) {
+    result[group.field] = items.slice(offset, offset + group.candidates.length);
+    offset += group.candidates.length;
+  }
+  return result;
 }
 
 export function detectBasicCheckboxCandidates(
@@ -330,6 +495,134 @@ export function calculateCheckboxInteriorDifference(
   return difference / (width * height);
 }
 
+/**
+ * Where a scoring window sits relative to the printed box it is supposed to
+ * cover, measured on the scanned page alone. Measurement only: nothing here
+ * feeds a decision, it exists so the placement can be read off real scans
+ * instead of inferred from a downscaled blank asset.
+ *
+ * A window placed on its box has the printed outline around its rim, no ink
+ * reaching far past any edge, and an ink centroid near its own centre. A
+ * window placed off its box has the outline running through the middle, ink
+ * continuing well past one edge, and a centroid pulled that way.
+ */
+export interface BasicCheckboxPlacement {
+  /** Dark-ink centroid inside the window, relative to the window centre, in pixels. */
+  inkX: number;
+  inkY: number;
+  /** How far dark ink connected to the window's own ink continues past each edge, in pixels. */
+  extendLeft: number;
+  extendRight: number;
+  extendTop: number;
+  extendBottom: number;
+  /** Share of the window's dark pixels lying in its central half, as a percentage. */
+  corePercent: number;
+  /** Dark pixels inside the window, so a percentage of almost nothing is recognisable as such. */
+  darkCount: number;
+}
+
+export function measureBasicCheckboxPlacement(
+  image: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>,
+  window: PixelRect,
+): BasicCheckboxPlacement {
+  const width = Math.max(1, window.right - window.left);
+  const height = Math.max(1, window.bottom - window.top);
+  const coreLeft = window.left + width * 0.25;
+  const coreRight = window.right - width * 0.25;
+  const coreTop = window.top + height * 0.25;
+  const coreBottom = window.bottom - height * 0.25;
+  let darkCount = 0;
+  let coreCount = 0;
+  let sumX = 0;
+  let sumY = 0;
+
+  for (let y = window.top; y < window.bottom; y += 1) {
+    if (y < 0 || y >= image.height) continue;
+    for (let x = window.left; x < window.right; x += 1) {
+      if (x < 0 || x >= image.width) continue;
+      if (image.pixels[y * image.width + x] >= DARK_THRESHOLD) continue;
+      darkCount += 1;
+      sumX += x + 0.5;
+      sumY += y + 0.5;
+      if (x + 0.5 >= coreLeft && x + 0.5 < coreRight && y + 0.5 >= coreTop && y + 0.5 < coreBottom) {
+        coreCount += 1;
+      }
+    }
+  }
+
+  const inkBounds = findWindowInkBounds(image, window, Math.max(width, height));
+  return {
+    inkX: darkCount > 0 ? sumX / darkCount - (window.left + window.right) / 2 : 0,
+    inkY: darkCount > 0 ? sumY / darkCount - (window.top + window.bottom) / 2 : 0,
+    extendLeft: inkBounds ? Math.max(0, window.left - inkBounds.left) : 0,
+    extendRight: inkBounds ? Math.max(0, inkBounds.right - window.right) : 0,
+    extendTop: inkBounds ? Math.max(0, window.top - inkBounds.top) : 0,
+    extendBottom: inkBounds ? Math.max(0, inkBounds.bottom - window.bottom) : 0,
+    corePercent: darkCount > 0 ? Math.round((coreCount / darkCount) * 100) : 0,
+    darkCount,
+  };
+}
+
+/**
+ * Bounding box of the ink that is 8-connected to any dark pixel inside the
+ * window, searched no further than one window away on each side. A printed
+ * outline the window only partly covers reaches past the edge it overhangs.
+ */
+function findWindowInkBounds(
+  image: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>,
+  window: PixelRect,
+  margin: number,
+): PixelRect | undefined {
+  const left = clamp(window.left - margin, 0, image.width - 1);
+  const right = clamp(window.right + margin, left + 1, image.width);
+  const top = clamp(window.top - margin, 0, image.height - 1);
+  const bottom = clamp(window.bottom + margin, top + 1, image.height);
+  const bandWidth = right - left;
+  const bandHeight = bottom - top;
+  const visited = new Uint8Array(bandWidth * bandHeight);
+  const queue: number[] = [];
+  const isDark = (x: number, y: number) => image.pixels[y * image.width + x] < DARK_THRESHOLD;
+
+  for (let y = Math.max(top, window.top); y < Math.min(bottom, window.bottom); y += 1) {
+    for (let x = Math.max(left, window.left); x < Math.min(right, window.right); x += 1) {
+      const index = (y - top) * bandWidth + (x - left);
+      if (visited[index] || !isDark(x, y)) continue;
+      visited[index] = 1;
+      queue.push(index);
+    }
+  }
+  if (queue.length === 0) {
+    return undefined;
+  }
+
+  let minX = right;
+  let maxX = left;
+  let minY = bottom;
+  let maxY = top;
+  while (queue.length > 0) {
+    const current = queue.pop()!;
+    const currentX = left + (current % bandWidth);
+    const currentY = top + Math.floor(current / bandWidth);
+    minX = Math.min(minX, currentX);
+    maxX = Math.max(maxX, currentX);
+    minY = Math.min(minY, currentY);
+    maxY = Math.max(maxY, currentY);
+    for (let offsetY = -1; offsetY <= 1; offsetY += 1) {
+      for (let offsetX = -1; offsetX <= 1; offsetX += 1) {
+        const nextX = currentX + offsetX;
+        const nextY = currentY + offsetY;
+        if (nextX < left || nextX >= right || nextY < top || nextY >= bottom) continue;
+        const next = (nextY - top) * bandWidth + (nextX - left);
+        if (visited[next] || !isDark(nextX, nextY)) continue;
+        visited[next] = 1;
+        queue.push(next);
+      }
+    }
+  }
+
+  return { left: minX, top: minY, right: maxX + 1, bottom: maxY + 1 };
+}
+
 function insetRect(rect: PixelRect, inset: number): PixelRect {
   const left = Math.min(rect.left + inset, rect.right - 1);
   const top = Math.min(rect.top + inset, rect.bottom - 1);
@@ -360,27 +653,6 @@ function flattenGroupRects(
     }
   }
   return references;
-}
-
-function assignRectsToGroups(
-  groups: ChoiceGroup[],
-  candidates: BasicCheckboxCandidate[],
-  matches: Match[],
-): Record<string, PixelRect[]> | undefined {
-  let matchIndex = 0;
-  const result: Record<string, PixelRect[]> = {};
-  for (const group of groups) {
-    const rects: PixelRect[] = [];
-    for (let index = 0; index < group.candidates.length; index += 1) {
-      const match = matches[matchIndex++];
-      if (!match || !candidates[match.candidateIndex]) {
-        return undefined;
-      }
-      rects.push(candidates[match.candidateIndex].rect);
-    }
-    result[group.field] = rects;
-  }
-  return result;
 }
 
 function assignCandidateListToGroups(

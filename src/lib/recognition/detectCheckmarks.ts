@@ -22,6 +22,7 @@ import {
 import {
   matchBasicCheckboxes,
   calculateCheckboxInteriorDifference,
+  measureBasicCheckboxPlacement,
   normalizeBasicCheckboxRects,
   type BasicCheckboxGridDetection,
 } from './basicCheckboxDetection';
@@ -120,6 +121,10 @@ export async function recognizeStudentForms(
   const recognitionRegistration: Record<string, FieldRegistration> = {};
   const recognitionValueSource: Record<string, RecognitionValueSource> = {};
   const recognitionDecisionTrace: Record<string, string> = {};
+  // Instrumentation only: appended to the basic-information traces below so
+  // the box placement can be read off real scans instead of inferred. Nothing
+  // reads these strings back.
+  const basicCheckboxMeasurement: Record<string, string> = {};
 
   for (const field of RECOGNITION_FIELDS) {
     recognitionValueSource[field] = 'unresolved';
@@ -217,6 +222,17 @@ export async function recognizeStudentForms(
       const scoringCells = directCheckboxGroup && isVerifiedGrid(registration) && gridCells
         ? normalizeBasicCheckboxRects(cagiImage, gridCells)
         : resolveScoringCells(cagiImage, group, gridCells, rowOverride, registration);
+      if (directCheckboxGroup) {
+        basicCheckboxMeasurement[group.field] = describeBasicCheckboxPlacement(
+          cagiImage,
+          scoringCells,
+          gridCells,
+          cagiBaseline?.image,
+          cagiBaseline?.basicCheckboxCandidateRects?.[group.field],
+          isVerifiedGrid(registration),
+          basicCheckboxDetection?.corrections?.[group.field],
+        );
+      }
       const displayCells = scoringCells;
       recognitionCandidateRects[group.field] = displayCells;
       recognitionCropRects[group.field] = unionPixelRects(displayCells);
@@ -304,6 +320,14 @@ export async function recognizeStudentForms(
           registration,
         );
       }
+    }
+
+    // Appended last: the loop above rewrites the trace of every field that was
+    // not filled in automatically, which is exactly the set being measured.
+    for (const [field, measurement] of Object.entries(basicCheckboxMeasurement)) {
+      recognitionDecisionTrace[field] = [recognitionDecisionTrace[field], measurement]
+        .filter(Boolean)
+        .join(' ');
     }
   } catch {
     // 이미지 분석 실패 시 임의값을 넣지 않고 검수 화면에서 직접 입력하도록 낮은 신뢰도로 둔다.
@@ -644,6 +668,88 @@ function mergeBasicCheckboxDetection(
       ...Object.fromEntries(groups.map((group) => [group.field, detection.diagnostic])),
     },
   };
+}
+
+/**
+ * Instrumentation for the basic-information gate. Emits, per option box and in
+ * digits only, where the scoring window was placed and what the printed box
+ * under it looks like, so the placement can be measured on real scans rather
+ * than inferred from a downscaled blank asset.
+ *
+ *   match whether the page's twelve boxes matched the blank form's, which is
+ *         what decides whether these windows came from checkbox geometry at
+ *         all; when it is 0 the window is a template rectangle and `off` is
+ *         measuring against a box it was never placed from
+ *   ref   the blank form's own box for this option, in blank-form pixels; a
+ *         size short of its neighbours means the reference component itself
+ *         was clipped
+ *   off   detected box centre minus the blank form's reference centre, in
+ *         page pixels: the offset the matcher applied to this box
+ *   ink   dark-ink centroid inside the window, from the window's own centre
+ *   ext   how far connected dark ink continues past the left, right, top and
+ *         bottom edges of the window
+ *   core  share of the window's dark pixels lying in its central half; a
+ *         window sitting on its box carries the printed outline on the rim,
+ *         a window off its box has that outline running through the middle
+ *   dark  dark pixels inside the window, so a share of almost nothing reads
+ *         as such
+ *   fix   how far this window was moved to agree with the layout the other
+ *         eleven boxes fit; 0 where the match was believed as found. `off` is
+ *         reported after that move, so a large `fix` beside a small `off` is
+ *         a window that was thrown and put back
+ *   sig   the residual the gate's own predicate measured, times 1000
+ *
+ * Nothing here changes a decision, and it carries no answer, only geometry.
+ */
+function describeBasicCheckboxPlacement(
+  image: ImageAnalysisData,
+  scoringCells: PixelRect[],
+  detectedCells: PixelRect[] | undefined,
+  baselineImage: ImageAnalysisData | undefined,
+  baselineRects: PixelRect[] | undefined,
+  matched: boolean,
+  corrections: number[] | undefined,
+): string {
+  if (!baselineImage || !baselineRects || baselineRects.length !== scoringCells.length) {
+    return `[match=${matched ? 1 : 0} win=none]`;
+  }
+  const bounds = getRegistrationBounds(image);
+  const baselineBounds = getRegistrationBounds(baselineImage);
+  const width = bounds.right - bounds.left;
+  const height = bounds.bottom - bounds.top;
+  const baselineWidth = baselineBounds.right - baselineBounds.left;
+  const baselineHeight = baselineBounds.bottom - baselineBounds.top;
+  const window = scoringCells[0];
+
+  const boxes = scoringCells.map((cell, index) => {
+    const placement = measureBasicCheckboxPlacement(image, cell);
+    const signal = calculateCheckboxInteriorDifference(image, cell, baselineImage, baselineRects[index]);
+    const detected = detectedCells?.length === scoringCells.length ? detectedCells[index] : cell;
+    const reference = baselineRects[index];
+    const offsetX = width * (
+      ((detected.left + detected.right) / 2 - bounds.left) / width
+      - ((reference.left + reference.right) / 2 - baselineBounds.left) / baselineWidth
+    );
+    const offsetY = height * (
+      ((detected.top + detected.bottom) / 2 - bounds.top) / height
+      - ((reference.top + reference.bottom) / 2 - baselineBounds.top) / baselineHeight
+    );
+    return `#${index + 1} ref=${reference.right - reference.left}x${reference.bottom - reference.top}`
+      + ` off=${round1(offsetX)},${round1(offsetY)}`
+      + ` ink=${round1(placement.inkX)},${round1(placement.inkY)}`
+      + ` ext=${placement.extendLeft},${placement.extendRight},${placement.extendTop},${placement.extendBottom}`
+      + ` core=${placement.corePercent} dark=${placement.darkCount}`
+      + ` fix=${round1(corrections?.[index] || 0)}`
+      + ` sig=${Math.round(signal * 1000)}`;
+  });
+
+  return `[match=${matched ? 1 : 0}`
+    + ` win=${window.right - window.left}x${window.bottom - window.top}`
+    + ` ${boxes.join(' ')}]`;
+}
+
+function round1(value: number): number {
+  return Math.round(value * 10) / 10;
 }
 
 function hasUniqueDirectCheckboxEvidence(
