@@ -37,6 +37,12 @@ export interface ChoiceGroupResult {
   value?: number | string;
   confidence: 'high' | 'medium' | 'low';
   candidates: CandidateScore[];
+  /**
+   * Why this group landed where it did, as numbers and fixed labels only. See
+   * `describeDecision`. Nothing in this string comes from the scanned page
+   * except scores, so a student's answers cannot travel through it.
+   */
+  decision: string;
 }
 
 export interface ChoiceGroupBaseline {
@@ -52,6 +58,13 @@ interface TemplateInkShape {
 
 interface TemplateInkFeatures extends TemplateInkShape {
   score: number;
+  /** Mean darkness of the uploaded cell, after brightness normalisation. */
+  actualInk: number;
+  /** Mean darkness of the same cell on the blank form. */
+  baselineInk: number;
+  brightnessOffset: number;
+  alignX: number;
+  alignY: number;
 }
 
 interface ScoredCandidate extends CandidateScore {
@@ -72,6 +85,16 @@ const HIGH_RELATIVE_CONTRAST = 1.25;
  * 0.021 gives CORRECT 102 WRONG 0, where 0.023 drops to 99 and 0.026 to 97.
  */
 const HIGH_ABSOLUTE_SIGNAL = 0.021;
+
+/**
+ * The shape a residual has to have before it counts as a pen mark rather than
+ * leftover print. Hoisted from `hasStructuredTemplateMark` so the decision
+ * trace can report each sub-test against the value it was actually compared
+ * with; the values are unchanged.
+ */
+const STRUCTURED_MARK_MIN_COMPONENT = 7;
+const STRUCTURED_MARK_MIN_COMPONENT_RATIO = 0.2;
+const STRUCTURED_MARK_MIN_DIAGONAL_RATIO = 0.2;
 
 export async function loadImageAnalysisData(filePath: string): Promise<ImageAnalysisData> {
   const { data: pixels, info } = await sharp(filePath)
@@ -576,6 +599,114 @@ function isPlausiblePaperBounds(
   );
 }
 
+interface DecisionEvidence {
+  field: string;
+  usesBaseline: boolean;
+  usesGridCells: boolean;
+  scores: number[];
+  best?: ScoredCandidate;
+  gap: number;
+  relativeContrast: number;
+  highScoreThreshold: number;
+  highGapThreshold: number;
+  mediumScoreThreshold: number;
+  mediumGapThreshold: number;
+  requireHighVisualConfidence: boolean;
+}
+
+/**
+ * Every test `analyzeChoiceGroup` applied, what it was given, and by how much
+ * it missed.
+ *
+ * Seventeen cells sit at `src=grid conf=low` with verified coordinates and a
+ * mark that is really on the page, and `conf=low` alone cannot say whether a
+ * test missed by two percent or by tenfold. Those are different problems and
+ * four attempts have already been spent tuning this file without knowing which
+ * one was being tuned.
+ *
+ * Each failing test is named the way the age reader names its gates, and each
+ * carries `have/need(ratio)` so the distance is readable at a glance. A ratio
+ * just under 1 is a threshold problem; a ratio near zero is a signal problem.
+ *
+ * Only numbers and fixed labels are emitted. Candidate scores are listed in
+ * rank order without their values, so the row shows the shape of the decision
+ * without restating which option a student chose.
+ */
+function describeDecision(evidence: DecisionEvidence, outcome: string, refused: string[]): string {
+  const {
+    field, usesBaseline, usesGridCells, scores, best, gap, relativeContrast,
+    highScoreThreshold, highGapThreshold, mediumScoreThreshold, mediumGapThreshold,
+  } = evidence;
+
+  const parts = [
+    `field=${field}`,
+    `outcome=${outcome}`,
+    refused.length > 0 ? `refused=${refused.join(',')}` : 'refused=none',
+    `base=${usesBaseline ? 1 : 0} cells=${usesGridCells ? 1 : 0} n=${scores.length}`,
+    `scores=${scores.map((score) => score.toFixed(3)).join('/')}`,
+  ];
+
+  if (best) {
+    parts.push(`floor=${ratioOf(best.score, highScoreThreshold)}`);
+    parts.push(`gap=${ratioOf(gap, highGapThreshold)}`);
+    if (usesBaseline) {
+      parts.push(`contrast=${ratioOf(relativeContrast, HIGH_RELATIVE_CONTRAST)}`);
+    }
+    parts.push(`med-floor=${ratioOf(best.score, mediumScoreThreshold)}`);
+    parts.push(`med-gap=${ratioOf(gap, mediumGapThreshold)}`);
+  }
+
+  const shape = best?.shape;
+  if (usesBaseline && shape) {
+    parts.push(
+      `shape=[size=${ratioOf(shape.largestComponentSize, STRUCTURED_MARK_MIN_COMPONENT)}`
+      + ` compact=${ratioOf(shape.largestComponentRatio, STRUCTURED_MARK_MIN_COMPONENT_RATIO)}`
+      + ` diag=${ratioOf(shape.diagonalRatio, STRUCTURED_MARK_MIN_DIAGONAL_RATIO)}]`,
+    );
+  }
+
+  const ink = best?.shape as TemplateInkFeatures | undefined;
+  if (usesBaseline && ink && ink.actualInk !== undefined) {
+    // What the blank form actually removed from the winning cell. A cell where
+    // the baseline took nearly everything and one that was nearly empty to
+    // begin with both end at a low score and want opposite fixes.
+    parts.push(
+      `ink=[page=${ink.actualInk.toFixed(3)} blank=${ink.baselineInk.toFixed(3)}`
+      + ` left=${best!.score.toFixed(3)} shift=${ink.brightnessOffset.toFixed(0)}`
+      + ` align=${ink.alignX},${ink.alignY}]`,
+    );
+  }
+
+  const trace = `[marks ${parts.join(' ')}]`;
+  emitDecisionTrace(trace);
+  return trace;
+}
+
+/**
+ * The trace's second outlet.
+ *
+ * `analyzeChoiceGroup` returns the trace on its result, but the caller that
+ * puts field text on the reviewer's screen lives in another file and does not
+ * forward it yet. Until it does, this makes the same string readable from a
+ * measurement run without any other file changing. It is off unless
+ * `MARK_DECISION_TRACE` is set, so nothing is written in a normal request.
+ */
+function emitDecisionTrace(trace: string): void {
+  if (typeof process === 'undefined' || !process.env?.MARK_DECISION_TRACE) {
+    return;
+  }
+  // eslint-disable-next-line no-console
+  console.info(trace);
+}
+
+/** `have/need(ratio)`, so a near miss and a rout read differently. */
+function ratioOf(have: number, need: number): string {
+  const ratio = need > 0 ? have / need : Number.POSITIVE_INFINITY;
+  const shown = Number.isFinite(ratio) ? `${ratio.toFixed(2)}x` : 'inf';
+  const value = Number.isFinite(have) ? have.toFixed(3) : 'inf';
+  return `${value}/${need.toFixed(3)}(${shown})`;
+}
+
 export function analyzeChoiceGroup(
   image: ImageAnalysisData,
   group: ChoiceGroup,
@@ -617,25 +748,32 @@ export function analyzeChoiceGroup(
 
   const best = scoredCandidates[0];
   const second = scoredCandidates[1];
+  const evidence: DecisionEvidence = {
+    field: group.field,
+    usesBaseline,
+    usesGridCells,
+    scores: candidates.map((candidate) => candidate.score),
+    best,
+    gap: 0,
+    relativeContrast: 0,
+    highScoreThreshold: 0,
+    highGapThreshold: 0,
+    mediumScoreThreshold: 0,
+    mediumGapThreshold: 0,
+    requireHighVisualConfidence,
+  };
 
   if (!best) {
     return {
       field: group.field,
       confidence: 'low',
       candidates,
+      decision: describeDecision(evidence, 'low', ['no-candidates']),
     };
   }
 
   // A fallback content bound may still produce plausible-looking candidate scores.
   // Never turn those scores into automatic data when the page frame was not trusted.
-  if (!allowAutoValue) {
-    return {
-      field: group.field,
-      confidence: 'low',
-      candidates,
-    };
-  }
-
   const gap = best.score - (second?.score || 0);
   // Printed circles and rules do not cancel perfectly: the blank form is a
   // 200dpi scan while an uploaded page is rendered at roughly half that, so
@@ -667,7 +805,33 @@ export function analyzeChoiceGroup(
   const highGapThreshold = usesBaseline ? 0.004 : 0.12;
   const mediumScoreThreshold = usesBaseline ? 0.007 : 0.1;
   const mediumGapThreshold = usesBaseline ? 0.003 : 0.025;
+
+  evidence.gap = gap;
+  evidence.relativeContrast = relativeContrast;
+  evidence.highScoreThreshold = highScoreThreshold;
+  evidence.highGapThreshold = highGapThreshold;
+  evidence.mediumScoreThreshold = mediumScoreThreshold;
+  evidence.mediumGapThreshold = mediumGapThreshold;
+
+  if (!allowAutoValue) {
+    return {
+      field: group.field,
+      confidence: 'low',
+      candidates,
+      decision: describeDecision(evidence, 'low', ['form-boundary-unverified']),
+    };
+  }
+
   const hasStructuredMark = !usesBaseline || hasStructuredTemplateMark(best.shape);
+
+  // Which of the four high-confidence tests refused, recorded as they are
+  // evaluated. This reads the same values the condition below reads and
+  // decides nothing.
+  const refused: string[] = [];
+  if (!(best.score >= highScoreThreshold)) refused.push('absolute-floor');
+  if (!(gap >= highGapThreshold)) refused.push('gap');
+  if (!hasStructuredMark) refused.push('mark-shape');
+  if (usesBaseline && !(relativeContrast >= HIGH_RELATIVE_CONTRAST)) refused.push('relative-contrast');
 
   if (
     best.score >= highScoreThreshold
@@ -680,6 +844,7 @@ export function analyzeChoiceGroup(
       value: best.value,
       confidence: 'high',
       candidates,
+      decision: describeDecision(evidence, 'high', refused),
     };
   }
 
@@ -692,13 +857,19 @@ export function analyzeChoiceGroup(
       value: best.value,
       confidence: 'medium',
       candidates,
+      decision: describeDecision(evidence, 'medium', refused),
     };
   }
+
+  if (requireHighVisualConfidence) refused.push('medium-path-not-offered');
+  if (!(best.score >= mediumScoreThreshold)) refused.push('medium-floor');
+  if (!(gap >= mediumGapThreshold)) refused.push('medium-gap');
 
   return {
     field: group.field,
     confidence: 'low',
     candidates,
+    decision: describeDecision(evidence, 'low', refused),
   };
 }
 
@@ -732,6 +903,11 @@ function calculateTemplateInkFeatures(
       largestComponentSize: 0,
       largestComponentRatio: 0,
       diagonalRatio: 0,
+      actualInk: 0,
+      baselineInk: 0,
+      brightnessOffset: 0,
+      alignX: 0,
+      alignY: 0,
     };
   }
 
@@ -741,6 +917,11 @@ function calculateTemplateInkFeatures(
   const alignment = findBestBaselineAlignment(actual, blank, sampleWidth, sampleHeight, brightnessOffset);
   const residual = new Float32Array(sampleWidth * sampleHeight);
   let difference = 0;
+  // Totals either side of the subtraction. They change nothing; they are what
+  // makes "the baseline removed almost all of it" distinguishable from "there
+  // was almost nothing there" once a group is refused.
+  let actualTotal = 0;
+  let baselineTotal = 0;
 
   for (let y = 1; y < sampleHeight - 1; y++) {
     for (let x = 1; x < sampleWidth - 1; x++) {
@@ -748,6 +929,8 @@ function calculateTemplateInkFeatures(
       const baselineIndex = (y + alignment.y) * sampleWidth + (x + alignment.x);
       const actualInk = darkness(actual[index] + brightnessOffset);
       const baselineInk = darkness(blank[baselineIndex]);
+      actualTotal += actualInk;
+      baselineTotal += baselineInk;
       // Ignore the narrow anti-aliasing and scanner-noise band around the
       // printed form. A handwritten circle or check remains well above it.
       const residualInk = Math.max(0, actualInk - baselineInk - 0.08);
@@ -761,15 +944,20 @@ function calculateTemplateInkFeatures(
   return {
     score: difference / usablePixels,
     ...shape,
+    actualInk: actualTotal / usablePixels,
+    baselineInk: baselineTotal / usablePixels,
+    brightnessOffset,
+    alignX: alignment.x,
+    alignY: alignment.y,
   };
 }
 
 function hasStructuredTemplateMark(shape?: TemplateInkShape): boolean {
   return Boolean(
     shape
-    && shape.largestComponentSize >= 7
-    && shape.largestComponentRatio >= 0.2
-    && shape.diagonalRatio >= 0.2,
+    && shape.largestComponentSize >= STRUCTURED_MARK_MIN_COMPONENT
+    && shape.largestComponentRatio >= STRUCTURED_MARK_MIN_COMPONENT_RATIO
+    && shape.diagonalRatio >= STRUCTURED_MARK_MIN_DIAGONAL_RATIO,
   );
 }
 
