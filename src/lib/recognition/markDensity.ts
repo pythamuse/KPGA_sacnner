@@ -4,6 +4,17 @@ import { ChoiceGroup, NormalizedRect } from './roiTemplates';
 export type ContentBoundsSource = 'frame' | 'paper' | 'template' | 'dark';
 
 export interface ImageAnalysisData {
+  /**
+   * Why the template registration frame was not applied, when it was not.
+   *
+   * The blank asset resolves its content bounds through the template path and
+   * the uploads resolve theirs through the paper path, so the subtraction
+   * normalises the two images through frames measured two different ways. Both
+   * go through `applyTemplateRegistrationFrame`, so on the uploads it is
+   * declining, and it used to decline silently. This names the guard that
+   * refused and the numbers it refused on.
+   */
+  contentBoundsRejection?: string;
   width: number;
   height: number;
   pixels: Buffer;
@@ -88,6 +99,13 @@ interface ScoredCandidate extends CandidateScore {
   shape?: TemplateInkShape;
   /** Position in the group as the template lists it, 1-based, before sorting. */
   position: number;
+  /**
+   * Where the cell sits across the content envelope, 0 at the left edge and 1
+   * at the right. A normalisation that disagrees about the page's width puts
+   * the baseline further out of place the further from the anchored edge a
+   * cell sits, so a fit that worsens with this is that error showing.
+   */
+  atX: number;
 }
 
 /**
@@ -174,8 +192,22 @@ export function applyTemplateRegistrationFrame(
   image: ImageAnalysisData,
   registrationFrame?: NormalizedRect,
 ): ImageAnalysisData {
-  if (!registrationFrame || !image.pageBounds || !isPlausiblePaperBounds(image, image.pageBounds)) {
-    return image;
+  if (!registrationFrame) {
+    return { ...image, contentBoundsRejection: 'no-registration-frame' };
+  }
+  if (!image.pageBounds) {
+    return { ...image, contentBoundsRejection: 'no-page-bounds' };
+  }
+  if (!isPlausiblePaperBounds(image, image.pageBounds)) {
+    const page = image.pageBounds;
+    const pw = (page.right - page.left) / image.width;
+    const ph = (page.bottom - page.top) / image.height;
+    const ar = (page.bottom - page.top) / Math.max(page.right - page.left, 1);
+    return {
+      ...image,
+      contentBoundsRejection: `implausible-page(w=${pw.toFixed(3)}/0.550`
+        + ` h=${ph.toFixed(3)}/0.620 ar=${ar.toFixed(3)}/[1.05,1.90])`,
+    };
   }
 
   const page = image.pageBounds;
@@ -188,12 +220,22 @@ export function applyTemplateRegistrationFrame(
     bottom: clamp(Math.round(page.top + (registrationFrame.y + registrationFrame.height) * pageHeight), 1, image.height),
   };
 
-  if (
-    contentBounds.right <= contentBounds.left + 1
-    || contentBounds.bottom <= contentBounds.top + 1
-    || !isPlausibleTemplateContentBounds(page, contentBounds)
-  ) {
-    return image;
+  if (contentBounds.right <= contentBounds.left + 1 || contentBounds.bottom <= contentBounds.top + 1) {
+    return { ...image, contentBoundsRejection: 'degenerate-frame' };
+  }
+  if (!isPlausibleTemplateContentBounds(page, contentBounds)) {
+    const cw = (contentBounds.right - contentBounds.left) / Math.max(page.right - page.left, 1);
+    const ch = (contentBounds.bottom - contentBounds.top) / Math.max(page.bottom - page.top, 1);
+    const ar = (contentBounds.bottom - contentBounds.top)
+      / Math.max(contentBounds.right - contentBounds.left, 1);
+    const inside = contentBounds.left >= page.left && contentBounds.top >= page.top
+      && contentBounds.right <= page.right && contentBounds.bottom <= page.bottom;
+    return {
+      ...image,
+      contentBoundsRejection: `implausible-frame(inside=${inside ? 1 : 0}`
+        + ` w=${cw.toFixed(3)}/0.550 h=${ch.toFixed(3)}/0.550`
+        + ` ar=${ar.toFixed(3)}/[1.05,1.95])`,
+    };
   }
 
   return {
@@ -201,6 +243,7 @@ export function applyTemplateRegistrationFrame(
     contentBounds,
     contentBoundsSource: 'template',
     contentBoundsConfident: true,
+    contentBoundsRejection: undefined,
   };
 }
 
@@ -620,6 +663,9 @@ function isPlausiblePaperBounds(
 
 interface DecisionEvidence {
   field: string;
+  boundsSource: ContentBoundsSource | 'none';
+  boundsWidth: number;
+  boundsRejection?: string;
   usesBaseline: boolean;
   usesGridCells: boolean;
   scores: number[];
@@ -661,6 +707,9 @@ function describeDecision(evidence: DecisionEvidence, outcome: string, refused: 
   const parts = [
     `field=${field}`,
     `outcome=${outcome}`,
+    `bounds=${evidence.boundsSource}`
+      + `/${evidence.boundsWidth.toFixed(4)}`
+      + `${evidence.boundsRejection ? `/${evidence.boundsRejection}` : ''}`,
     refused.length > 0 ? `refused=${refused.join(',')}` : 'refused=none',
     `base=${usesBaseline ? 1 : 0} cells=${usesGridCells ? 1 : 0} n=${scores.length}`,
     `scores=${scores.map((score) => score.toFixed(3)).join('/')}`,
@@ -694,7 +743,7 @@ function describeDecision(evidence: DecisionEvidence, outcome: string, refused: 
   if (usesBaseline && ink && ink.actualInk !== undefined) {
     const rows = evidence.ranked.slice(0, 6).map((candidate) => {
       const features = candidate.shape as TemplateInkFeatures | undefined;
-      if (!features) return `${candidate.position}:scr=${candidate.score.toFixed(3)}`;
+      if (!features) return `${candidate.position}@${candidate.atX.toFixed(2)}:scr=${candidate.score.toFixed(3)}`;
       // An offset sitting on the edge of the search means the search ran out
       // of room rather than finding the best fit.
       const pinned = Math.abs(features.alignX) >= features.radiusX
@@ -708,7 +757,7 @@ function describeDecision(evidence: DecisionEvidence, outcome: string, refused: 
           + `${Math.abs(probe.x) >= probe.radius || Math.abs(probe.y) >= probe.radius ? '!' : ''}`
           + `/${probe.radius} gain=${(probe.chosenFit - probe.fit).toFixed(4)}`
         : '';
-      return `${candidate.position}:scr=${candidate.score.toFixed(3)}`
+      return `${candidate.position}@${candidate.atX.toFixed(2)}:scr=${candidate.score.toFixed(3)}`
         + ` page=${features.actualInk.toFixed(3)} blank=${features.baselineInk.toFixed(3)}`
         + ` shift=${features.brightnessOffset.toFixed(0)}`
         + ` align=${features.alignX},${features.alignY}${pinned ? '!' : ''}`
@@ -781,8 +830,17 @@ export function analyzeChoiceGroup(
         )
         : undefined;
 
+      const rect = usesGridCells
+        ? candidatePixelOverrides![index]
+        : toPixelRect(image, candidate.rect, yOverride);
+      // Falls back to the whole bitmap when no envelope was resolved, which is
+      // the same frame the rest of this file uses in that case.
+      const contentLeft = image.contentBounds?.left ?? 0;
+      const contentWidth = Math.max((image.contentBounds?.right ?? image.width) - contentLeft, 1);
+
       return {
         position: index + 1,
+        atX: ((rect.left + rect.right) / 2 - contentLeft) / contentWidth,
         value: candidate.value,
         score: roundScore(
           templateEvidence?.score ?? calculateDarkPixelDensity(
@@ -803,6 +861,10 @@ export function analyzeChoiceGroup(
   const second = scoredCandidates[1];
   const evidence: DecisionEvidence = {
     field: group.field,
+    boundsSource: image.contentBoundsSource ?? 'none',
+    boundsWidth: ((image.contentBounds?.right ?? image.width)
+      - (image.contentBounds?.left ?? 0)) / image.width,
+    boundsRejection: image.contentBoundsRejection,
     usesBaseline,
     usesGridCells,
     scores: candidates.map((candidate) => candidate.score),
