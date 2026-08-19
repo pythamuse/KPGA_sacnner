@@ -75,6 +75,9 @@ interface TemplateInkFeatures extends TemplateInkShape {
   pagePitchY: number;
   blankPitchX: number;
   blankPitchY: number;
+  /** The reach the search was actually given for this cell, per axis. */
+  radiusX: number;
+  radiusY: number;
 }
 
 interface ScoredCandidate extends CandidateScore {
@@ -690,8 +693,8 @@ function describeDecision(evidence: DecisionEvidence, outcome: string, refused: 
       if (!features) return `${candidate.position}:scr=${candidate.score.toFixed(3)}`;
       // An offset sitting on the edge of the search means the search ran out
       // of room rather than finding the best fit.
-      const pinned = Math.abs(features.alignX) >= BASELINE_ALIGNMENT_RADIUS
-        || Math.abs(features.alignY) >= BASELINE_ALIGNMENT_RADIUS;
+      const pinned = Math.abs(features.alignX) >= features.radiusX
+        || Math.abs(features.alignY) >= features.radiusY;
       return `${candidate.position}:scr=${candidate.score.toFixed(3)}`
         + ` page=${features.actualInk.toFixed(3)} blank=${features.baselineInk.toFixed(3)}`
         + ` shift=${features.brightnessOffset.toFixed(0)}`
@@ -704,7 +707,7 @@ function describeDecision(evidence: DecisionEvidence, outcome: string, refused: 
     parts.push(
       `pitch=[page=${ink.pagePitchX.toFixed(2)},${ink.pagePitchY.toFixed(2)}`
       + ` blank=${ink.blankPitchX.toFixed(2)},${ink.blankPitchY.toFixed(2)}`
-      + ` reach=${BASELINE_ALIGNMENT_RADIUS}]`,
+      + ` reach=${ink.radiusX},${ink.radiusY}]`,
     );
   }
 
@@ -945,13 +948,29 @@ function calculateTemplateInkFeatures(
       pagePitchY: 0,
       blankPitchX: 0,
       blankPitchY: 0,
+      radiusX: BASELINE_ALIGNMENT_RADIUS,
+      radiusY: BASELINE_ALIGNMENT_RADIUS,
     };
   }
 
   // Different scanners change the paper's overall brightness. Normalize only
   // the light background before comparing dark ink, keeping local pen strokes.
   const brightnessOffset = percentile(blank, 0.82) - percentile(actual, 0.82);
-  const alignment = findBestBaselineAlignment(actual, blank, sampleWidth, sampleHeight, brightnessOffset);
+  const pagePitchX = (actualRect.right - actualRect.left) / sampleWidth;
+  const pagePitchY = (actualRect.bottom - actualRect.top) / sampleHeight;
+  // The reach is set from the page's own pitch, because the registration error
+  // to be absorbed is measured in the page's pixels.
+  const radiusX = alignmentRadius(pagePitchX);
+  const radiusY = alignmentRadius(pagePitchY);
+  const alignment = findBestBaselineAlignment(
+    actual,
+    blank,
+    sampleWidth,
+    sampleHeight,
+    brightnessOffset,
+    radiusX,
+    radiusY,
+  );
   const residual = new Float32Array(sampleWidth * sampleHeight);
   let difference = 0;
   // Totals either side of the subtraction. They change nothing; they are what
@@ -960,8 +979,8 @@ function calculateTemplateInkFeatures(
   let actualTotal = 0;
   let baselineTotal = 0;
 
-  for (let y = 1; y < sampleHeight - 1; y++) {
-    for (let x = 1; x < sampleWidth - 1; x++) {
+  for (let y = radiusY; y < sampleHeight - radiusY; y++) {
+    for (let x = radiusX; x < sampleWidth - radiusX; x++) {
       const index = y * sampleWidth + x;
       const baselineIndex = (y + alignment.y) * sampleWidth + (x + alignment.x);
       const actualInk = darkness(actual[index] + brightnessOffset);
@@ -976,7 +995,9 @@ function calculateTemplateInkFeatures(
     }
   }
 
-  const usablePixels = Math.max((sampleWidth - 2) * (sampleHeight - 2), 1);
+  // Counted, not assumed: a cell inset further contributes fewer samples and
+  // must be divided by fewer, or its score would shrink for no reason.
+  const usablePixels = Math.max((sampleWidth - 2 * radiusX) * (sampleHeight - 2 * radiusY), 1);
   const shape = analyzeResidualShape(residual, sampleWidth, sampleHeight);
   return {
     score: difference / usablePixels,
@@ -986,10 +1007,12 @@ function calculateTemplateInkFeatures(
     brightnessOffset,
     alignX: alignment.x,
     alignY: alignment.y,
-    pagePitchX: (actualRect.right - actualRect.left) / sampleWidth,
-    pagePitchY: (actualRect.bottom - actualRect.top) / sampleHeight,
+    pagePitchX,
+    pagePitchY,
     blankPitchX: (baselineRect.right - baselineRect.left) / sampleWidth,
     blankPitchY: (baselineRect.bottom - baselineRect.top) / sampleHeight,
+    radiusX,
+    radiusY,
   };
 }
 
@@ -1112,27 +1135,77 @@ function sampleRect(
 }
 
 /**
- * How far the baseline may be nudged when it is compared with the page, in
- * samples. Named so the trace can report whether the chosen offset sat on the
- * boundary -- a search that stops at its own edge has not found the best
- * alignment, it has run out of room. The value is unchanged.
+ * How far the baseline may be nudged when it is compared with the page.
+ *
+ * The radius is in resampled samples, but every cell is resampled to the same
+ * fixed grid, so one sample is a different physical distance in a small cell
+ * than in a large one. At a fixed radius of 1 the search reached two source
+ * pixels on a satisfaction cell and under one on a basic-info checkbox, and the
+ * winner sat against the boundary on 69% of all decisions -- 100% of basic
+ * info. The radius is therefore derived per cell from its own sampling pitch,
+ * so every cell gets the same physical reach of about one source pixel: the
+ * reach a search expressed in samples had was an accident of cell size.
+ *
+ * The minimum is 1, which reproduces the previous behaviour exactly for any
+ * cell already sampled at a pitch of one source pixel or coarser. The maximum
+ * bounds both the cost and the freedom: past about a pixel, a mismatch is a
+ * registration failure rather than jitter, and the cell should not be scored on
+ * a guess.
  */
 const BASELINE_ALIGNMENT_RADIUS = 1;
+const BASELINE_ALIGNMENT_MAX_RADIUS = 4;
 
+/**
+ * Samples needed to cover one source pixel, so a cell resampled far above its
+ * own resolution can still be shifted a whole pixel.
+ */
+function alignmentRadius(pitch: number): number {
+  if (!Number.isFinite(pitch) || pitch <= 0) {
+    return BASELINE_ALIGNMENT_RADIUS;
+  }
+  return clamp(Math.round(1 / pitch), BASELINE_ALIGNMENT_RADIUS, BASELINE_ALIGNMENT_MAX_RADIUS);
+}
+
+/**
+ * Finds where the blank form sits against the page.
+ *
+ * The objective is the symmetric absolute difference between the two images,
+ * not the one-sided residual that becomes the score. That is what keeps a wider
+ * search from eating a mark: sliding the blank's ink onto a pen stroke lowers
+ * the difference under the stroke, but it also strips that ink from where it
+ * belongs and plants it where it does not, so mis-registering the print costs
+ * twice over the printed structure -- which carries far more ink than any pen
+ * mark (mean 0.251 against 0.079 on a measured checkbox). The minimum therefore
+ * sits at true print-to-print registration, and widening the window does not
+ * move that minimum, it only lets the search reach it.
+ *
+ * This is the opposite of dilating the blank form, which took this project from
+ * CORRECT 92 to 64: dilation adds ink to the subtrahend, permanently enlarging
+ * what is removed from every cell. A translation adds no ink at all. It only
+ * chooses where the same ink sits.
+ *
+ * The compared region is inset by the radius so that every offset reads real
+ * in-bounds samples and compares exactly the same count. Without that the
+ * offsets near the edge would read past the array, and scoring fewer samples
+ * would look better than scoring more -- driving the search straight to its
+ * own boundary.
+ */
 function findBestBaselineAlignment(
   actual: number[],
   baseline: number[],
   width: number,
   height: number,
   brightnessOffset: number,
+  radiusX: number,
+  radiusY: number,
 ): { x: number; y: number } {
   let best = { x: 0, y: 0, score: Number.POSITIVE_INFINITY };
 
-  for (let offsetY = -BASELINE_ALIGNMENT_RADIUS; offsetY <= BASELINE_ALIGNMENT_RADIUS; offsetY++) {
-    for (let offsetX = -BASELINE_ALIGNMENT_RADIUS; offsetX <= BASELINE_ALIGNMENT_RADIUS; offsetX++) {
+  for (let offsetY = -radiusY; offsetY <= radiusY; offsetY++) {
+    for (let offsetX = -radiusX; offsetX <= radiusX; offsetX++) {
       let score = 0;
-      for (let y = 1; y < height - 1; y++) {
-        for (let x = 1; x < width - 1; x++) {
+      for (let y = radiusY; y < height - radiusY; y++) {
+        for (let x = radiusX; x < width - radiusX; x++) {
           const actualInk = darkness(actual[y * width + x] + brightnessOffset);
           const baselineInk = darkness(baseline[(y + offsetY) * width + (x + offsetX)]);
           score += Math.abs(actualInk - baselineInk);
