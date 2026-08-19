@@ -45,6 +45,8 @@ export default function RecognitionReview({
   currentIndex = 1,
   totalCount = 1,
 }: RecognitionReviewProps) {
+  const [showRoiBoxes, setShowRoiBoxes] = React.useState(false);
+
   const buildManualReviewSource = (field: string) => {
     const priorTrace = draft.source?.recognitionDecisionTrace?.[field];
 
@@ -219,6 +221,29 @@ export default function RecognitionReview({
       : draft.source?.cropDataUrls?.[key] || '';
   };
 
+  const renderRoiBoxToggle = () => (
+    <label
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 6,
+        fontSize: 13,
+        fontWeight: 700,
+        color: 'var(--text-secondary, #555)',
+        cursor: 'pointer',
+        userSelect: 'none',
+      }}
+    >
+      <input
+        type="checkbox"
+        checked={showRoiBoxes}
+        onChange={(e) => setShowRoiBoxes(e.target.checked)}
+        style={{ cursor: 'pointer' }}
+      />
+      인식 영역 상자 표시
+    </label>
+  );
+
   const renderCropSourceBadge = (key: string) => {
     const source = draft.source?.recognitionCropSource?.[key];
     if (!source) return null;
@@ -340,7 +365,13 @@ export default function RecognitionReview({
 
     const url = cropUrl(key);
     const debugUrl = cropUrl(key, true);
-    const inlineUrl = debugUrl || url;
+    // The reviewer's first job is to read what the respondent actually marked,
+    // and the annotated version covers the answer cells with boxes, labels, and
+    // a crosshair. Default to the plain crop and let the header toggle bring the
+    // boxes back when the question is "where did the recognizer look?" instead.
+    // Both crops are already in the response, so neither costs extra payload.
+    const inlineUrl = (showRoiBoxes ? debugUrl : url) || debugUrl || url;
+    const roiUrl = debugUrl || url;
     if (!inlineUrl) return null;
 
     return (
@@ -374,10 +405,10 @@ export default function RecognitionReview({
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginTop: 5 }}>
           {renderCropSourceBadge(key)}
           <a
-            href={inlineUrl}
+            href={roiUrl}
             target="_blank"
             rel="noreferrer"
-            onClick={(e) => openDataUrlInNewTab(e, inlineUrl)}
+            onClick={(e) => openDataUrlInNewTab(e, roiUrl)}
             style={{
               color: 'var(--brand-primary-active)',
               fontSize: 12,
@@ -625,9 +656,12 @@ export default function RecognitionReview({
             {currentIndex} / {totalCount}번째 학생 데이터입니다. 저장 전 값을 확인해주세요.
           </p>
         </div>
-        <button className="btn-secondary" type="button" onClick={onReset}>
-          검수 취소
-        </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+          {renderRoiBoxToggle()}
+          <button className="btn-secondary" type="button" onClick={onReset}>
+            검수 취소
+          </button>
+        </div>
       </div>
 
       {attentionFields.length > 0 && (
