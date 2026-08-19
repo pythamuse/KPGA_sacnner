@@ -330,6 +330,134 @@ export function calculateCheckboxInteriorDifference(
   return difference / (width * height);
 }
 
+/**
+ * Where a scoring window sits relative to the printed box it is supposed to
+ * cover, measured on the scanned page alone. Measurement only: nothing here
+ * feeds a decision, it exists so the placement can be read off real scans
+ * instead of inferred from a downscaled blank asset.
+ *
+ * A window placed on its box has the printed outline around its rim, no ink
+ * reaching far past any edge, and an ink centroid near its own centre. A
+ * window placed off its box has the outline running through the middle, ink
+ * continuing well past one edge, and a centroid pulled that way.
+ */
+export interface BasicCheckboxPlacement {
+  /** Dark-ink centroid inside the window, relative to the window centre, in pixels. */
+  inkX: number;
+  inkY: number;
+  /** How far dark ink connected to the window's own ink continues past each edge, in pixels. */
+  extendLeft: number;
+  extendRight: number;
+  extendTop: number;
+  extendBottom: number;
+  /** Share of the window's dark pixels lying in its central half, as a percentage. */
+  corePercent: number;
+  /** Dark pixels inside the window, so a percentage of almost nothing is recognisable as such. */
+  darkCount: number;
+}
+
+export function measureBasicCheckboxPlacement(
+  image: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>,
+  window: PixelRect,
+): BasicCheckboxPlacement {
+  const width = Math.max(1, window.right - window.left);
+  const height = Math.max(1, window.bottom - window.top);
+  const coreLeft = window.left + width * 0.25;
+  const coreRight = window.right - width * 0.25;
+  const coreTop = window.top + height * 0.25;
+  const coreBottom = window.bottom - height * 0.25;
+  let darkCount = 0;
+  let coreCount = 0;
+  let sumX = 0;
+  let sumY = 0;
+
+  for (let y = window.top; y < window.bottom; y += 1) {
+    if (y < 0 || y >= image.height) continue;
+    for (let x = window.left; x < window.right; x += 1) {
+      if (x < 0 || x >= image.width) continue;
+      if (image.pixels[y * image.width + x] >= DARK_THRESHOLD) continue;
+      darkCount += 1;
+      sumX += x + 0.5;
+      sumY += y + 0.5;
+      if (x + 0.5 >= coreLeft && x + 0.5 < coreRight && y + 0.5 >= coreTop && y + 0.5 < coreBottom) {
+        coreCount += 1;
+      }
+    }
+  }
+
+  const inkBounds = findWindowInkBounds(image, window, Math.max(width, height));
+  return {
+    inkX: darkCount > 0 ? sumX / darkCount - (window.left + window.right) / 2 : 0,
+    inkY: darkCount > 0 ? sumY / darkCount - (window.top + window.bottom) / 2 : 0,
+    extendLeft: inkBounds ? Math.max(0, window.left - inkBounds.left) : 0,
+    extendRight: inkBounds ? Math.max(0, inkBounds.right - window.right) : 0,
+    extendTop: inkBounds ? Math.max(0, window.top - inkBounds.top) : 0,
+    extendBottom: inkBounds ? Math.max(0, inkBounds.bottom - window.bottom) : 0,
+    corePercent: darkCount > 0 ? Math.round((coreCount / darkCount) * 100) : 0,
+    darkCount,
+  };
+}
+
+/**
+ * Bounding box of the ink that is 8-connected to any dark pixel inside the
+ * window, searched no further than one window away on each side. A printed
+ * outline the window only partly covers reaches past the edge it overhangs.
+ */
+function findWindowInkBounds(
+  image: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>,
+  window: PixelRect,
+  margin: number,
+): PixelRect | undefined {
+  const left = clamp(window.left - margin, 0, image.width - 1);
+  const right = clamp(window.right + margin, left + 1, image.width);
+  const top = clamp(window.top - margin, 0, image.height - 1);
+  const bottom = clamp(window.bottom + margin, top + 1, image.height);
+  const bandWidth = right - left;
+  const bandHeight = bottom - top;
+  const visited = new Uint8Array(bandWidth * bandHeight);
+  const queue: number[] = [];
+  const isDark = (x: number, y: number) => image.pixels[y * image.width + x] < DARK_THRESHOLD;
+
+  for (let y = Math.max(top, window.top); y < Math.min(bottom, window.bottom); y += 1) {
+    for (let x = Math.max(left, window.left); x < Math.min(right, window.right); x += 1) {
+      const index = (y - top) * bandWidth + (x - left);
+      if (visited[index] || !isDark(x, y)) continue;
+      visited[index] = 1;
+      queue.push(index);
+    }
+  }
+  if (queue.length === 0) {
+    return undefined;
+  }
+
+  let minX = right;
+  let maxX = left;
+  let minY = bottom;
+  let maxY = top;
+  while (queue.length > 0) {
+    const current = queue.pop()!;
+    const currentX = left + (current % bandWidth);
+    const currentY = top + Math.floor(current / bandWidth);
+    minX = Math.min(minX, currentX);
+    maxX = Math.max(maxX, currentX);
+    minY = Math.min(minY, currentY);
+    maxY = Math.max(maxY, currentY);
+    for (let offsetY = -1; offsetY <= 1; offsetY += 1) {
+      for (let offsetX = -1; offsetX <= 1; offsetX += 1) {
+        const nextX = currentX + offsetX;
+        const nextY = currentY + offsetY;
+        if (nextX < left || nextX >= right || nextY < top || nextY >= bottom) continue;
+        const next = (nextY - top) * bandWidth + (nextX - left);
+        if (visited[next] || !isDark(nextX, nextY)) continue;
+        visited[next] = 1;
+        queue.push(next);
+      }
+    }
+  }
+
+  return { left: minX, top: minY, right: maxX + 1, bottom: maxY + 1 };
+}
+
 function insetRect(rect: PixelRect, inset: number): PixelRect {
   const left = Math.min(rect.left + inset, rect.right - 1);
   const top = Math.min(rect.top + inset, rect.bottom - 1);
