@@ -589,18 +589,45 @@ export function getRegistrationBounds(
 export function hasUsableFormBounds(
   image: Pick<ImageAnalysisData, 'width' | 'height' | 'contentBounds' | 'contentBoundsSource' | 'pageBounds'>,
 ): boolean {
+  return resolveFormBoundsStatus(image).usable;
+}
+
+/**
+ * The safety precondition, with the clause that decided it.
+ *
+ * `hasUsableFormBounds` returns this verdict and nothing else, so the reason
+ * reported can never drift from the reason applied -- there is one evaluation,
+ * not an explanation written alongside it.
+ *
+ * This matters because the caller ands this together with grid verification
+ * before handing the result to `analyzeChoiceGroup`, which sees only the
+ * conjunction. A group refused on the combined precondition cannot say which
+ * half refused it unless this one is re-checked, and the two halves live in
+ * different files and want different fixes.
+ */
+function resolveFormBoundsStatus(
+  image: Pick<ImageAnalysisData, 'width' | 'height' | 'contentBounds' | 'contentBoundsSource' | 'pageBounds'>,
+): { usable: boolean; reason: string } {
   if (image.contentBoundsSource === 'dark') {
-    return false;
+    return { usable: false, reason: 'dark-bounds-only' };
   }
 
   const bounds = image.contentBounds;
   if (!bounds) {
-    return false;
+    return { usable: false, reason: 'no-content-bounds' };
   }
 
   const documentBounds = image.pageBounds || bounds;
   if (!isPlausiblePaperBounds(image, documentBounds)) {
-    return false;
+    const w = (documentBounds.right - documentBounds.left) / image.width;
+    const h = (documentBounds.bottom - documentBounds.top) / image.height;
+    const ar = (documentBounds.bottom - documentBounds.top)
+      / Math.max(documentBounds.right - documentBounds.left, 1);
+    return {
+      usable: false,
+      reason: `implausible-paper(w=${w.toFixed(3)}/0.550 h=${h.toFixed(3)}/0.620`
+        + ` ar=${ar.toFixed(3)}/[1.05,1.90])`,
+    };
   }
 
   // For a detected page, the content frame is intentionally inset from all
@@ -608,23 +635,47 @@ export function hasUsableFormBounds(
   // bounds, then ensure the inner template frame remains plausibly large and
   // contained. Older callers without a page keep the legacy edge checks.
   if (image.pageBounds) {
-    return isPlausibleTemplateContentBounds(image.pageBounds, bounds);
+    const page = image.pageBounds;
+    if (isPlausibleTemplateContentBounds(page, bounds)) {
+      return { usable: true, reason: 'ok' };
+    }
+    const cw = (bounds.right - bounds.left) / Math.max(page.right - page.left, 1);
+    const ch = (bounds.bottom - bounds.top) / Math.max(page.bottom - page.top, 1);
+    const ar = (bounds.bottom - bounds.top) / Math.max(bounds.right - bounds.left, 1);
+    const inside = bounds.left >= page.left && bounds.top >= page.top
+      && bounds.right <= page.right && bounds.bottom <= page.bottom;
+    return {
+      usable: false,
+      reason: `implausible-content(inside=${inside ? 1 : 0} w=${cw.toFixed(3)}/0.550`
+        + ` h=${ch.toFixed(3)}/0.550 ar=${ar.toFixed(3)}/[1.05,1.95])`,
+    };
   }
 
   const width = bounds.right - bounds.left;
   const height = bounds.bottom - bounds.top;
   const aspectRatio = height / width;
 
-  return (
-    width >= image.width * 0.72 &&
-    height >= image.height * 0.78 &&
-    bounds.left <= image.width * 0.16 &&
-    bounds.right >= image.width * 0.84 &&
-    bounds.top <= image.height * 0.16 &&
-    bounds.bottom >= image.height * 0.84 &&
-    aspectRatio >= 1.05 &&
-    aspectRatio <= 1.9
-  );
+  const usable = width >= image.width * 0.72
+    && height >= image.height * 0.78
+    && bounds.left <= image.width * 0.16
+    && bounds.right >= image.width * 0.84
+    && bounds.top <= image.height * 0.16
+    && bounds.bottom >= image.height * 0.84
+    && aspectRatio >= 1.05
+    && aspectRatio <= 1.9;
+
+  return {
+    usable,
+    reason: usable
+      ? 'ok-legacy'
+      : `legacy-edges(w=${(width / image.width).toFixed(3)}/0.720`
+        + ` h=${(height / image.height).toFixed(3)}/0.780`
+        + ` l=${(bounds.left / image.width).toFixed(3)}/0.160`
+        + ` r=${(bounds.right / image.width).toFixed(3)}/0.840`
+        + ` t=${(bounds.top / image.height).toFixed(3)}/0.160`
+        + ` b=${(bounds.bottom / image.height).toFixed(3)}/0.840`
+        + ` ar=${aspectRatio.toFixed(3)}/[1.05,1.90])`,
+  };
 }
 
 function isPlausibleTemplateContentBounds(pageBounds: PixelBounds, contentBounds: PixelBounds): boolean {
@@ -930,11 +981,21 @@ export function analyzeChoiceGroup(
   evidence.mediumGapThreshold = mediumGapThreshold;
 
   if (!allowAutoValue) {
+    // The caller ands two independent preconditions together and passes only
+    // the conjunction, so this branch used to report `form-boundary-unverified`
+    // for either of them. Re-checking the half that lives in this file
+    // separates them: if the form bounds are usable, the grid is what refused,
+    // and that is a different file and a different fix.
+    const formBounds = resolveFormBoundsStatus(image);
     return {
       field: group.field,
       confidence: 'low',
       candidates,
-      decision: describeDecision(evidence, 'low', ['form-boundary-unverified']),
+      decision: describeDecision(
+        evidence,
+        'low',
+        [formBounds.usable ? 'grid-unverified' : `form-bounds:${formBounds.reason}`],
+      ),
     };
   }
 
