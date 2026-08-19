@@ -94,10 +94,23 @@ interface TemplateInkFeatures extends TemplateInkShape {
   stepsY: number;
   /** Mean disagreement per sample once the baseline was placed. */
   fit: number;
+  /** Brightness-reference alternatives, measured only while tracing. */
+  brightnessProbe?: BrightnessReferenceProbe;
+  /** The inset 8x8 residual used by the direct checkbox gate, measured only while tracing. */
+  insetSignal?: number;
   /** Where a much wider search would have gone. Only measured while tracing. */
   probe?: { x: number; y: number; fit: number; chosenFit: number; radius: number };
   /** What the leftover disagreement is made of. Only measured while tracing. */
   composition?: ResidualComposition;
+}
+
+interface BrightnessReferenceProbe {
+  actualP82: number;
+  blankP82: number;
+  actualP95: number;
+  blankP95: number;
+  offset95: number;
+  score95: number;
 }
 
 interface ScoredCandidate extends CandidateScore {
@@ -825,6 +838,14 @@ function describeDecision(evidence: DecisionEvidence, outcome: string, refused: 
       return `${candidate.position}@${candidate.atX.toFixed(2)}:scr=${candidate.score.toFixed(3)}`
         + ` page=${features.actualInk.toFixed(3)} blank=${features.baselineInk.toFixed(3)}`
         + ` shift=${features.brightnessOffset.toFixed(0)}`
+        + (features.brightnessProbe
+          ? ` ref82=${features.brightnessProbe.actualP82.toFixed(0)},${features.brightnessProbe.blankP82.toFixed(0)}`
+            + ` ref95=${features.brightnessProbe.actualP95.toFixed(0)},${features.brightnessProbe.blankP95.toFixed(0)}`
+            + ` alt95=${features.brightnessProbe.offset95.toFixed(0)},${features.brightnessProbe.score95.toFixed(4)}`
+          : '')
+        + (features.insetSignal !== undefined
+          ? ` inner=${features.insetSignal.toFixed(3)}`
+          : '')
         + ` align=${features.alignX.toFixed(2)},${features.alignY.toFixed(2)}${pinned ? '!' : ''}`
         + ` steps=${features.stepsX},${features.stepsY}`
         + ` fit=${features.fit.toFixed(4)}${wanted}${made}`;
@@ -1183,6 +1204,21 @@ function calculateTemplateInkFeatures(
     stepsX,
     stepsY,
     fit: alignment.fit,
+    brightnessProbe: isTracing()
+      ? measureBrightnessReference(
+        actual,
+        blank,
+        sampleWidth,
+        sampleHeight,
+        radiusX,
+        radiusY,
+        stepsX,
+        stepsY,
+      )
+      : undefined,
+    insetSignal: isTracing()
+      ? calculateInsetResidualSignal(image, actualRect, baseline, baselineRect)
+      : undefined,
     probe: isTracing()
       ? probeAlignment(actual, blank, sampleWidth, sampleHeight, brightnessOffset, alignment.x, alignment.y)
       : undefined,
@@ -1200,6 +1236,110 @@ function calculateTemplateInkFeatures(
       )
       : undefined,
   };
+}
+
+/**
+ * Measures whether the local 82nd-percentile paper reference is being moved by
+ * a dark mark. The 95th-percentile offset is a diagnostic comparison only; it
+ * never changes the score or any gate.
+ */
+function measureBrightnessReference(
+  actual: number[],
+  blank: number[],
+  width: number,
+  height: number,
+  radiusX: number,
+  radiusY: number,
+  stepsX: number,
+  stepsY: number,
+): BrightnessReferenceProbe {
+  const actualP82 = percentile(actual, 0.82);
+  const blankP82 = percentile(blank, 0.82);
+  const actualP95 = percentile(actual, 0.95);
+  const blankP95 = percentile(blank, 0.95);
+  const offset95 = blankP95 - actualP95;
+  const alignment95 = findBestBaselineAlignment(
+    actual,
+    blank,
+    width,
+    height,
+    offset95,
+    radiusX,
+    radiusY,
+    stepsX,
+    stepsY,
+  );
+  let difference = 0;
+  for (let y = radiusY; y < height - radiusY; y++) {
+    for (let x = radiusX; x < width - radiusX; x++) {
+      const actualInk = darkness(actual[y * width + x] + offset95);
+      const baselineInk = darkness(
+        sampleGridAt(blank, width, height, x + alignment95.x, y + alignment95.y),
+      );
+      difference += Math.max(0, actualInk - baselineInk - 0.08);
+    }
+  }
+  const usablePixels = Math.max((width - 2 * radiusX) * (height - 2 * radiusY), 1);
+  return {
+    actualP82,
+    blankP82,
+    actualP95,
+    blankP95,
+    offset95,
+    score95: difference / usablePixels,
+  };
+}
+
+/**
+ * Mirrors the direct checkbox gate's 3px/4px inset and 8x8 sampling as
+ * measurement. It is intentionally separate from the full-box scorer and is
+ * never used to alter a candidate score or decision.
+ */
+function calculateInsetResidualSignal(
+  image: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>,
+  actualRect: PixelRect,
+  baseline: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>,
+  baselineRect: PixelRect,
+): number {
+  const actual = insetPixelRect(actualRect, 3);
+  const blank = insetPixelRect(baselineRect, 4);
+  let difference = 0;
+  for (let y = 0; y < 8; y++) {
+    for (let x = 0; x < 8; x++) {
+      const actualX = clamp(
+        Math.round(actual.left + (x + 0.5) * (actual.right - actual.left) / 8),
+        0,
+        image.width - 1,
+      );
+      const actualY = clamp(
+        Math.round(actual.top + (y + 0.5) * (actual.bottom - actual.top) / 8),
+        0,
+        image.height - 1,
+      );
+      const blankX = clamp(
+        Math.round(blank.left + (x + 0.5) * (blank.right - blank.left) / 8),
+        0,
+        baseline.width - 1,
+      );
+      const blankY = clamp(
+        Math.round(blank.top + (y + 0.5) * (blank.bottom - blank.top) / 8),
+        0,
+        baseline.height - 1,
+      );
+      const actualInk = darkness(image.pixels[actualY * image.width + actualX]);
+      const blankInk = darkness(baseline.pixels[blankY * baseline.width + blankX]);
+      difference += Math.max(0, actualInk - blankInk - 0.08);
+    }
+  }
+  return difference / 64;
+}
+
+function insetPixelRect(rect: PixelRect, inset: number): PixelRect {
+  const left = Math.min(rect.left + inset, rect.right - 1);
+  const top = Math.min(rect.top + inset, rect.bottom - 1);
+  const right = Math.max(left + 1, rect.right - inset);
+  const bottom = Math.max(top + 1, rect.bottom - inset);
+  return { left, top, right, bottom };
 }
 
 function hasStructuredTemplateMark(shape?: TemplateInkShape): boolean {
