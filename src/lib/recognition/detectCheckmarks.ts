@@ -21,7 +21,6 @@ import {
 } from './tableGridDetection';
 import {
   matchBasicCheckboxes,
-  calculateCheckboxInteriorDifference,
   normalizeBasicCheckboxRects,
   type BasicCheckboxGridDetection,
 } from './basicCheckboxDetection';
@@ -646,6 +645,13 @@ function mergeBasicCheckboxDetection(
   };
 }
 
+/**
+ * Still requires that exactly one option box carry a mark, which is what stops
+ * a form answered twice from being filled in automatically. What changed is
+ * what counts as a mark: "the box holds ink" cannot tell a hand mark from the
+ * box's own printed border, so on a real raster both options read as inked and
+ * every basic-information field fell to manual entry.
+ */
 function hasUniqueDirectCheckboxEvidence(
   image: ImageAnalysisData,
   baselineImage: ImageAnalysisData,
@@ -657,17 +663,271 @@ function hasUniqueDirectCheckboxEvidence(
   if (value === undefined || actualRects.length !== group.candidates.length || baselineRects.length !== group.candidates.length) {
     return false;
   }
-  const signals = actualRects.map((rect, index) => calculateCheckboxInteriorDifference(
-    image,
-    rect,
-    baselineImage,
-    baselineRects[index],
-  ));
-  const markedIndexes = signals
-    .map((signal, index) => signal > 0 ? index : -1)
+  // The blank form's boxes are raw connected components, so their widths and
+  // heights vary by a pixel or two. Restoring the canonical box shape puts the
+  // two windows over the same part of the same printed box.
+  const blankRects = normalizeBasicCheckboxRects(baselineImage, baselineRects);
+  const markedIndexes = actualRects
+    .map((rect, index) => hasHandDrawnCheckboxMark(image, rect, baselineImage, blankRects[index]) ? index : -1)
     .filter((index) => index >= 0);
   const valueIndex = group.candidates.findIndex((candidate) => candidate.value === value);
   return markedIndexes.length === 1 && markedIndexes[0] === valueIndex;
+}
+
+/**
+ * How far outside the box the comparison window reaches, as a fraction of the
+ * box. Wide enough that the printed box is still inside the window when the
+ * detector's centre is off by a pixel or two, narrow enough to exclude the
+ * neighbouring option and its printed label.
+ */
+const CHECKBOX_WINDOW_MARGIN = 0.25;
+/**
+ * Cells across that window. At the raster the browser uploads a basic-info box
+ * is about 12px, so this is close to one cell per pixel; every other constant
+ * here is a fraction of the box, which keeps the test the same shape at any
+ * upload resolution.
+ */
+const CHECKBOX_SAMPLE_CELLS = 18;
+/** Registration freedom, in cells, between the scan and the blank form. */
+const CHECKBOX_ALIGNMENT_CELLS = 2;
+/** Slack around printed ink that absorbs the sub-pixel part of that registration. */
+const CHECKBOX_PRINT_DILATION = 1;
+/** Anti-aliasing and scanner-noise band, matching the scorer's own tolerance. */
+const CHECKBOX_INK_TOLERANCE = 0.08;
+/** A stroke has to cover this fraction of the box's area to count as a mark. */
+const CHECKBOX_MARK_AREA_RATIO = 0.07;
+/** ...and to span this fraction of the box in both directions. */
+const CHECKBOX_MARK_EXTENT_RATIO = 0.25;
+
+/**
+ * True when the box holds ink that the blank form does not have there: a
+ * connected stroke, clear of the printed outline, that runs across the box in
+ * both directions.
+ *
+ * A check drawn inside an empty printed box necessarily leaves ink where the
+ * blank form had none, which is the property this relies on. It is not shared
+ * by the circles drawn around printed words elsewhere on these forms, so this
+ * test stays where that asymmetry holds — the direct checkbox path.
+ *
+ * The border cannot impersonate that. Registration error moves the printed
+ * outline by a fraction of a pixel, which survives as a sliver one or two
+ * cells thick lying along the outline; excluding ink next to printed ink drops
+ * most of it, and what is left cannot span the box in both directions.
+ */
+function hasHandDrawnCheckboxMark(
+  image: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>,
+  actualRect: PixelRect,
+  baseline: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>,
+  baselineRect: PixelRect,
+): boolean {
+  const cells = CHECKBOX_SAMPLE_CELLS;
+  const search = CHECKBOX_ALIGNMENT_CELLS;
+  const blankCells = cells + 2 * search;
+  // The blank window carries the search range as extra margin so that every
+  // offset has a counterpart, and both windows keep the same cell pitch.
+  const blankMargin = CHECKBOX_WINDOW_MARGIN
+    + (search / cells) * (1 + 2 * CHECKBOX_WINDOW_MARGIN);
+  const actual = sampleCheckboxWindow(image, inflateRect(actualRect, CHECKBOX_WINDOW_MARGIN), cells);
+  const blank = sampleCheckboxWindowDarkest(baseline, inflateRect(baselineRect, blankMargin), blankCells);
+
+  // Scanners shift the paper's overall brightness. Read the reference off the
+  // same physical extent in both windows, or the wider blank window reads as
+  // lighter paper and the comparison drifts.
+  const blankCore = new Float32Array(cells * cells);
+  for (let y = 0; y < cells; y += 1) {
+    for (let x = 0; x < cells; x += 1) {
+      blankCore[y * cells + x] = blank[(y + search) * blankCells + (x + search)];
+    }
+  }
+  const brightnessOffset = brightPercentile(blankCore) - brightPercentile(actual);
+
+  let bestX = search;
+  let bestY = search;
+  let bestCost = Number.POSITIVE_INFINITY;
+  for (let offsetY = 0; offsetY <= 2 * search; offsetY += 1) {
+    for (let offsetX = 0; offsetX <= 2 * search; offsetX += 1) {
+      let cost = 0;
+      for (let y = 0; y < cells; y += 1) {
+        for (let x = 0; x < cells; x += 1) {
+          const actualInk = inkDarkness(actual[y * cells + x] + brightnessOffset);
+          const blankInk = inkDarkness(blank[(y + offsetY) * blankCells + (x + offsetX)]);
+          cost += Math.abs(actualInk - blankInk);
+        }
+      }
+      if (cost < bestCost) {
+        bestCost = cost;
+        bestX = offsetX;
+        bestY = offsetY;
+      }
+    }
+  }
+
+  const residual = new Uint8Array(cells * cells);
+  for (let y = 0; y < cells; y += 1) {
+    for (let x = 0; x < cells; x += 1) {
+      const blankX = x + bestX;
+      const blankY = y + bestY;
+      if (isNearPrintedInk(blank, blankCells, blankX, blankY)) continue;
+      const actualInk = inkDarkness(actual[y * cells + x] + brightnessOffset);
+      const blankInk = inkDarkness(blank[blankY * blankCells + blankX]);
+      if (actualInk - blankInk > CHECKBOX_INK_TOLERANCE) {
+        residual[y * cells + x] = 1;
+      }
+    }
+  }
+
+  const boxCells = cells / (1 + 2 * CHECKBOX_WINDOW_MARGIN);
+  const minimumArea = Math.max(1, Math.round(CHECKBOX_MARK_AREA_RATIO * boxCells * boxCells));
+  const minimumExtent = Math.max(1, Math.round(CHECKBOX_MARK_EXTENT_RATIO * boxCells));
+  return hasStrokeComponent(residual, cells, minimumArea, minimumExtent);
+}
+
+function isNearPrintedInk(
+  blank: Float32Array,
+  blankCells: number,
+  x: number,
+  y: number,
+): boolean {
+  for (let offsetY = -CHECKBOX_PRINT_DILATION; offsetY <= CHECKBOX_PRINT_DILATION; offsetY += 1) {
+    for (let offsetX = -CHECKBOX_PRINT_DILATION; offsetX <= CHECKBOX_PRINT_DILATION; offsetX += 1) {
+      const sampleY = y + offsetY;
+      const sampleX = x + offsetX;
+      if (sampleY < 0 || sampleX < 0 || sampleY >= blankCells || sampleX >= blankCells) continue;
+      if (inkDarkness(blank[sampleY * blankCells + sampleX]) > CHECKBOX_INK_TOLERANCE) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * A pen stroke is connected and runs across the box; what a mis-registered
+ * printed edge leaves behind is a line one or two cells thick, and what the
+ * codec leaves behind is a speck. Both tests have to hold.
+ */
+function hasStrokeComponent(
+  residual: Uint8Array,
+  cells: number,
+  minimumArea: number,
+  minimumExtent: number,
+): boolean {
+  const visited = new Uint8Array(residual.length);
+  for (let start = 0; start < residual.length; start += 1) {
+    if (!residual[start] || visited[start]) continue;
+    const queue = [start];
+    visited[start] = 1;
+    let size = 0;
+    let minX = cells;
+    let maxX = -1;
+    let minY = cells;
+    let maxY = -1;
+    while (queue.length > 0) {
+      const current = queue.pop()!;
+      const currentX = current % cells;
+      const currentY = Math.floor(current / cells);
+      size += 1;
+      minX = Math.min(minX, currentX);
+      maxX = Math.max(maxX, currentX);
+      minY = Math.min(minY, currentY);
+      maxY = Math.max(maxY, currentY);
+      for (let offsetY = -1; offsetY <= 1; offsetY += 1) {
+        for (let offsetX = -1; offsetX <= 1; offsetX += 1) {
+          const neighborX = currentX + offsetX;
+          const neighborY = currentY + offsetY;
+          if (neighborX < 0 || neighborY < 0 || neighborX >= cells || neighborY >= cells) continue;
+          const neighbor = neighborY * cells + neighborX;
+          if (visited[neighbor] || !residual[neighbor]) continue;
+          visited[neighbor] = 1;
+          queue.push(neighbor);
+        }
+      }
+    }
+    if (
+      size >= minimumArea
+      && maxX - minX + 1 >= minimumExtent
+      && maxY - minY + 1 >= minimumExtent
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function inflateRect(rect: PixelRect, ratio: number): PixelRect {
+  const width = rect.right - rect.left;
+  const height = rect.bottom - rect.top;
+  return {
+    left: rect.left - width * ratio,
+    top: rect.top - height * ratio,
+    right: rect.right + width * ratio,
+    bottom: rect.bottom + height * ratio,
+  };
+}
+
+/** Nearest source pixel, as everywhere else in the mark path. */
+function sampleCheckboxWindow(
+  image: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>,
+  rect: PixelRect,
+  cells: number,
+): Float32Array {
+  const width = rect.right - rect.left;
+  const height = rect.bottom - rect.top;
+  const samples = new Float32Array(cells * cells);
+  for (let y = 0; y < cells; y += 1) {
+    const sourceY = clampPixel(Math.round(rect.top + ((y + 0.5) / cells) * height - 0.5), 0, image.height - 1);
+    for (let x = 0; x < cells; x += 1) {
+      const sourceX = clampPixel(Math.round(rect.left + ((x + 0.5) / cells) * width - 0.5), 0, image.width - 1);
+      samples[y * cells + x] = image.pixels[sourceY * image.width + sourceX];
+    }
+  }
+  return samples;
+}
+
+/**
+ * The committed blank form is rendered at roughly twice the raster the browser
+ * uploads, so a single nearest-point sample can fall between two printed
+ * strokes and report paper where the scan shows a broad grey line. Keeping the
+ * darkest source pixel under each cell means no printed stroke can go missing
+ * from the reference and then be counted as a hand mark.
+ */
+function sampleCheckboxWindowDarkest(
+  image: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>,
+  rect: PixelRect,
+  cells: number,
+): Float32Array {
+  const width = rect.right - rect.left;
+  const height = rect.bottom - rect.top;
+  const samples = new Float32Array(cells * cells);
+  for (let y = 0; y < cells; y += 1) {
+    const top = Math.round(rect.top + (y / cells) * height);
+    const bottom = Math.max(top + 1, Math.round(rect.top + ((y + 1) / cells) * height));
+    for (let x = 0; x < cells; x += 1) {
+      const left = Math.round(rect.left + (x / cells) * width);
+      const right = Math.max(left + 1, Math.round(rect.left + ((x + 1) / cells) * width));
+      let darkest = 255;
+      for (let sourceY = top; sourceY < bottom; sourceY += 1) {
+        if (sourceY < 0 || sourceY >= image.height) continue;
+        for (let sourceX = left; sourceX < right; sourceX += 1) {
+          if (sourceX < 0 || sourceX >= image.width) continue;
+          const value = image.pixels[sourceY * image.width + sourceX];
+          if (value < darkest) darkest = value;
+        }
+      }
+      samples[y * cells + x] = darkest;
+    }
+  }
+  return samples;
+}
+
+function inkDarkness(value: number): number {
+  return Math.max(0, Math.min(1, (178 - value) / 178));
+}
+
+/** Paper brightness reference, taken above any plausible ink coverage. */
+function brightPercentile(values: Float32Array): number {
+  const sorted = Array.from(values).sort((first, second) => first - second);
+  return sorted[Math.min(sorted.length - 1, Math.max(0, Math.round((sorted.length - 1) * 0.9)))];
 }
 
 /**
