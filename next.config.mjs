@@ -26,8 +26,14 @@ const CONTENT_SECURITY_POLICY = [
   "worker-src 'self' blob:",
   "connect-src 'self' data: blob: https://cdnjs.cloudflare.com https://unpkg.com https://docs.opencv.org",
   "img-src 'self' data: blob:",
-  "style-src 'self' 'unsafe-inline'",
-  "font-src 'self' data:",
+  // globals.css opens with an @import of Noto Sans KR from Google Fonts, and
+  // without these two the browser blocks it and every Korean glyph on the page
+  // falls back to a system face. The stylesheet comes from fonts.googleapis.com
+  // and the font files it names come from fonts.gstatic.com, so both are
+  // needed. Neither is a connect-src origin, so this does not widen the path an
+  // injected script could ship the cached batch through.
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+  "font-src 'self' data: https://fonts.gstatic.com",
   "object-src 'none'",
   "base-uri 'self'",
   "form-action 'self'",

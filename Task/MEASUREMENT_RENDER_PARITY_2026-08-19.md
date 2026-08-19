@@ -560,3 +560,46 @@ mcp preview_start (name=gambling-prevention-app, npm run dev, :3000)
 
 - 6페이지 브라우저 실측을 정답표와 대조해 노드 계측기 `108/135`와의 격차를 측정
 - 몇 페이지부터 관측 1이 발생하는지 이분 탐색
+
+### 정정 — "배치 모드가 멈춘다"는 내 진단이 틀렸다
+
+위 관측 1·2의 원인은 **제품이 아니라 자동화 방식**이었다.
+
+```
+document.visibilityState          "hidden"
+requestAnimationFrame 2.5초 내 발화   false
+```
+
+**숨겨진 탭에서는 `requestAnimationFrame`이 발화하지 않는다.** pdf.js의 `page.render()`는 rAF로 이어달리기를 하므로 **영원히 resolve되지 않는다.** 브라우저 창이 최소화되어 있거나 다른 탭이 활성인 동안 자동화로 구동했기 때문이다.
+
+결정적 반증: **pdf-lib으로 만든 200×200 빈 PDF도 똑같이 멈춘다.** 스캔 내용도, 파일 크기도, JBIG2도, CSP도 원인이 아니다.
+
+기각한 가설을 기록해둔다.
+
+| 가설 | 결과 |
+|---|---|
+| CSP `worker-src`가 cdnjs 워커를 막는다 | **기각.** 워커 정상, `getDocument` 30ms에 완료 |
+| `wasmUrl` 미설정으로 JBIG2 디코더가 못 뜬다 | **기각.** 설정해도 동일하게 멈춤 |
+| `render()`에 `canvas`를 안 넘겨서다 | **기각.** 넘겨도 동일 |
+| 스캔 PDF 내용·용량 문제다 | **기각.** 빈 PDF도 멈춤 |
+| 배치 모드가 제품으로 성립하지 않는다 | **기각.** 위 전부의 귀결 |
+
+**브라우저 자동 측정에는 보이는 창이 필요하다.** 이것이 이 경로의 실질 제약이다.
+
+### 그 과정에서 실제로 잡은 버그 — 한글 폰트가 CSP에 막혀 있었다
+
+```
+Loading the stylesheet 'https://fonts.googleapis.com/css2?family=Noto+Sans+KR:...'
+violates the following Content Security Policy directive: "style-src 'self' 'unsafe-inline'".
+```
+
+`globals.css` 첫 줄이 Google Fonts에서 Noto Sans KR을 `@import` 하는데, 보안 헤더 작업(2026-08-19)에서 내가 넣은 `style-src`가 그것을 막고 있었다. **그날 이후 모든 화면의 한글이 시스템 대체 폰트로 렌더링되고 있었다.**
+
+`style-src`에 `https://fonts.googleapis.com`, `font-src`에 `https://fonts.gstatic.com`을 추가해 해결. 검증:
+
+```
+수정 전  스타일시트 차단, 등록된 Noto 페이스 0
+수정 후  등록 620, 실제 로드 39
+```
+
+두 origin 모두 `connect-src`에 들어가지 않으므로 **주입된 스크립트가 캐시된 배치를 실어 나갈 경로는 넓어지지 않는다.**
