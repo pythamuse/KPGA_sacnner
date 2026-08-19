@@ -93,6 +93,8 @@ interface TemplateInkFeatures extends TemplateInkShape {
   fit: number;
   /** Where a much wider search would have gone. Only measured while tracing. */
   probe?: { x: number; y: number; fit: number; chosenFit: number; radius: number };
+  /** What the leftover disagreement is made of. Only measured while tracing. */
+  composition?: ResidualComposition;
 }
 
 interface ScoredCandidate extends CandidateScore {
@@ -808,11 +810,19 @@ function describeDecision(evidence: DecisionEvidence, outcome: string, refused: 
           + `${Math.abs(probe.x) >= probe.radius || Math.abs(probe.y) >= probe.radius ? '!' : ''}`
           + `/${probe.radius} gain=${(probe.chosenFit - probe.fit).toFixed(4)}`
         : '';
+      // What the leftover disagreement is made of, when it was measured.
+      const c = features.composition;
+      const made = c
+        ? ` edge=${c.edgeShare.toFixed(2)}/${c.edgeFraction.toFixed(2)}`
+          + ` bal=${c.edgeBalance.toFixed(2)}`
+          + ` sharp=${c.pageSharpness.toFixed(3)},${c.blankSharpness.toFixed(3)}`
+          + ` soft=${c.fitSoftBlank.toFixed(4)},${c.fitSoftBoth.toFixed(4)}`
+        : '';
       return `${candidate.position}@${candidate.atX.toFixed(2)}:scr=${candidate.score.toFixed(3)}`
         + ` page=${features.actualInk.toFixed(3)} blank=${features.baselineInk.toFixed(3)}`
         + ` shift=${features.brightnessOffset.toFixed(0)}`
         + ` align=${features.alignX},${features.alignY}${pinned ? '!' : ''}`
-        + ` fit=${features.fit.toFixed(4)}${wanted}`;
+        + ` fit=${features.fit.toFixed(4)}${wanted}${made}`;
     });
     parts.push(`boxes=[${rows.join(' | ')}]`);
     // How far the alignment search can physically reach. It moves in whole
@@ -1159,6 +1169,19 @@ function calculateTemplateInkFeatures(
     probe: isTracing()
       ? probeAlignment(actual, blank, sampleWidth, sampleHeight, brightnessOffset, alignment.x, alignment.y)
       : undefined,
+    composition: isTracing()
+      ? analyzeResidualComposition(
+        actual,
+        blank,
+        sampleWidth,
+        sampleHeight,
+        brightnessOffset,
+        alignment.x,
+        alignment.y,
+        radiusX,
+        radiusY,
+      )
+      : undefined,
   };
 }
 
@@ -1309,6 +1332,13 @@ const BASELINE_ALIGNMENT_MAX_RADIUS = 4;
 const PROBE_ALIGNMENT_RADIUS = 4;
 
 /**
+ * Gradient above which a sample counts as sitting on a printed edge. Darkness
+ * runs 0 to 1, and the edge of a printed rule crosses most of that range, so
+ * this separates structure from paper texture without being near either.
+ */
+const RESIDUAL_EDGE_GRADIENT = 0.15;
+
+/**
  * Samples needed to cover one source pixel, so a cell resampled far above its
  * own resolution can still be shifted a whole pixel.
  */
@@ -1376,6 +1406,139 @@ function findBestBaselineAlignment(
   // be made to agree by any shift keeps a floor here, and no amount of reach
   // will help it.
   return { x: best.x, y: best.y, fit: best.score / compared };
+}
+
+interface ResidualComposition {
+  /** Share of the disagreement carried by samples on a printed edge. */
+  edgeShare: number;
+  /** Share of samples that are on a printed edge. */
+  edgeFraction: number;
+  /** 0 when the edge disagreement cancels out, 1 when it is all one way. */
+  edgeBalance: number;
+  /** Mean gradient of each image: which one is sharper, and by how much. */
+  pageSharpness: number;
+  blankSharpness: number;
+  /** Fit after softening the blank, and after softening both. */
+  fitSoftBlank: number;
+  fitSoftBoth: number;
+}
+
+/**
+ * What the leftover disagreement is made of, once the baseline is placed as
+ * well as it can be.
+ *
+ * Half the pinned satisfaction cells gain nothing from a search four times
+ * wider: the offset a wide search picks is the one it already had. So whatever
+ * separates those two images there, sliding one over the other does not close
+ * it. Three readings separate the remaining candidates, and they are readings
+ * rather than an argument because this axis has now produced four wrong
+ * diagnoses, two of them mine.
+ *
+ * `edgeShare` against `edgeFraction` says whether the disagreement sits on the
+ * edges of printed rules and glyphs or is spread across the cell. A resampling
+ * difference lives on edges; a genuine ink difference need not.
+ *
+ * `edgeBalance` is the sharper test. Two images at different effective
+ * resolutions disagree *antisymmetrically* about an edge -- the softer one is
+ * lighter on one side and darker on the other -- so the signed difference
+ * cancels while the absolute difference stays large. Ink that is present in one
+ * image and absent from the other is one-signed. Near 0 means sharpness, near 1
+ * means substance.
+ *
+ * `fitSoftBlank` answers the question that decides the axis: if the residual is
+ * the blank being sharper, softening the blank removes it, and the fix is to
+ * compare the two at a common effective resolution. If softening changes
+ * nothing, no operation on the baseline reaches this residual.
+ *
+ * Measured only while tracing.
+ */
+function analyzeResidualComposition(
+  actual: number[],
+  blank: number[],
+  width: number,
+  height: number,
+  brightnessOffset: number,
+  offsetX: number,
+  offsetY: number,
+  radiusX: number,
+  radiusY: number,
+): ResidualComposition {
+  const page = new Float32Array(width * height);
+  const base = new Float32Array(width * height);
+  for (let index = 0; index < page.length; index++) {
+    page[index] = darkness(actual[index] + brightnessOffset);
+    base[index] = darkness(blank[index]);
+  }
+  const softPage = softenSamples(page, width, height);
+  const softBase = softenSamples(base, width, height);
+
+  const at = (grid: Float32Array, x: number, y: number): number =>
+    grid[clamp(y, 0, height - 1) * width + clamp(x, 0, width - 1)];
+  const gradient = (grid: Float32Array, x: number, y: number): number => Math.max(
+    Math.abs(at(grid, x + 1, y) - at(grid, x - 1, y)),
+    Math.abs(at(grid, x, y + 1) - at(grid, x, y - 1)),
+  );
+
+  let total = 0;
+  let edgeMass = 0;
+  let edgeSigned = 0;
+  let edgeCount = 0;
+  let count = 0;
+  let pageGradient = 0;
+  let blankGradient = 0;
+  let softBlankTotal = 0;
+  let softBothTotal = 0;
+
+  for (let y = radiusY; y < height - radiusY; y++) {
+    for (let x = radiusX; x < width - radiusX; x++) {
+      const bx = x + offsetX;
+      const by = y + offsetY;
+      const difference = at(page, x, y) - at(base, bx, by);
+      total += Math.abs(difference);
+      softBlankTotal += Math.abs(at(page, x, y) - at(softBase, bx, by));
+      softBothTotal += Math.abs(at(softPage, x, y) - at(softBase, bx, by));
+      pageGradient += gradient(page, x, y);
+      blankGradient += gradient(base, bx, by);
+      count++;
+      if (gradient(base, bx, by) >= RESIDUAL_EDGE_GRADIENT) {
+        edgeMass += Math.abs(difference);
+        edgeSigned += difference;
+        edgeCount++;
+      }
+    }
+  }
+
+  const samples = Math.max(count, 1);
+  return {
+    edgeShare: total > 0 ? edgeMass / total : 0,
+    edgeFraction: edgeCount / samples,
+    edgeBalance: edgeMass > 0 ? Math.abs(edgeSigned) / edgeMass : 0,
+    pageSharpness: pageGradient / samples,
+    blankSharpness: blankGradient / samples,
+    fitSoftBlank: softBlankTotal / samples,
+    fitSoftBoth: softBothTotal / samples,
+  };
+}
+
+/** Three-by-three mean, the mildest way to take resolution out of an image. */
+function softenSamples(grid: Float32Array, width: number, height: number): Float32Array {
+  const output = new Float32Array(grid.length);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let sum = 0;
+      let seen = 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const row = clamp(y + dy, 0, height - 1);
+          const column = clamp(x + dx, 0, width - 1);
+          sum += grid[row * width + column];
+          seen++;
+        }
+      }
+      output[y * width + x] = sum / seen;
+    }
+  }
+  return output;
 }
 
 /**
