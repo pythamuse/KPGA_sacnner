@@ -57,6 +57,8 @@ export interface FieldRegistration {
   inferredHorizontalLines?: { found: number; expected: number };
   inferredVerticalLines?: { found: number; expected: number };
   gapDeviation?: { rows: number; columns: number };
+  /** Per-gap row deviations, so a reader can see which boundary drifts. */
+  rowGapDeviations?: number[];
   residualRatio?: { rows: number; columns: number };
   offsetRatio?: { x: number; y: number };
   scale?: { x: number; y: number };
@@ -519,6 +521,7 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
     expectedX,
     baseHeight,
     baseWidth,
+    rowCenters.map((value) => bounds.top + value * baseHeight),
   );
   const registrations: Record<string, FieldRegistration> = Object.fromEntries(groups.map((group) => {
     const candidateCenter = getCandidateCenterQuality(group, overrides[group.field], bounds);
@@ -528,7 +531,7 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
       spec.maxUniformCandidateOffsetY,
     ) ? 'verified' : 'candidate';
     const diagnostic = status === 'candidate'
-      ? formatGridQualityDiagnostic(quality, candidateCenter)
+      ? formatGridQualityDiagnostic(quality, candidateCenter, spec.maxUniformCandidateOffsetY)
       : undefined;
     return [group.field, {
       tableId: spec.id,
@@ -549,6 +552,7 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
         },
       } : {}),
       gapDeviation: { rows: quality.rowGapDeviation, columns: quality.columnGapDeviation },
+      rowGapDeviations: quality.rowGapDeviations,
       residualRatio: { rows: quality.rowResidualRatio, columns: quality.columnResidualRatio },
       offsetRatio: { x: quality.columnOffsetRatio, y: quality.rowOffsetRatio },
       scale: { x: quality.columnScale, y: quality.rowScale },
@@ -609,6 +613,8 @@ function applyIntraTableRegistrationCheck(
 interface GridQuality {
   rowGapDeviation: number;
   columnGapDeviation: number;
+  /** Per-gap row deviations, so a diagnostic can name which boundary drifts. */
+  rowGapDeviations: number[];
   rowResidualRatio: number;
   columnResidualRatio: number;
   rowOffsetRatio: number;
@@ -634,15 +640,22 @@ function calculateGridQuality(
   expectedColumns: number[],
   pageHeight: number,
   pageWidth: number,
+  expectedRowCenters?: number[],
 ): GridQuality {
   const rowFit = getLineFit(actualRows, expectedRows, pageHeight);
   const columnFit = getLineFit(actualColumns, expectedColumns, pageWidth);
-  const rowGapDeviation = getRelativeGapDeviation(actualRows, expectedRows) ?? Number.POSITIVE_INFINITY;
+  const rowGapDeviations = getRowBandGapDeviations(actualRows, expectedRowCenters)
+    ?? getNormalizedGapDeviations(actualRows, expectedRows)
+    ?? [];
+  const rowGapDeviation = rowGapDeviations.length > 0
+    ? Math.max(...rowGapDeviations)
+    : Number.POSITIVE_INFINITY;
   const columnGapDeviation = getRelativeGapDeviation(actualColumns, expectedColumns) ?? Number.POSITIVE_INFINITY;
 
   return {
     rowGapDeviation,
     columnGapDeviation,
+    rowGapDeviations,
     rowResidualRatio: rowFit.residualRatio,
     columnResidualRatio: columnFit.residualRatio,
     rowOffsetRatio: rowFit.offsetRatio,
@@ -742,13 +755,53 @@ function isVerifiedGridQuality(
   );
 }
 
-function formatGridQualityDiagnostic(quality: GridQuality, candidateCenter?: CandidateCenterQuality): string {
+/**
+ * Names the clause that refused and the limit it missed. The numbers were
+ * already here, but with nothing to compare them against a reader could not
+ * tell which of five conditions had answered, nor how close the others sat --
+ * and a table can pass on five pages and refuse on the sixth purely because
+ * one clause has no headroom to begin with.
+ */
+function describeFailingClauses(
+  quality: GridQuality,
+  candidateCenter?: CandidateCenterQuality,
+  maxUniformCandidateOffsetY = GRID_MAX_UNIFORM_CANDIDATE_OFFSET_Y,
+): string {
+  const failing: string[] = [];
+  const over = (name: string, value: number, limit: number) => {
+    if (value > limit) failing.push(`${name} ${(value * 100).toFixed(1)}>${(limit * 100).toFixed(1)}`);
+  };
+  over('gapRows', quality.rowGapDeviation, GRID_MAX_GAP_DEVIATION);
+  over('gapCols', quality.columnGapDeviation, GRID_MAX_GAP_DEVIATION);
+  over('resRows', quality.rowResidualRatio, GRID_MAX_LINE_RESIDUAL_RATIO);
+  over('resCols', quality.columnResidualRatio, GRID_MAX_LINE_RESIDUAL_RATIO);
+  if (candidateCenter) {
+    const anchored = candidateCenter.maxX <= GRID_MAX_CANDIDATE_CENTER_DEVIATION
+      && candidateCenter.maxY <= GRID_MAX_CANDIDATE_CENTER_DEVIATION;
+    const uniform = Math.abs(candidateCenter.meanX) <= GRID_MAX_UNIFORM_CANDIDATE_OFFSET_X
+      && Math.abs(candidateCenter.meanY) <= maxUniformCandidateOffsetY
+      && candidateCenter.spreadX <= GRID_MAX_CANDIDATE_CENTER_SPREAD
+      && candidateCenter.spreadY <= GRID_MAX_CANDIDATE_CENTER_SPREAD;
+    if (!anchored && !uniform) failing.push('center');
+  }
+  const gaps = quality.rowGapDeviations.length > 0
+    ? ` rowGaps=${quality.rowGapDeviations.map((value) => (value * 100).toFixed(1)).join(',')}`
+    : '';
+  return ` [refused=${failing.join(',') || 'none'}${gaps}]`;
+}
+
+function formatGridQualityDiagnostic(
+  quality: GridQuality,
+  candidateCenter?: CandidateCenterQuality,
+  maxUniformCandidateOffsetY?: number,
+): string {
   const percent = (value: number) => `${Math.round(value * 100)}%`;
   const signedPercent = (value: number) => `${value >= 0 ? '+' : ''}${Math.round(value * 100)}%`;
   const centerDiagnostic = candidateCenter
     ? `; choice center delta x ${percent(candidateCenter.maxX)}, y ${percent(candidateCenter.maxY)}; offset x ${signedPercent(candidateCenter.meanX)}, y ${signedPercent(candidateCenter.meanY)}; spread x ${percent(candidateCenter.spreadX)}, y ${percent(candidateCenter.spreadY)}`
     : '';
-  return `grid candidate: gap rows ${percent(quality.rowGapDeviation)}, columns ${percent(quality.columnGapDeviation)}; residual rows ${percent(quality.rowResidualRatio)}, columns ${percent(quality.columnResidualRatio)}${centerDiagnostic}`;
+  return `grid candidate: gap rows ${percent(quality.rowGapDeviation)}, columns ${percent(quality.columnGapDeviation)}; residual rows ${percent(quality.rowResidualRatio)}, columns ${percent(quality.columnResidualRatio)}${centerDiagnostic}`
+    + describeFailingClauses(quality, candidateCenter, maxUniformCandidateOffsetY);
 }
 
 function registrationsForGroups(
@@ -831,6 +884,7 @@ function registrationToQuality(registration: FieldRegistration): GridQuality {
   return {
     rowGapDeviation: registration.gapDeviation?.rows ?? 1,
     columnGapDeviation: registration.gapDeviation?.columns ?? 1,
+    rowGapDeviations: [],
     rowResidualRatio: registration.residualRatio?.rows ?? 1,
     columnResidualRatio: registration.residualRatio?.columns ?? 1,
     rowOffsetRatio: registration.offsetRatio?.y ?? 0,
@@ -1188,6 +1242,40 @@ function getTemplateGapDeviation(actual: number[] | null, expected: number[]): n
   }
 
   return actual ? getRelativeGapDeviation(actual, expected) : null;
+}
+
+/**
+ * Compares where the detected row bands are centred against where the template
+ * says each row's options sit.
+ *
+ * The template asserts option centres, not printed rules; `deriveCellBoundaries`
+ * reconstructs the rules by halving the distance between neighbouring centres,
+ * which is exact only while neighbouring rows are the same height. Two-line
+ * questions make them different heights, and then the reconstruction is wrong
+ * even for interior boundaries. On the committed blank satisfaction form the
+ * printed bands of the binary table measure 39, 66, 38, 39 and 38px where that
+ * reconstruction implies 52, 52, 45, 38 and 38 -- so comparing gap shares
+ * between reconstructed boundaries charges the table 6.9% of deviation with no
+ * scan involved at all, 87% of the allowance, and `cagi.primary` 5.6% for the
+ * same reason. Whatever a real page then contributes lands on top of that.
+ *
+ * The band centres are the quantity the template actually asserts, and every
+ * centre on that same form is within a pixel of its printed band: comparing
+ * those, on the same page and the same detected rules, gives 0.2%.
+ *
+ * Below three centres this carries no information -- two centres are a single
+ * gap, whose share of itself is always one -- so the boundary comparison stays
+ * in use there rather than leaving those tables unchecked.
+ */
+function getRowBandGapDeviations(
+  boundaries: number[],
+  expectedCenters?: number[],
+): number[] | null {
+  if (!expectedCenters || expectedCenters.length < 3 || boundaries.length !== expectedCenters.length + 1) {
+    return null;
+  }
+  const actualCenters = expectedCenters.map((_, index) => (boundaries[index] + boundaries[index + 1]) / 2);
+  return getNormalizedGapDeviations(actualCenters, expectedCenters);
 }
 
 function getRelativeGapDeviation(actual: number[], expected: number[]): number | null {
