@@ -65,10 +65,22 @@ interface TemplateInkFeatures extends TemplateInkShape {
   brightnessOffset: number;
   alignX: number;
   alignY: number;
+  /**
+   * Source pixels per sample, for the page and for the blank form. The
+   * alignment search moves in whole samples, so these say how far it can
+   * physically reach: a cell whose pitch is below 1 cannot have a
+   * one-pixel registration error corrected at all.
+   */
+  pagePitchX: number;
+  pagePitchY: number;
+  blankPitchX: number;
+  blankPitchY: number;
 }
 
 interface ScoredCandidate extends CandidateScore {
   shape?: TemplateInkShape;
+  /** Position in the group as the template lists it, 1-based, before sorting. */
+  position: number;
 }
 
 /**
@@ -604,6 +616,7 @@ interface DecisionEvidence {
   usesBaseline: boolean;
   usesGridCells: boolean;
   scores: number[];
+  ranked: ScoredCandidate[];
   best?: ScoredCandidate;
   gap: number;
   relativeContrast: number;
@@ -665,15 +678,33 @@ function describeDecision(evidence: DecisionEvidence, outcome: string, refused: 
     );
   }
 
+  // Every box, not just the winner. When the scorer names a box the checkbox
+  // gate reports as empty, the question is what the named box has that the
+  // inked one does not -- and that cannot be read from the winner alone. Each
+  // entry is the box's position in the group as the template lists it, so a
+  // row here lines up with the box the gate names.
   const ink = best?.shape as TemplateInkFeatures | undefined;
   if (usesBaseline && ink && ink.actualInk !== undefined) {
-    // What the blank form actually removed from the winning cell. A cell where
-    // the baseline took nearly everything and one that was nearly empty to
-    // begin with both end at a low score and want opposite fixes.
+    const rows = evidence.ranked.slice(0, 6).map((candidate) => {
+      const features = candidate.shape as TemplateInkFeatures | undefined;
+      if (!features) return `${candidate.position}:scr=${candidate.score.toFixed(3)}`;
+      // An offset sitting on the edge of the search means the search ran out
+      // of room rather than finding the best fit.
+      const pinned = Math.abs(features.alignX) >= BASELINE_ALIGNMENT_RADIUS
+        || Math.abs(features.alignY) >= BASELINE_ALIGNMENT_RADIUS;
+      return `${candidate.position}:scr=${candidate.score.toFixed(3)}`
+        + ` page=${features.actualInk.toFixed(3)} blank=${features.baselineInk.toFixed(3)}`
+        + ` shift=${features.brightnessOffset.toFixed(0)}`
+        + ` align=${features.alignX},${features.alignY}${pinned ? '!' : ''}`;
+    });
+    parts.push(`boxes=[${rows.join(' | ')}]`);
+    // How far the alignment search can physically reach. It moves in whole
+    // samples, so a pitch below 1 means it cannot correct a one-pixel
+    // registration error no matter what the offsets say.
     parts.push(
-      `ink=[page=${ink.actualInk.toFixed(3)} blank=${ink.baselineInk.toFixed(3)}`
-      + ` left=${best!.score.toFixed(3)} shift=${ink.brightnessOffset.toFixed(0)}`
-      + ` align=${ink.alignX},${ink.alignY}]`,
+      `pitch=[page=${ink.pagePitchX.toFixed(2)},${ink.pagePitchY.toFixed(2)}`
+      + ` blank=${ink.blankPitchX.toFixed(2)},${ink.blankPitchY.toFixed(2)}`
+      + ` reach=${BASELINE_ALIGNMENT_RADIUS}]`,
     );
   }
 
@@ -730,6 +761,7 @@ export function analyzeChoiceGroup(
         : undefined;
 
       return {
+        position: index + 1,
         value: candidate.value,
         score: roundScore(
           templateEvidence?.score ?? calculateDarkPixelDensity(
@@ -753,6 +785,7 @@ export function analyzeChoiceGroup(
     usesBaseline,
     usesGridCells,
     scores: candidates.map((candidate) => candidate.score),
+    ranked: scoredCandidates,
     best,
     gap: 0,
     relativeContrast: 0,
@@ -908,6 +941,10 @@ function calculateTemplateInkFeatures(
       brightnessOffset: 0,
       alignX: 0,
       alignY: 0,
+      pagePitchX: 0,
+      pagePitchY: 0,
+      blankPitchX: 0,
+      blankPitchY: 0,
     };
   }
 
@@ -949,6 +986,10 @@ function calculateTemplateInkFeatures(
     brightnessOffset,
     alignX: alignment.x,
     alignY: alignment.y,
+    pagePitchX: (actualRect.right - actualRect.left) / sampleWidth,
+    pagePitchY: (actualRect.bottom - actualRect.top) / sampleHeight,
+    blankPitchX: (baselineRect.right - baselineRect.left) / sampleWidth,
+    blankPitchY: (baselineRect.bottom - baselineRect.top) / sampleHeight,
   };
 }
 
@@ -1070,6 +1111,14 @@ function sampleRect(
   return samples;
 }
 
+/**
+ * How far the baseline may be nudged when it is compared with the page, in
+ * samples. Named so the trace can report whether the chosen offset sat on the
+ * boundary -- a search that stops at its own edge has not found the best
+ * alignment, it has run out of room. The value is unchanged.
+ */
+const BASELINE_ALIGNMENT_RADIUS = 1;
+
 function findBestBaselineAlignment(
   actual: number[],
   baseline: number[],
@@ -1079,8 +1128,8 @@ function findBestBaselineAlignment(
 ): { x: number; y: number } {
   let best = { x: 0, y: 0, score: Number.POSITIVE_INFINITY };
 
-  for (let offsetY = -1; offsetY <= 1; offsetY++) {
-    for (let offsetX = -1; offsetX <= 1; offsetX++) {
+  for (let offsetY = -BASELINE_ALIGNMENT_RADIUS; offsetY <= BASELINE_ALIGNMENT_RADIUS; offsetY++) {
+    for (let offsetX = -BASELINE_ALIGNMENT_RADIUS; offsetX <= BASELINE_ALIGNMENT_RADIUS; offsetX++) {
       let score = 0;
       for (let y = 1; y < height - 1; y++) {
         for (let x = 1; x < width - 1; x++) {
