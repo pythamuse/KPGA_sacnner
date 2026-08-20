@@ -46,6 +46,25 @@ const BASIC_CAGI_FIELDS = ['basic.gender', 'basic.schoolType', 'basic.grade'];
 // table rules are evenly spaced.
 export const ROW_PATTERN_TOLERANCE_RATIO = 0.35;
 
+/**
+ * How far a printed rule may drift across the span it is scanned over, as a
+ * fraction of that span, before the scan stops trying to follow it.
+ *
+ * A fraction rather than a pixel count, because the same tilt costs twice as
+ * many pixels at twice the raster -- which is why a flat row scan resolved 11
+ * rules in the five-point satisfaction table at the shipping raster and 9 at
+ * the source's native one, on the same page.
+ *
+ * The ceiling on this value is not the tilt but the spacing of the rules. The
+ * scans measure up to 0.3 degrees, which would be 0.0052, and at that setting
+ * the blank form's own rules -- 1654px wide, so 8.6px of budget -- start
+ * reaching each other and merging into single groups, moving the reported
+ * centres past the 0.01 the template allows. 0.0025 is what stays clear of
+ * that on every image measured, and it is worth 4 cells at the native raster
+ * while changing nothing at the shipping one.
+ */
+const MAX_RULE_DRIFT_RATIO = 0.0025;
+
 interface RowAnchorOptions {
   expectedLineYs: number[];
   maxMeanOffsetPx: number;
@@ -70,15 +89,42 @@ export function detectHorizontalLines(
   const width = right - left;
   const darkRows: number[] = [];
 
+  // A printed rule is never exactly parallel to the pixel grid, and the drift a
+  // given tilt produces grows with the span being scanned. Counting a flat row
+  // therefore measures less of the rule the wider the table and the finer the
+  // raster: on the five-point satisfaction table -- the thinnest rules on
+  // either form -- the best row falls from 0.34 of the span at the shipping
+  // raster to 0.28 at the source's native one, and the number of rules resolved
+  // drops from 11 to 9 on the same page. The rule did not get fainter; it got
+  // spread over more rows.
+  //
+  // So each row is scanned along a few small slopes and keeps its best. Slope
+  // zero is one of them, so this can only find a row at least as dark as the
+  // flat scan would have. The budget is a fraction of the span rather than a
+  // pixel count, which is what makes it mean the same thing at any raster.
+  const maxDrift = Math.max(1, Math.round(width * MAX_RULE_DRIFT_RATIO));
+  // Pivot at the middle of the span, not its left edge. Anchoring at the edge
+  // lets a row one above a tilted rule reach it on the way down and biases
+  // every reported centre upward -- measured as an exact -1px shift on the
+  // unit fixture. Pivoting at the centre keeps `y` the row the rule passes
+  // through halfway along, which is what the caller means by its position.
+  const pivot = (left + right) / 2;
   for (let y = top; y < bottom; y++) {
-    let darkCount = 0;
-    for (let x = left; x < right; x++) {
-      if (image.pixels[y * image.width + x] < darkThreshold) {
-        darkCount++;
+    let bestDark = 0;
+    for (let drift = -maxDrift; drift <= maxDrift; drift += 1) {
+      const slope = drift / width;
+      let darkCount = 0;
+      for (let x = left; x < right; x++) {
+        const row = y + Math.round((x - pivot) * slope);
+        if (row < 0 || row >= image.height) continue;
+        if (image.pixels[row * image.width + x] < darkThreshold) {
+          darkCount++;
+        }
       }
+      if (darkCount > bestDark) bestDark = darkCount;
     }
 
-    if (darkCount / width >= minDarkRatio) {
+    if (bestDark / width >= minDarkRatio) {
       darkRows.push(y);
     }
   }
