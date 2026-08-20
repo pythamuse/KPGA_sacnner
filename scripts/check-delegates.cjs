@@ -24,10 +24,21 @@ const SAMPLE_MS = 8000;
 // Below this, a process that has been up for a while is not doing work.
 const WORKING_CPU_PER_MIN = 0.2;
 
+/**
+ * Only `codex exec` processes are dispatched rounds. The Codex desktop app
+ * runs an `app-server` for days, and every exec run spawns `codex sandbox`
+ * helpers that idle by design -- both look identical to a wedged run if you
+ * judge on CPU alone. An earlier version of this script reported two of those
+ * helpers as STUCK, and following its advice would have killed the sandbox out
+ * from under a run that was working.
+ */
 function psCodex() {
   const script =
-    "Get-Process codex -ErrorAction SilentlyContinue | " +
-    "Select-Object Id,CPU,StartTime | ConvertTo-Json -Compress";
+    "Get-CimInstance Win32_Process -Filter \"Name='codex.exe'\" | " +
+    "Where-Object { $_.CommandLine -match '\\bexec\\b' } | " +
+    "ForEach-Object { [pscustomobject]@{ Id = $_.ProcessId; " +
+    "CPU = (Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue).CPU; " +
+    "StartTime = $_.CreationDate } } | ConvertTo-Json -Compress";
   try {
     const out = execFileSync('powershell', ['-NoProfile', '-Command', script], {
       encoding: 'utf8',
