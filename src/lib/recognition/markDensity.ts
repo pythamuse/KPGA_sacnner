@@ -102,6 +102,19 @@ interface TemplateInkFeatures extends TemplateInkShape {
   probe?: { x: number; y: number; fit: number; chosenFit: number; radius: number };
   /** What the leftover disagreement is made of. Only measured while tracing. */
   composition?: ResidualComposition;
+  /**
+   * Where the *printed* ink sits inside this cell on the blank form. Only
+   * measured while tracing.
+   *
+   * This is the property that separates the two ways these forms are marked,
+   * without naming a field. A basic-info checkbox is an empty printed square,
+   * so its ink is all perimeter and a hand check lands in the middle. A CAGI
+   * or satisfaction cell holds a printed glyph, so its ink is central and the
+   * hand circle is drawn around the outside. Weighting the centre helps the
+   * first and actively hurts the second, which is how a centre-weighted score
+   * once turned CORRECT 108 into 101 with three wrong answers.
+   */
+  blankGeometry?: BlankInkGeometry;
 }
 
 interface BrightnessReferenceProbe {
@@ -846,6 +859,10 @@ function describeDecision(evidence: DecisionEvidence, outcome: string, refused: 
         + (features.insetSignal !== undefined
           ? ` inner=${features.insetSignal.toFixed(3)}`
           : '')
+        + (features.blankGeometry
+          ? ` bcore=${features.blankGeometry.coreConcentration.toFixed(2)}`
+            + `/${features.blankGeometry.fill.toFixed(3)}`
+          : '')
         + ` align=${features.alignX.toFixed(2)},${features.alignY.toFixed(2)}${pinned ? '!' : ''}`
         + ` steps=${features.stepsX},${features.stepsY}`
         + ` fit=${features.fit.toFixed(4)}${wanted}${made}`;
@@ -1219,6 +1236,17 @@ function calculateTemplateInkFeatures(
     insetSignal: isTracing()
       ? calculateInsetResidualSignal(image, actualRect, baseline, baselineRect)
       : undefined,
+    blankGeometry: isTracing()
+      ? measureBlankInkGeometry(
+        blank,
+        sampleWidth,
+        sampleHeight,
+        radiusX,
+        radiusY,
+        alignment.x,
+        alignment.y,
+      )
+      : undefined,
     probe: isTracing()
       ? probeAlignment(actual, blank, sampleWidth, sampleHeight, brightnessOffset, alignment.x, alignment.y)
       : undefined,
@@ -1236,6 +1264,65 @@ function calculateTemplateInkFeatures(
       )
       : undefined,
   };
+}
+
+interface BlankInkGeometry {
+  /**
+   * Share of the blank form's ink in this cell that falls inside the middle
+   * half of each axis, divided by that region's share of the area. Above 1
+   * means the printed ink is concentrated in the centre; below 1 means it is
+   * pushed to the perimeter. Scale-free, so a 13px checkbox and a 58px
+   * satisfaction cell are directly comparable.
+   */
+  coreConcentration: number;
+  /** Mean printed darkness across the cell, so an empty cell is recognisable. */
+  fill: number;
+}
+
+/**
+ * Where the printed ink sits in a cell, measured on the blank form alone.
+ *
+ * Reads the same resampled grid the score is computed from, over the same
+ * usable region, so it describes the cell the scorer actually sees rather than
+ * an idealised rectangle.
+ */
+function measureBlankInkGeometry(
+  blank: number[],
+  width: number,
+  height: number,
+  radiusX: number,
+  radiusY: number,
+  alignX: number,
+  alignY: number,
+): BlankInkGeometry {
+  const coreLeft = width * 0.25;
+  const coreRight = width * 0.75;
+  const coreTop = height * 0.25;
+  const coreBottom = height * 0.75;
+  let total = 0;
+  let core = 0;
+  let samples = 0;
+  let coreSamples = 0;
+
+  for (let y = radiusY; y < height - radiusY; y++) {
+    for (let x = radiusX; x < width - radiusX; x++) {
+      const ink = darkness(sampleGridAt(blank, width, height, x + alignX, y + alignY));
+      total += ink;
+      samples += 1;
+      if (x >= coreLeft && x < coreRight && y >= coreTop && y < coreBottom) {
+        core += ink;
+        coreSamples += 1;
+      }
+    }
+  }
+
+  if (samples === 0 || total <= 0 || coreSamples === 0) {
+    return { coreConcentration: 0, fill: 0 };
+  }
+  // Ink share of the core against its area share. A cell whose print is spread
+  // evenly reads 1 whatever its size.
+  const areaShare = coreSamples / samples;
+  return { coreConcentration: core / total / areaShare, fill: total / samples };
 }
 
 /**
