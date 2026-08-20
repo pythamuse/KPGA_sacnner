@@ -57,6 +57,12 @@ const PAGES = Number(process.env.REAL_SCAN_PAGES || 2);
 const PRODUCTION_RENDER = PDF_RENDER_OPTIONS[0];
 const RENDER_SCALE = Number(process.env.REAL_SCAN_RENDER_SCALE || PRODUCTION_RENDER.scale);
 const RENDER_QUALITY = Number(process.env.REAL_SCAN_RENDER_QUALITY || PRODUCTION_RENDER.quality);
+// The scans are 1-bit CCITTFax at 1654x2337, so at the native ratio the render
+// is effectively bilevel and PNG crushes it -- 129KB against JPEG's 791KB at
+// the same scale, and smaller than the 292KB JPEG the app ships at scale 1.5.
+// This exists to measure whether losslessness is worth anything; it is not a
+// way to make a number look better, and parity below still reports the truth.
+const RENDER_FORMAT = (process.env.REAL_SCAN_RENDER_FORMAT || 'jpeg').toLowerCase();
 const renderLog: string[] = [];
 const KEY_PATH = process.env.REAL_SCAN_ANSWER_KEY
   || path.join(process.cwd(), 'local-scans', 'answer-key.json');
@@ -125,8 +131,10 @@ async function renderPdfPages(pdfPath: string, pages: number, outDir: string, la
     ctx.fillStyle = '#fff';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     await page.render({ canvasContext: ctx, viewport, canvas } as never).promise;
-    const file = path.join(outDir, `${label}-p${n}.jpg`);
-    const buffer = canvas.toBuffer('image/jpeg', { quality: RENDER_QUALITY });
+    const file = path.join(outDir, `${label}-p${n}.${RENDER_FORMAT === 'png' ? 'png' : 'jpg'}`);
+    const buffer = RENDER_FORMAT === 'png'
+      ? canvas.toBuffer('image/png')
+      : canvas.toBuffer('image/jpeg', { quality: RENDER_QUALITY });
     fs.writeFileSync(file, buffer);
     const overBudget = buffer.length > MAX_UPLOAD_IMAGE_BYTES ? '  OVER UPLOAD LIMIT' : '';
     renderLog.push(`  ${label} p${n}: ${canvas.width}x${canvas.height} ${(buffer.length / 1024).toFixed(0)}KB${overBudget}`);
@@ -172,8 +180,9 @@ describe.skipIf(!CAGI_PDF || !SAT_PDF)('real scan measurement', () => {
 
     const report: string[] = ['\n================ REAL SCAN MEASUREMENT ================'];
     const parity = RENDER_SCALE === PRODUCTION_RENDER.scale
-      && RENDER_QUALITY === PRODUCTION_RENDER.quality;
-    report.push(`render: scale ${RENDER_SCALE}, JPEG q${RENDER_QUALITY}`
+      && RENDER_QUALITY === PRODUCTION_RENDER.quality
+      && RENDER_FORMAT === 'jpeg';
+    report.push(`render: scale ${RENDER_SCALE}, ${RENDER_FORMAT === 'png' ? 'PNG lossless' : `JPEG q${RENDER_QUALITY}`}`
       + (parity ? ' (production parity)' : ' (OVERRIDDEN - not what the app uploads)'));
     report.push(...renderLog);
     if (!answerKey) {
