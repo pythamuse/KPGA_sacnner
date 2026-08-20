@@ -46,6 +46,12 @@ export default function RecognitionReview({
   totalCount = 1,
 }: RecognitionReviewProps) {
   const [showRoiBoxes, setShowRoiBoxes] = React.useState(false);
+  // The per-field decision traces are engineering output -- gate names, sample
+  // counts, alignment offsets. They were invaluable for finding out why a cell
+  // was refused and they are noise to someone checking nineteen students, and
+  // the wall of numbers is what a reviewer has to read past to find the four
+  // fields that actually need them. Off by default, one click away.
+  const [showDiagnostics, setShowDiagnostics] = React.useState(false);
 
   const buildManualReviewSource = (field: string) => {
     const priorTrace = draft.source?.recognitionDecisionTrace?.[field];
@@ -100,6 +106,54 @@ export default function RecognitionReview({
         [field]: val,
       },
     });
+  };
+
+  /**
+   * Whether the reviewer has already dealt with this field.
+   *
+   * Confidence is what the recognizer thought before anyone looked; it never
+   * changes afterwards. Without this, a field the reviewer has just fixed goes
+   * on being highlighted and go on being counted, so "확인 필요 4개" stays at
+   * four however much work gets done and the reviewer has to hold the
+   * remainder in their head across nineteen students.
+   */
+  const isSettled = (key: string) => draft.source?.recognitionValueSource?.[key] === 'manual';
+
+  const fieldDomId = (key: string) => `review-field-${key.replace(/\./g, '-')}`;
+
+  const focusField = (key: string) => {
+    if (typeof document === 'undefined') return;
+    const card = document.getElementById(fieldDomId(key));
+    if (!card) return;
+    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    // Focus the control rather than the card, so the reviewer can answer with
+    // the keyboard the moment they arrive.
+    const control = card.querySelector<HTMLElement>('select, input');
+    control?.focus({ preventScroll: true });
+  };
+
+  const currentValue = (key: string): unknown => {
+    const [group, name] = key.split('.');
+    if (group === 'basic') return (draft.basic as Record<string, unknown>)[name];
+    if (group === 'cagi') return (draft.cagi as Record<string, unknown>)[name];
+    return (draft.satisfaction as Record<string, unknown>)[name];
+  };
+
+  /**
+   * Accepts the recognized value as it stands.
+   *
+   * A low-confidence field is often already right -- the recognizer was unsure,
+   * the reviewer looks at the crop and agrees. Re-picking the same option in a
+   * `select` fires no change event, so without this there is no way to say
+   * "yes, that one" and the field can never leave the outstanding list.
+   */
+  const confirmField = (key: string) => {
+    const [group, name] = key.split('.');
+    const value = currentValue(key);
+    if (value === undefined || value === null || value === '') return;
+    if (group === 'basic') handleBasicChange(name, value);
+    else if (group === 'cagi') handleCagiChange(name, value as number);
+    else handleSatisfactionChange(name, value as number);
   };
 
   const renderConfidenceBadge = (key: string) => {
@@ -248,6 +302,62 @@ export default function RecognitionReview({
       <span style={{ whiteSpace: 'nowrap' }}>인식 영역 상자 표시</span>
     </label>
   );
+
+  const renderDiagnosticsToggle = () => (
+    <label
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 6,
+        fontSize: 13,
+        fontWeight: 700,
+        color: 'var(--text-secondary, #555)',
+        cursor: 'pointer',
+        userSelect: 'none',
+      }}
+    >
+      <input
+        type="checkbox"
+        checked={showDiagnostics}
+        onChange={(e) => setShowDiagnostics(e.target.checked)}
+        style={{ cursor: 'pointer', flexShrink: 0, width: 16, height: 16, minHeight: 0, margin: 0 }}
+      />
+      <span style={{ whiteSpace: 'nowrap' }}>기술 진단 표시</span>
+    </label>
+  );
+
+  /**
+   * The attention field's one-click disposal.
+   *
+   * Shown only where there is a value to accept: a blank field needs an answer,
+   * and picking one already marks it settled through the normal change path.
+   */
+  const renderConfirmButton = (key: string) => {
+    if (confidenceRank[getConfidenceLevel(key)] === 0) return null;
+    if (isSettled(key)) return null;
+    const value = currentValue(key);
+    if (value === undefined || value === null || value === '') return null;
+
+    return (
+      <button
+        type="button"
+        onClick={() => confirmField(key)}
+        style={{
+          marginTop: 8,
+          padding: '5px 12px',
+          fontSize: 12,
+          fontWeight: 700,
+          borderRadius: 6,
+          cursor: 'pointer',
+          border: '1px solid #bfe3d2',
+          color: 'var(--success)',
+          background: 'var(--success-bg)',
+        }}
+      >
+        이 값이 맞음
+      </button>
+    );
+  };
 
   const renderCropSourceBadge = (key: string) => {
     const source = draft.source?.recognitionCropSource?.[key];
@@ -496,8 +606,12 @@ export default function RecognitionReview({
     ...Array.from({ length: 10 }).map((_, idx) => `satisfaction.q${String(idx + 1).padStart(2, '0')}`),
   ];
   const attentionFields = reviewKeys.filter((key) => confidenceRank[getConfidenceLevel(key)] > 0);
-  const lowCount = attentionFields.filter((key) => getConfidenceLevel(key) === 'low').length;
-  const mediumCount = attentionFields.filter((key) => getConfidenceLevel(key) === 'medium').length;
+  // What is still outstanding, in the order the fields appear on the page, so
+  // "next" always moves down the screen and never jumps backwards.
+  const pendingFields = attentionFields.filter((key) => !isSettled(key));
+  const settledCount = attentionFields.length - pendingFields.length;
+  const lowCount = pendingFields.filter((key) => getConfidenceLevel(key) === 'low').length;
+  const mediumCount = pendingFields.filter((key) => getConfidenceLevel(key) === 'medium').length;
   const saveErrorKeys = Array.from(
     new Set(saveErrors.flatMap((error) => (error.field ? [error.field] : []))),
   );
@@ -526,6 +640,7 @@ export default function RecognitionReview({
   };
 
   const renderDecisionTrace = (key: string) => {
+    if (!showDiagnostics) return null;
     const trace = draft.source?.recognitionDecisionTrace?.[key];
     if (!trace) return null;
 
@@ -550,6 +665,7 @@ export default function RecognitionReview({
     : `${value >= 0 ? '+' : ''}${Math.round(value * 100)}%`;
 
   const renderCoordinateDiagnostics = () => {
+    if (!showDiagnostics) return null;
     const registrations = draft.source?.recognitionRegistration;
     const valueSources = draft.source?.recognitionValueSource;
     const decisionTraces = draft.source?.recognitionDecisionTrace;
@@ -639,7 +755,7 @@ export default function RecognitionReview({
   const saveErrorMessages = saveErrors.filter((error) => !error.field);
 
   const fieldShell = (label: string, badgeKey: string, control: React.ReactNode) => (
-    <div style={getFieldCardStyle(badgeKey)}>
+    <div id={fieldDomId(badgeKey)} style={getFieldCardStyle(badgeKey)}>
       <label style={{ display: 'block', fontSize: 14, fontWeight: 700, marginBottom: 7 }}>
         {label}
         {renderConfidenceBadge(badgeKey)}
@@ -649,6 +765,7 @@ export default function RecognitionReview({
       {renderCandidateSummary(badgeKey)}
       {renderFieldCropPreview(badgeKey)}
       {renderDecisionTrace(badgeKey)}
+      {renderConfirmButton(badgeKey)}
     </div>
   );
 
@@ -674,17 +791,63 @@ export default function RecognitionReview({
         </button>
       </div>
 
-      {renderRoiBoxToggle()}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 18, alignItems: 'center' }}>
+        {renderRoiBoxToggle()}
+        {renderDiagnosticsToggle()}
+      </div>
 
       {attentionFields.length > 0 && (
         <div
-          className={lowCount > 0 ? 'error-box' : 'notice'}
-          style={{ display: 'flex', flexDirection: 'column', gap: 6 }}
+          className={pendingFields.length === 0 ? 'notice' : lowCount > 0 ? 'error-box' : 'notice'}
+          style={{ display: 'flex', flexDirection: 'column', gap: 10 }}
         >
-          <strong>확인 필요 항목 {attentionFields.length}개</strong>
-          <span>
-            낮은 신뢰도 {lowCount}개, 확인 권장 {mediumCount}개입니다. 강조된 항목의 원본 응답 표시를 보고 값을 확인해주세요.
-          </span>
+          {pendingFields.length === 0 ? (
+            <strong>확인 필요 항목 {attentionFields.length}개를 모두 확인했습니다.</strong>
+          ) : (
+            <>
+              <strong>
+                확인 필요 항목 {attentionFields.length}개 중 {settledCount}개 완료 · {pendingFields.length}개 남음
+              </strong>
+              <span>
+                낮은 신뢰도 {lowCount}개, 확인 권장 {mediumCount}개입니다. 아래에서 항목을 눌러 바로 이동할 수 있습니다.
+              </span>
+              {/* The whole point of this row. Nineteen students at four or five
+                  fields each is a lot of scrolling to find highlighted cards
+                  among twenty-three, and until now the only guide was the
+                  colour of the border. */}
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => focusField(pendingFields[0])}
+                  style={{ padding: '6px 12px', fontSize: 13 }}
+                >
+                  남은 항목으로 이동
+                </button>
+                {pendingFields.map((key) => (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => focusField(key)}
+                    title={`${fieldLabel(key)}(으)로 이동`}
+                    style={{
+                      padding: '4px 10px',
+                      fontSize: 12,
+                      fontWeight: 700,
+                      borderRadius: 999,
+                      cursor: 'pointer',
+                      whiteSpace: 'nowrap',
+                      border: `1px solid ${getConfidenceLevel(key) === 'low' ? '#f0b7b2' : '#f5d29a'}`,
+                      color: getConfidenceLevel(key) === 'low' ? 'var(--error)' : 'var(--warning)',
+                      background: getConfidenceLevel(key) === 'low' ? 'var(--error-bg)' : 'var(--warning-bg)',
+                    }}
+                  >
+                    {fieldLabel(key)}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
         </div>
       )}
 
@@ -757,7 +920,7 @@ export default function RecognitionReview({
             const val = draft.cagi[key];
 
             return (
-              <div key={key} style={getFieldCardStyle(`cagi.q${num}`)}>
+              <div key={key} id={fieldDomId(`cagi.q${num}`)} style={getFieldCardStyle(`cagi.q${num}`)}>
                 <label style={{ display: 'block', fontSize: 13, fontWeight: 700, marginBottom: 7 }}>
                   CAGI {num}
                   {renderConfidenceBadge(`cagi.q${num}`)}
@@ -773,6 +936,7 @@ export default function RecognitionReview({
                 {renderCandidateSummary(`cagi.q${num}`)}
                 {renderFieldCropPreview(`cagi.q${num}`)}
                 {renderDecisionTrace(`cagi.q${num}`)}
+      {renderConfirmButton(`cagi.q${num}`)}
               </div>
             );
           })}
@@ -782,7 +946,7 @@ export default function RecognitionReview({
       <div>
         <h3 style={{ fontSize: 18, marginBottom: 14 }}>예방교육 만족도조사</h3>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 12 }}>
-          <div style={getFieldCardStyle('satisfaction.q01')}>
+          <div id={fieldDomId('satisfaction.q01')} style={getFieldCardStyle('satisfaction.q01')}>
             <label style={{ display: 'block', fontSize: 13, fontWeight: 700, marginBottom: 7 }}>
               문항1 교육 참여 횟수
               {renderConfidenceBadge('satisfaction.q01')}
@@ -798,6 +962,7 @@ export default function RecognitionReview({
             {renderCandidateSummary('satisfaction.q01')}
             {renderFieldCropPreview('satisfaction.q01')}
             {renderDecisionTrace('satisfaction.q01')}
+      {renderConfirmButton('satisfaction.q01')}
           </div>
 
           {Array.from({ length: 5 }).map((_, idx) => {
@@ -806,7 +971,7 @@ export default function RecognitionReview({
             const val = draft.satisfaction[key];
 
             return (
-              <div key={key} style={getFieldCardStyle(`satisfaction.q0${num}`)}>
+              <div key={key} id={fieldDomId(`satisfaction.q0${num}`)} style={getFieldCardStyle(`satisfaction.q0${num}`)}>
                 <label style={{ display: 'block', fontSize: 13, fontWeight: 700, marginBottom: 7 }}>
                   문항{num} 예/아니오
                   {renderConfidenceBadge(`satisfaction.q0${num}`)}
@@ -820,6 +985,7 @@ export default function RecognitionReview({
                 {renderCandidateSummary(`satisfaction.q0${num}`)}
                 {renderFieldCropPreview(`satisfaction.q0${num}`)}
                 {renderDecisionTrace(`satisfaction.q0${num}`)}
+      {renderConfirmButton(`satisfaction.q0${num}`)}
               </div>
             );
           })}
@@ -830,7 +996,7 @@ export default function RecognitionReview({
             const val = draft.satisfaction[key];
 
             return (
-              <div key={key} style={getFieldCardStyle(`satisfaction.${key}`)}>
+              <div key={key} id={fieldDomId(`satisfaction.${key}`)} style={getFieldCardStyle(`satisfaction.${key}`)}>
                 <label style={{ display: 'block', fontSize: 13, fontWeight: 700, marginBottom: 7 }}>
                   문항{num} 만족도
                   {renderConfidenceBadge(`satisfaction.${key}`)}
@@ -847,6 +1013,7 @@ export default function RecognitionReview({
                 {renderCandidateSummary(`satisfaction.${key}`)}
                 {renderFieldCropPreview(`satisfaction.${key}`)}
                 {renderDecisionTrace(`satisfaction.${key}`)}
+      {renderConfirmButton(`satisfaction.${key}`)}
               </div>
             );
           })}
