@@ -107,9 +107,16 @@ REAL_SCAN_CAGI_PDF="..." REAL_SCAN_SAT_PDF="..." REAL_SCAN_PAGES=6 \
 ```
 p3 basic.gender       빈칸이어야 한다
 p3 satisfaction.q01   빈칸이어야 한다
+p5 satisfaction.q01   빈칸이어야 한다
 ```
 
-이 둘 중 하나라도 채우면서 총점이 오르는 변경은 **실패**다.
+이 셋 중 하나라도 채우면서 총점이 오르는 변경은 **실패**다.
+
+목록을 외우지 말고 정답표에서 뽑는다 — 한동안 이 문서는 p5를 빠뜨린 채 둘만 적고 있었다.
+
+```bash
+node -e "const j=require('./local-scans/answer-key.json');j.pages.forEach(p=>Object.entries(p).forEach(([k,v])=>{if(k!=='page'&&v===null)console.log('p'+p.page,k)}))"
+```
 
 ---
 
