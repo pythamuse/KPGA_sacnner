@@ -11,14 +11,21 @@ import { StudentData } from '../../../lib/validation/types';
 
 export async function POST(req: Request) {
   try {
-    const { jobId, students: rawStudents } = await req.json();
+    const { jobId, students: rawStudents, index: rawIndex } = await req.json();
 
     if (!jobId || !Array.isArray(rawStudents) || rawStudents.length === 0) {
       return NextResponse.json({ error: '필수 파라미터가 누락되었습니다.' }, { status: 400 });
     }
 
     const students: StudentData[] = rawStudents;
-    const newIndex = students.length - 1;
+    // Re-saving a student the reviewer has gone back to must land on the row
+    // that student already owns. Without an index the only thing this route
+    // could do was treat every save as a new last row, so a correction became
+    // a duplicate and every later student shifted down a line.
+    const newIndex = typeof rawIndex === 'number' ? rawIndex : students.length - 1;
+    if (!Number.isInteger(newIndex) || newIndex < 0 || newIndex >= students.length) {
+      return NextResponse.json({ error: '저장 위치가 올바르지 않습니다.' }, { status: 400 });
+    }
     const newStudent = students[newIndex];
 
     // 1. 새로 저장하려는 학생 데이터 유효성 검증

@@ -388,6 +388,11 @@ export default function Home() {
     if (!jobId || !drafts) return;
 
     const currentDraft = drafts[currentDraftIndex];
+    const existingRow = savedRowForDraft(currentDraftIndex);
+    const outgoing = existingRow >= 0
+      ? students.map((student, i) => (i === existingRow ? stripDraftImages(currentDraft) : student))
+      : [...students, stripDraftImages(currentDraft)];
+    const targetIndex = existingRow >= 0 ? existingRow : outgoing.length - 1;
 
     setIsSaving(true);
     setErrors([]);
@@ -402,7 +407,8 @@ export default function Home() {
           // The saved list is resent whole on every save, so nothing that only
           // the review screen needs may travel with it. The draft's previews
           // and crops are ~1.6MB per student and used to ride along.
-          students: [...students, stripDraftImages(currentDraft)],
+          students: outgoing,
+          index: targetIndex,
         }),
       });
 
@@ -418,13 +424,23 @@ export default function Home() {
         return;
       }
 
-      setStudents([...students, data.student]);
+      setStudents(
+        existingRow >= 0
+          ? students.map((student, i) => (i === existingRow ? data.student : student))
+          : [...students, data.student],
+      );
+      // Carried past the advance rather than set before it: a correction to an
+      // earlier student is the one save whose outcome is not obvious from the
+      // screen that follows, and clearing notices on the way out swallowed it.
+      const savedNotice = existingRow >= 0
+        ? [`${currentDraftIndex + 1}번째 학생을 다시 저장했습니다. 엑셀 ${3 + existingRow}행을 덮어썼습니다.`]
+        : [];
 
       const nextIndex = currentDraftIndex + 1;
       if (nextIndex < drafts.length) {
         setCurrentDraftIndex(nextIndex);
         setErrors([]);
-        setNotices([]);
+        setNotices(savedNotice);
       } else {
         resetDraft();
       }
@@ -437,19 +453,48 @@ export default function Home() {
   };
 
   /**
-   * Leaves the current student unreviewed and moves on.
+   * Which workbook row this draft already occupies, or -1 if it has none yet.
    *
-   * Nothing is saved, so the workbook rows stay contiguous over the students
-   * that were saved. The draft itself stays in the list, but nothing walks the
-   * index backwards yet, so within a session a skip does not come back.
+   * Saved students and drafts are matched on the uploaded image rather than on
+   * position: skipping a student breaks the two lists' alignment, and the id
+   * survives both a save (which keeps it) and a session restore (which strips
+   * only the rendered images). Deriving it means no second list to keep in
+   * step and no snapshot version to bump.
    */
-  const handleSkipStudent = () => {
-    if (!drafts) return;
-    const nextIndex = currentDraftIndex + 1;
-    if (nextIndex >= drafts.length) return;
-    setCurrentDraftIndex(nextIndex);
+  const savedRowForDraft = (index: number): number => {
+    const imageId = drafts?.[index]?.source?.cagiImageId;
+    if (!imageId) return -1;
+    return students.findIndex((student) => student.source?.cagiImageId === imageId);
+  };
+
+  const draftDiffersFromSaved = (index: number): boolean => {
+    const row = savedRowForDraft(index);
+    if (row < 0 || !drafts) return false;
+    const draft = drafts[index];
+    const saved = students[row];
+    return (['basic', 'cagi', 'satisfaction'] as const).some(
+      (group) => JSON.stringify(draft[group] ?? {}) !== JSON.stringify(saved[group] ?? {}),
+    );
+  };
+
+  /**
+   * Moves between students without saving.
+   *
+   * Backwards as well as forwards: a reviewer who notices a mistake two
+   * students later could otherwise only get back to it by discarding the batch.
+   * Leaving without saving keeps the workbook as it was, which is why the
+   * screen has to say when the draft on it no longer matches the saved row.
+   */
+  const goToDraft = (index: number) => {
+    if (!drafts || index < 0 || index >= drafts.length || index === currentDraftIndex) return;
+    const leavingUnsaved = draftDiffersFromSaved(currentDraftIndex);
+    setCurrentDraftIndex(index);
     setErrors([]);
-    setNotices([`${currentDraftIndex + 1}번째 학생은 저장하지 않고 건너뛰었습니다.`]);
+    setNotices(
+      leavingUnsaved
+        ? [`${currentDraftIndex + 1}번째 학생의 수정 내용은 저장하지 않았습니다. 엑셀에는 이전 값이 남아 있습니다.`]
+        : [],
+    );
   };
 
   const hasDrafts = Boolean(drafts && drafts.length > 0);
@@ -621,8 +666,9 @@ export default function Home() {
                 saveErrors={errors}
                 onReset={resetDraft}
                 isSaving={isSaving}
-                onSkip={handleSkipStudent}
-                canSkip={currentDraftIndex + 1 < drafts.length}
+                onNavigate={goToDraft}
+                savedRow={savedRowForDraft(currentDraftIndex)}
+                hasUnsavedEdits={draftDiffersFromSaved(currentDraftIndex)}
                 currentIndex={currentDraftIndex + 1}
                 totalCount={drafts.length}
               />

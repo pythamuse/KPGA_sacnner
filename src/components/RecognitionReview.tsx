@@ -9,8 +9,10 @@ interface RecognitionReviewProps {
   onSave: () => void;
   onReset: () => void;
   isSaving: boolean;
-  onSkip?: () => void;
-  canSkip?: boolean;
+  onNavigate?: (index: number) => void;
+  /** Workbook row this student already occupies, or -1 if never saved. */
+  savedRow?: number;
+  hasUnsavedEdits?: boolean;
   saveErrors?: ValidationError[];
   currentIndex?: number;
   totalCount?: number;
@@ -43,8 +45,9 @@ export default function RecognitionReview({
   onSave,
   onReset,
   isSaving,
-  onSkip,
-  canSkip = false,
+  onNavigate,
+  savedRow = -1,
+  hasUnsavedEdits = false,
   saveErrors = [],
   currentIndex = 1,
   totalCount = 1,
@@ -368,6 +371,49 @@ export default function RecognitionReview({
       <span style={{ whiteSpace: 'nowrap' }}>기술 진단 표시</span>
     </label>
   );
+
+  /**
+   * Moving between students without saving, in both directions.
+   *
+   * Forward is the skip: this student's row is simply never written. Backward
+   * is the repair: noticing at student twelve that student nine was wrong used
+   * to mean discarding the batch, because the index only ever counted up.
+   */
+  const renderStudentNav = () => {
+    const canPrev = currentIndex > 1;
+    const canNext = currentIndex < totalCount;
+    const navButton = (label: string, target: number, enabled: boolean, title: string) => (
+      <button
+        type="button"
+        className="btn-secondary"
+        onClick={() => onNavigate?.(target)}
+        disabled={!enabled || isSaving}
+        title={title}
+        style={{
+          whiteSpace: 'nowrap',
+          fontSize: 13,
+          padding: '6px 12px',
+          minHeight: 34,
+          flexShrink: 0,
+          opacity: enabled ? 1 : 0.45,
+          cursor: enabled ? 'pointer' : 'not-allowed',
+        }}
+      >
+        {label}
+      </button>
+    );
+
+    return (
+      <div style={{ marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+        {navButton('← 이전 학생', currentIndex - 2, canPrev, canPrev
+          ? '저장하지 않고 이전 학생으로 돌아갑니다.'
+          : '첫 번째 학생입니다.')}
+        {navButton('다음 학생 →', currentIndex, canNext, canNext
+          ? '저장하지 않고 다음 학생으로 넘어갑니다.'
+          : '마지막 학생입니다.')}
+      </div>
+    );
+  };
 
   /**
    * The attention field's one-click disposal.
@@ -850,30 +896,25 @@ export default function RecognitionReview({
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 18, alignItems: 'center' }}>
         {renderRoiBoxToggle()}
         {renderDiagnosticsToggle()}
-        {onSkip && (
-          <button
-            type="button"
-            className="btn-secondary"
-            onClick={onSkip}
-            disabled={!canSkip || isSaving}
-            title={canSkip
-              ? '이 학생을 저장하지 않고 다음 학생으로 넘어갑니다.'
-              : '마지막 학생이라 건너뛸 대상이 없습니다.'}
-            style={{
-              marginLeft: 'auto',
-              whiteSpace: 'nowrap',
-              fontSize: 13,
-              padding: '6px 12px',
-              minHeight: 34,
-              flexShrink: 0,
-              opacity: canSkip ? 1 : 0.5,
-              cursor: canSkip ? 'pointer' : 'not-allowed',
-            }}
-          >
-            검수 건너뛰고 다음 학생
-          </button>
-        )}
+        {onNavigate && renderStudentNav()}
       </div>
+
+      {savedRow >= 0 && (
+        <div
+          className={hasUnsavedEdits ? 'error-box' : 'notice'}
+          style={{ display: 'flex', flexDirection: 'column', gap: 4 }}
+        >
+          <strong>
+            이미 저장된 학생입니다 · 엑셀 {3 + savedRow}행
+            {hasUnsavedEdits ? ' · 저장되지 않은 수정 있음' : ''}
+          </strong>
+          <span>
+            {hasUnsavedEdits
+              ? '아래 버튼을 눌러야 엑셀에 반영됩니다. 그냥 이동하면 엑셀에는 이전 값이 남습니다.'
+              : '다시 저장하면 새 행이 생기지 않고 같은 행을 덮어씁니다.'}
+          </span>
+        </div>
+      )}
 
       {attentionFields.length > 0 && (
         <div
@@ -1120,7 +1161,11 @@ export default function RecognitionReview({
       )}
 
       <button className="btn-primary" style={{ width: '100%' }} disabled={isSaving} onClick={onSave}>
-        {isSaving ? '엑셀 반영 및 검증 중' : '검수 완료 및 엑셀 반영'}
+        {isSaving
+          ? '엑셀 반영 및 검증 중'
+          : savedRow >= 0
+            ? `수정 내용 반영 (엑셀 ${3 + savedRow}행)`
+            : '검수 완료 및 엑셀 반영'}
       </button>
     </section>
   );

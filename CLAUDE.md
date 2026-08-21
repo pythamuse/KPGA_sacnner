@@ -126,6 +126,10 @@ node -e "const j=require('./local-scans/answer-key.json');j.pages.forEach(p=>Obj
 
 자동 구동 경로는 [Task/MEASUREMENT_RENDER_PARITY_2026-08-19.md](Task/MEASUREMENT_RENDER_PARITY_2026-08-19.md)에 있다. **제약 하나만 기억한다: 창이 보여야 한다.** 숨겨진 탭에서는 `requestAnimationFrame`이 발화하지 않고, pdf.js의 `page.render()`가 그것으로 이어달리기를 하므로 **영원히 완료되지 않는다.** 이것을 제품 결함으로 오진한 적이 있다.
 
+`requestAnimationFrame`에 얹힌 것이 pdf.js만은 아니다. **`behavior: 'smooth'`도 rAF로 구동된다.** 보이지 않는 창에서는 스크롤이 조용히 아무것도 안 한다 — 같은 창에서 `smooth`는 `scrollY 1813`, `auto`는 `0`이었다. 더 나쁜 조합은 스크롤과 포커스를 함께 쓸 때다. 스크롤만 죽고 `focus()`는 살아서 **화면 밖 입력란에 포커스가 남는다.**
+
+**dev 서버가 도는 동안 `npm run build`를 돌리지 않는다.** 둘 다 `.next`에 쓰기 때문에 청크가 404가 되고 React가 하이드레이션되지 않는다. 화면은 정상으로 보이는데 버튼이 아무 일도 하지 않고, 방금 넣은 코드가 "실행되지 않는" 것처럼 보인다. 한 번 이것을 코드 문제로 오진하고 계측을 세 번 갈아끼웠다. 증상 확인은 콘솔의 `Refused to execute script ... MIME type ('text/html')`이고, 조치는 dev 서버 재시작이다.
+
 ---
 
 ## 5. 절대 커밋하지 않는 것
