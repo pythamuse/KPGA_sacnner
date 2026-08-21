@@ -150,7 +150,10 @@ export default function RecognitionReview({
   const confirmField = (key: string) => {
     const [group, name] = key.split('.');
     const value = currentValue(key);
-    if (value === undefined || value === null || value === '') return;
+    // Including when there is no value: a student who answered nothing is a
+    // fact about the form, and the reviewer needs a way to record having seen
+    // it. The handlers write the value back as it stands and mark the field
+    // reviewed, so an empty one stays empty and stops being outstanding.
     if (group === 'basic') handleBasicChange(name, value);
     else if (group === 'cagi') handleCagiChange(name, value as number);
     else handleSatisfactionChange(name, value as number);
@@ -335,8 +338,7 @@ export default function RecognitionReview({
   const renderConfirmButton = (key: string) => {
     if (confidenceRank[getConfidenceLevel(key)] === 0) return null;
     if (isSettled(key)) return null;
-    const value = currentValue(key);
-    if (value === undefined || value === null || value === '') return null;
+    const empty = needsValue(key);
 
     return (
       <button
@@ -354,7 +356,7 @@ export default function RecognitionReview({
           background: 'var(--success-bg)',
         }}
       >
-        이 값이 맞음
+        {empty ? '비어 있는 것이 맞음' : '이 값이 맞음'}
       </button>
     );
   };
@@ -362,7 +364,7 @@ export default function RecognitionReview({
   const renderCropSourceBadge = (key: string) => {
     const source = draft.source?.recognitionCropSource?.[key];
     if (!source) return null;
-    const diagnostic = draft.source?.recognitionCropDiagnostic?.[key];
+    const diagnostic = showDiagnostics ? draft.source?.recognitionCropDiagnostic?.[key] : undefined;
     const registration = draft.source?.recognitionRegistration?.[key];
     const registrationLabel = registration?.status === 'verified'
       ? '좌표 검증'
@@ -605,7 +607,21 @@ export default function RecognitionReview({
     ...Array.from({ length: 9 }).map((_, idx) => `cagi.q${String(idx + 1).padStart(2, '0')}`),
     ...Array.from({ length: 10 }).map((_, idx) => `satisfaction.q${String(idx + 1).padStart(2, '0')}`),
   ];
-  const attentionFields = reviewKeys.filter((key) => confidenceRank[getConfidenceLevel(key)] > 0);
+  /**
+   * A field with no value needs the reviewer whatever the recogniser thought of
+   * it. Confidence alone missed that: school type and grade come back `높음`
+   * and unfilled on real pages -- the scorer was sure and the gate still
+   * refused -- so they stayed out of the outstanding list, off the jump row,
+   * and out of the count. A reviewer could clear every highlighted item, read
+   * "모두 확인했습니다", and save the student with two fields empty.
+   */
+  const needsValue = (key: string) => {
+    const value = currentValue(key);
+    return value === undefined || value === null || value === '';
+  };
+  const attentionFields = reviewKeys.filter(
+    (key) => confidenceRank[getConfidenceLevel(key)] > 0 || needsValue(key),
+  );
   // What is still outstanding, in the order the fields appear on the page, so
   // "next" always moves down the screen and never jumps backwards.
   const pendingFields = attentionFields.filter((key) => !isSettled(key));
