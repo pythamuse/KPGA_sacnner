@@ -163,6 +163,8 @@ const HIGH_ABSOLUTE_SIGNAL = 0.021;
 const STRUCTURED_MARK_MIN_COMPONENT = 7;
 const STRUCTURED_MARK_MIN_COMPONENT_RATIO = 0.2;
 const STRUCTURED_MARK_MIN_DIAGONAL_RATIO = 0.2;
+const MIN_ANTI_ALIASED_TONE_RATIO = 0.01;
+const MIN_PAPER_COLUMN_SUPPORT_RATIO = 0.005;
 
 export async function loadImageAnalysisData(filePath: string): Promise<ImageAnalysisData> {
   const { data: pixels, info } = await sharp(filePath)
@@ -457,7 +459,17 @@ function detectPaperContentBounds(
   image: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>,
   pageBounds: PixelBounds,
 ): PixelBounds | null {
-  const bounds = detectDarkPixelBounds(image, pageBounds);
+  const rawBounds = detectDarkPixelBounds(image, pageBounds);
+  // Lossy/anti-aliased scans can contain a few dark pixels in the feed edge or
+  // page shadow. A raw min/max envelope treats those pixels as printed ink.
+  // Printed outer columns recur over a meaningful part of the sheet height,
+  // so use that support to reject isolated horizontal outliers. Keep the raw
+  // envelope for binary assets: a clean 1-bit form can legitimately express a
+  // thin, broken edge with only a handful of dark pixels, and changing that
+  // envelope would change the calibration frame.
+  const bounds = hasAntiAliasedScanTones(image, pageBounds)
+    ? detectSupportedPaperColumns(image, pageBounds, rawBounds)
+    : rawBounds;
   const pageWidth = pageBounds.right - pageBounds.left;
   const pageHeight = pageBounds.bottom - pageBounds.top;
   const contentWidth = bounds.right - bounds.left;
@@ -474,6 +486,84 @@ function detectPaperContentBounds(
   }
 
   return bounds;
+}
+
+/**
+ * A compressed scan has enough intermediate tones to make isolated dark
+ * compression/edge pixels distinguishable from printed rules. This is an
+ * image-quality test, not a form- or template-specific branch; lossless
+ * binary source images continue through the exact-pixel path above.
+ */
+function hasAntiAliasedScanTones(
+  image: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>,
+  pageBounds: PixelBounds,
+): boolean {
+  const left = clamp(Math.floor(pageBounds.left), 0, image.width - 1);
+  const right = clamp(Math.ceil(pageBounds.right), left + 1, image.width);
+  const top = clamp(Math.floor(pageBounds.top), 0, image.height - 1);
+  const bottom = clamp(Math.ceil(pageBounds.bottom), top + 1, image.height);
+  const total = (right - left) * (bottom - top);
+  let nonBinary = 0;
+
+  for (let y = top; y < bottom; y += 1) {
+    const row = y * image.width;
+    for (let x = left; x < right; x += 1) {
+      const value = image.pixels[row + x];
+      if (value !== 0 && value !== 255) {
+        nonBinary++;
+      }
+    }
+  }
+
+  return nonBinary / Math.max(total, 1) >= MIN_ANTI_ALIASED_TONE_RATIO;
+}
+
+/**
+ * Keeps the vertical envelope supplied by the existing paper detector, but
+ * measures the horizontal envelope from recurring dark columns. The support
+ * threshold scales with the detected sheet, so it rejects a one-pixel edge
+ * speck on both small and large scans without referring to a template width.
+ */
+function detectSupportedPaperColumns(
+  image: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>,
+  pageBounds: PixelBounds,
+  fallback: PixelBounds,
+): PixelBounds {
+  const frameWidth = pageBounds.right - pageBounds.left;
+  const frameHeight = pageBounds.bottom - pageBounds.top;
+  const minX = clamp(Math.floor(pageBounds.left + frameWidth * 0.02), 0, image.width - 1);
+  const maxX = clamp(Math.ceil(pageBounds.right - frameWidth * 0.02), minX + 1, image.width);
+  const minY = clamp(Math.floor(pageBounds.top + frameHeight * 0.03), 0, image.height - 1);
+  const maxY = clamp(Math.ceil(pageBounds.bottom - frameHeight * 0.02), minY + 1, image.height);
+  const minimumDarkPixels = Math.max(4, Math.ceil((maxY - minY) * MIN_PAPER_COLUMN_SUPPORT_RATIO));
+
+  let left = maxX;
+  let right = minX;
+  for (let x = minX; x < maxX; x += 1) {
+    let darkPixels = 0;
+    for (let y = minY; y < maxY; y += 1) {
+      if (image.pixels[y * image.width + x] < 220) {
+        darkPixels++;
+      }
+    }
+
+    if (darkPixels >= minimumDarkPixels) {
+      left = Math.min(left, x);
+      right = Math.max(right, x + 1);
+    }
+  }
+
+  if (left >= right) {
+    return fallback;
+  }
+
+  const paddingX = Math.round((right - left) * MIN_PAPER_COLUMN_SUPPORT_RATIO);
+  return {
+    left: clamp(left - paddingX, 0, image.width - 1),
+    top: fallback.top,
+    right: clamp(right + paddingX, 1, image.width),
+    bottom: fallback.bottom,
+  };
 }
 
 function detectDarkPixelBounds(
