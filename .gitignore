@@ -48,3 +48,6 @@ local-scans/
 
 # Subagent worktrees (branches carry the work; the checkouts are disposable)
 .claude/worktrees/
+
+# Local browser-parity harness only. Student responses -- never commit.
+public/zz-sample/
