@@ -1,3 +1,8 @@
+import fs from 'fs/promises';
+import { rmSync } from 'fs';
+import os from 'os';
+import path from 'path';
+import { createHash, randomUUID } from 'crypto';
 import { del, get, list, put } from '@vercel/blob';
 import {
   isSafeJobId,
@@ -8,7 +13,16 @@ import {
 } from '../uploadInventory';
 
 const STORAGE_PREFIX = 'kpga-scan/jobs';
-const LOCAL_MEMORY_UPLOADS = new Map<string, StoredUploadPage>();
+const LOCAL_UPLOAD_ROOT = path.join(
+  os.tmpdir(),
+  'kpga-scanner',
+  'upload-store',
+  createHash('sha256')
+    .update(`${process.cwd()}|${process.env.NODE_ENV || 'development'}|${process.env.NODE_ENV === 'test' ? process.pid : ''}`)
+    .digest('hex')
+    .slice(0, 16),
+);
+const LOCAL_CONTENT_TYPE_SUFFIX = '.content-type';
 
 export interface StoreUploadPageInput {
   jobId: string;
@@ -75,11 +89,11 @@ export async function storeUploadPage(input: StoreUploadPageInput) {
   const pathname = getUploadPagePath(input.jobId, input.type, input.batch, input.pageNumber);
 
   if (usesLocalMemoryStore()) {
-    LOCAL_MEMORY_UPLOADS.set(pathname, {
+    await storeLocalUploadPage(
       pathname,
-      data: Buffer.from(input.data),
-      contentType: input.contentType || 'application/octet-stream',
-    });
+      input.data,
+      input.contentType || 'application/octet-stream',
+    );
     return { pathname };
   }
 
@@ -104,8 +118,7 @@ export async function readUploadPage(
   const pathname = getUploadPagePath(jobId, type, batch, pageNumber);
 
   if (usesLocalMemoryStore()) {
-    const page = LOCAL_MEMORY_UPLOADS.get(pathname);
-    return page ? { ...page, data: Buffer.from(page.data) } : null;
+    return readLocalUploadPage(pathname);
   }
 
   try {
@@ -131,7 +144,7 @@ export async function deleteJobUploads(jobId: string) {
 
   const prefix = `${buildUploadPrefix(jobId)}/`;
   if (usesLocalMemoryStore()) {
-    deleteLocalPrefix(prefix);
+    await deleteLocalPrefix(prefix);
     return;
   }
 
@@ -150,7 +163,7 @@ export async function deleteUploadBatch(jobId: string, type: UploadKind, batch: 
   const prefix = `${buildUploadPrefix(jobId, type, batch)}/`;
 
   if (usesLocalMemoryStore()) {
-    deleteLocalPrefix(prefix);
+    await deleteLocalPrefix(prefix);
     return;
   }
 
@@ -158,15 +171,70 @@ export async function deleteUploadBatch(jobId: string, type: UploadKind, batch: 
 }
 
 export function resetUploadStoreForTests() {
-  LOCAL_MEMORY_UPLOADS.clear();
+  if (usesLocalMemoryStore()) {
+    rmSync(LOCAL_UPLOAD_ROOT, { recursive: true, force: true });
+  }
 }
 
-function deleteLocalPrefix(prefix: string) {
-  for (const pathname of Array.from(LOCAL_MEMORY_UPLOADS.keys())) {
-    if (pathname.startsWith(prefix)) {
-      LOCAL_MEMORY_UPLOADS.delete(pathname);
-    }
+async function storeLocalUploadPage(pathname: string, data: Buffer, contentType: string) {
+  const filePath = getLocalUploadFilePath(pathname);
+  const contentTypePath = `${filePath}${LOCAL_CONTENT_TYPE_SUFFIX}`;
+  const tempSuffix = `.tmp-${randomUUID()}`;
+  const tempFilePath = `${filePath}${tempSuffix}`;
+  const tempContentTypePath = `${contentTypePath}${tempSuffix}`;
+
+  try {
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.writeFile(tempFilePath, data);
+    await fs.writeFile(tempContentTypePath, contentType, 'utf8');
+    await fs.rename(tempFilePath, filePath);
+    await fs.rename(tempContentTypePath, contentTypePath);
+  } catch (error) {
+    throw toStorageError(error);
+  } finally {
+    await Promise.all([
+      fs.rm(tempFilePath, { force: true }).catch(() => undefined),
+      fs.rm(tempContentTypePath, { force: true }).catch(() => undefined),
+    ]);
   }
+}
+
+async function readLocalUploadPage(pathname: string): Promise<StoredUploadPage | null> {
+  const filePath = getLocalUploadFilePath(pathname);
+  const contentTypePath = `${filePath}${LOCAL_CONTENT_TYPE_SUFFIX}`;
+
+  try {
+    const [data, contentType] = await Promise.all([
+      fs.readFile(filePath),
+      fs.readFile(contentTypePath, 'utf8'),
+    ]);
+    return {
+      pathname,
+      data,
+      contentType: contentType || 'application/octet-stream',
+    };
+  } catch (error) {
+    if (isFileNotFoundError(error)) {
+      return null;
+    }
+    throw toStorageError(error);
+  }
+}
+
+async function deleteLocalPrefix(prefix: string) {
+  try {
+    await fs.rm(getLocalUploadFilePath(prefix), { recursive: true, force: true });
+  } catch (error) {
+    throw toStorageError(error);
+  }
+}
+
+function getLocalUploadFilePath(pathname: string) {
+  return path.join(LOCAL_UPLOAD_ROOT, ...pathname.split('/'));
+}
+
+function isFileNotFoundError(error: unknown): error is NodeJS.ErrnoException {
+  return Boolean(error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT');
 }
 
 async function deleteBlobPrefix(prefix: string) {
