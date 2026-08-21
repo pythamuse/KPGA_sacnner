@@ -9,6 +9,8 @@ interface RecognitionReviewProps {
   onSave: () => void;
   onReset: () => void;
   isSaving: boolean;
+  onSkip?: () => void;
+  canSkip?: boolean;
   saveErrors?: ValidationError[];
   currentIndex?: number;
   totalCount?: number;
@@ -41,6 +43,8 @@ export default function RecognitionReview({
   onSave,
   onReset,
   isSaving,
+  onSkip,
+  canSkip = false,
   saveErrors = [],
   currentIndex = 1,
   totalCount = 1,
@@ -125,12 +129,34 @@ export default function RecognitionReview({
     if (typeof document === 'undefined') return;
     const card = document.getElementById(fieldDomId(key));
     if (!card) return;
-    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    // Instant. A smooth scroll runs on requestAnimationFrame, and when that
+    // does not fire the focus below still lands -- leaving the reviewer typing
+    // into a field that is nowhere on screen. Arriving is the point; gliding
+    // there is not worth that failure mode.
+    card.scrollIntoView({ behavior: 'auto', block: 'center' });
     // Focus the control rather than the card, so the reviewer can answer with
     // the keyboard the moment they arrive.
     const control = card.querySelector<HTMLElement>('select, input');
     control?.focus({ preventScroll: true });
   };
+
+  /**
+   * Takes the reviewer to the field that blocked the save.
+   *
+   * The save reports "필수 항목 N개가 비어 있어" at the very bottom of the
+   * page and then leaves them to find those fields among twenty-three cards --
+   * the same hunt the attention list exists to remove, at the one moment the
+   * reviewer already believes they are finished. `source.*` errors name an
+   * upload, not a card, so they are left to the summary.
+   */
+  React.useEffect(() => {
+    const blocking = saveErrors.find(
+      (error) => error.field && error.field.includes('.') && !error.field.startsWith('source.'),
+    );
+    if (!blocking?.field) return;
+    focusField(blocking.field);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [saveErrors]);
 
   const currentValue = (key: string): unknown => {
     const [group, name] = key.split('.');
@@ -205,6 +231,20 @@ export default function RecognitionReview({
         borderRadius: 8,
         padding: 11,
         boxShadow: '0 0 0 3px rgba(216, 48, 36, 0.16)',
+      };
+    }
+
+    // Confidence is what the recognizer thought before anyone looked, and it
+    // never changes. A field the reviewer has answered therefore kept its red
+    // or amber card, so a screen that had been fully worked through still read
+    // as a screen full of problems. Once it is settled, the only thing worth
+    // saying about it is that it is settled.
+    if (isSettled(key)) {
+      return {
+        border: '1px solid #ccd2dc',
+        background: '#eef1f5',
+        borderRadius: 8,
+        padding: 12,
       };
     }
 
@@ -810,6 +850,29 @@ export default function RecognitionReview({
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 18, alignItems: 'center' }}>
         {renderRoiBoxToggle()}
         {renderDiagnosticsToggle()}
+        {onSkip && (
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={onSkip}
+            disabled={!canSkip || isSaving}
+            title={canSkip
+              ? '이 학생을 저장하지 않고 다음 학생으로 넘어갑니다.'
+              : '마지막 학생이라 건너뛸 대상이 없습니다.'}
+            style={{
+              marginLeft: 'auto',
+              whiteSpace: 'nowrap',
+              fontSize: 13,
+              padding: '6px 12px',
+              minHeight: 34,
+              flexShrink: 0,
+              opacity: canSkip ? 1 : 0.5,
+              cursor: canSkip ? 'pointer' : 'not-allowed',
+            }}
+          >
+            검수 건너뛰고 다음 학생
+          </button>
+        )}
       </div>
 
       {attentionFields.length > 0 && (

@@ -188,9 +188,34 @@ export default function Home() {
   useEffect(() => {
     if (!shouldScrollToErrors || errors.length === 0) return;
 
+    // A failure that names a field is handled inside the review screen, which
+    // scrolls to that card and focuses its control. Scrolling to the summary
+    // as well would start a second smooth scroll against the first and land
+    // wherever the race ended.
+    if (errors.some((error) => error.field?.includes('.') && !error.field.startsWith('source.'))) {
+      setShouldScrollToErrors(false);
+      return;
+    }
+
     errorSummaryRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
     setShouldScrollToErrors(false);
   }, [errors, shouldScrollToErrors]);
+
+  // Moving to the next student leaves the page scrolled wherever the previous
+  // one's last field was -- usually the bottom -- so the next review opens
+  // mid-form and the reviewer has to scroll up before they can start.
+  const seenDraftIndex = useRef<number | null>(null);
+  useEffect(() => {
+    if (seenDraftIndex.current === currentDraftIndex) return;
+    const isFirst = seenDraftIndex.current === null;
+    seenDraftIndex.current = currentDraftIndex;
+    if (isFirst || typeof window === 'undefined') return;
+    // Instant, not smooth. Gliding seventeen hundred pixels makes the reviewer
+    // wait to start on a form they have not seen yet, and smooth scrolling is
+    // driven by requestAnimationFrame, which does not fire while the tab is
+    // not compositing -- there the scroll simply never happens.
+    window.scrollTo({ top: 0, behavior: 'auto' });
+  }, [currentDraftIndex]);
 
   // Restore what was on screen the moment the page last loaded, if anything.
   useEffect(() => {
@@ -411,6 +436,22 @@ export default function Home() {
     }
   };
 
+  /**
+   * Leaves the current student unreviewed and moves on.
+   *
+   * Nothing is saved, so the workbook rows stay contiguous over the students
+   * that were saved. The draft itself stays in the list, but nothing walks the
+   * index backwards yet, so within a session a skip does not come back.
+   */
+  const handleSkipStudent = () => {
+    if (!drafts) return;
+    const nextIndex = currentDraftIndex + 1;
+    if (nextIndex >= drafts.length) return;
+    setCurrentDraftIndex(nextIndex);
+    setErrors([]);
+    setNotices([`${currentDraftIndex + 1}번째 학생은 저장하지 않고 건너뛰었습니다.`]);
+  };
+
   const hasDrafts = Boolean(drafts && drafts.length > 0);
   const modeLabel = uploadMode === 'sequential' ? '개별/순차 촬영' : '일괄 스캔 업로드';
   const [isDownloading, setIsDownloading] = useState<'cagi' | 'satisfaction' | null>(null);
@@ -580,6 +621,8 @@ export default function Home() {
                 saveErrors={errors}
                 onReset={resetDraft}
                 isSaving={isSaving}
+                onSkip={handleSkipStudent}
+                canSkip={currentDraftIndex + 1 < drafts.length}
                 currentIndex={currentDraftIndex + 1}
                 totalCount={drafts.length}
               />
