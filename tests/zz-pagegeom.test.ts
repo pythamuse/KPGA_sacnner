@@ -80,6 +80,10 @@ describe.skipIf(!CAGI_PDF || !SAT_PDF)('page geometry vs registration', () => {
         const byTable = new Map<string, string>();
         Object.values(regs).forEach((r) => { const rr = r as { tableId?: string; status?: string }; if (rr?.tableId) byTable.set(rr.tableId, String(rr.status)); });
         const tables = Array.from(byTable.entries()).map(([k, v]) => `${k}=${v}`).join(' ');
+        if (tag === 'C') {
+          const d = String(det.diagnostics?.['basic.age'] ?? '(none)');
+          lines.push(`  age p${n}: ${d.slice(0, 260)}`);
+        }
         lines.push([
           tag, String(n).padStart(4),
           String(img.width).padStart(5), String(img.height).padStart(5),
