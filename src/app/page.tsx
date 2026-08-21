@@ -149,7 +149,7 @@ function BrandHeader() {
           whiteSpace: 'nowrap',
         }}
       >
-        테스트 버전 v2026-08-21.2
+        테스트 버전 v2026-08-21.3
       </span>
     </div>
   );
@@ -467,15 +467,107 @@ export default function Home() {
     return students.findIndex((student) => student.source?.cagiImageId === imageId);
   };
 
+  /**
+   * Compares field by field rather than by serializing the group.
+   *
+   * JSON.stringify preserves insertion order, and a restored draft has lost
+   * whichever fields were undefined when the snapshot was written -- so
+   * refilling them appends the keys in a different order and two identical
+   * groups stringify differently. That reported "저장되지 않은 수정 있음" on a
+   * student whose values matched the saved row exactly.
+   */
+  const groupDiffers = (a?: Record<string, unknown>, b?: Record<string, unknown>): boolean => {
+    const names = Array.from(new Set([...Object.keys(a || {}), ...Object.keys(b || {})]));
+    for (const name of names) {
+      const left = a?.[name];
+      const right = b?.[name];
+      const leftEmpty = left === undefined || left === null || left === '';
+      const rightEmpty = right === undefined || right === null || right === '';
+      if (leftEmpty && rightEmpty) continue;
+      if (leftEmpty !== rightEmpty) return true;
+      if (String(left) !== String(right)) return true;
+    }
+    return false;
+  };
+
   const draftDiffersFromSaved = (index: number): boolean => {
     const row = savedRowForDraft(index);
     if (row < 0 || !drafts) return false;
     const draft = drafts[index];
     const saved = students[row];
-    return (['basic', 'cagi', 'satisfaction'] as const).some(
-      (group) => JSON.stringify(draft[group] ?? {}) !== JSON.stringify(saved[group] ?? {}),
+    return (['basic', 'cagi', 'satisfaction'] as const).some((group) =>
+      groupDiffers(
+        draft[group] as Record<string, unknown> | undefined,
+        saved[group] as Record<string, unknown> | undefined,
+      ),
     );
   };
+
+  /**
+   * Puts the saved row's values back on screen when the reviewer returns to a
+   * student who already has one.
+   *
+   * The draft carries what the recognizer produced; the row carries what a
+   * person confirmed. Coming back showed the recognizer's version again --
+   * blanks and all -- so fields that had already been answered by hand were
+   * outstanding a second time, and the card reported unsaved edits that were
+   * really just the older, worse values. Saving a student means a person
+   * accepted every value in it, so on return the whole row reads as settled.
+   *
+   * Fields the reviewer has touched in this session are left alone. Those are
+   * deliberate edits not yet saved, and overwriting them is the one way this
+   * could destroy work rather than restore it.
+   */
+  useEffect(() => {
+    if (!drafts) return;
+    const row = savedRowForDraft(currentDraftIndex);
+    if (row < 0) return;
+
+    const draft = drafts[currentDraftIndex];
+    const saved = students[row];
+    const valueSource = { ...(draft.source?.recognitionValueSource || {}) };
+    const editedAt = { ...(draft.source?.recognitionManualEditedAt || {}) };
+    const groups: Array<'basic' | 'cagi' | 'satisfaction'> = ['basic', 'cagi', 'satisfaction'];
+    const rebuilt: Record<string, Record<string, unknown>> = {};
+    let changed = false;
+
+    groups.forEach((group) => {
+      const savedGroup = (saved[group] || {}) as Record<string, unknown>;
+      const draftGroup = { ...((draft[group] || {}) as Record<string, unknown>) };
+      Object.keys(savedGroup).forEach((name) => {
+        const key = `${group}.${name}`;
+        // Already the reviewer's own answer this session -- theirs wins.
+        if (valueSource[key] === 'manual') return;
+        const savedValue = savedGroup[name];
+        if (savedValue === undefined || savedValue === null || savedValue === '') return;
+        if (draftGroup[name] !== savedValue) {
+          draftGroup[name] = savedValue;
+          changed = true;
+        }
+        valueSource[key] = 'manual';
+        editedAt[key] = editedAt[key] || new Date().toISOString();
+        changed = true;
+      });
+      rebuilt[group] = draftGroup;
+    });
+
+    // Every field it touches becomes `manual`, so a second pass finds nothing
+    // left to do and this cannot drive itself in a loop.
+    if (!changed) return;
+    const updated = {
+      ...draft,
+      ...rebuilt,
+      source: {
+        ...(draft.source || {}),
+        recognitionValueSource: valueSource,
+        recognitionManualEditedAt: editedAt,
+      },
+    } as RecognitionDraft;
+    const list = [...drafts];
+    list[currentDraftIndex] = updated;
+    setDrafts(list);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentDraftIndex, drafts, students]);
 
   /**
    * Moves between students without saving.
