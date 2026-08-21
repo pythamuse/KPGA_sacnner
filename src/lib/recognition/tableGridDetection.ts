@@ -69,6 +69,8 @@ export interface FieldRegistration {
   candidateCenterDeviation?: { x: number; y: number };
   candidateCenterOffset?: { x: number; y: number };
   candidateCenterSpread?: { x: number; y: number };
+  candidateCenterScale?: { x: number; y: number };
+  candidateCenterResidualSpread?: { x: number; y: number };
   qualityScore?: number;
   independentRegistration?: boolean;
   diagnostic?: string;
@@ -586,6 +588,8 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
       candidateCenterDeviation: { x: candidateCenter.maxX, y: candidateCenter.maxY },
       candidateCenterOffset: { x: candidateCenter.meanX, y: candidateCenter.meanY },
       candidateCenterSpread: { x: candidateCenter.spreadX, y: candidateCenter.spreadY },
+      candidateCenterScale: { x: candidateCenter.scaleX, y: candidateCenter.scaleY },
+      candidateCenterResidualSpread: { x: candidateCenter.residualSpreadX, y: candidateCenter.residualSpreadY },
       qualityScore: Math.max(quality.score, candidateCenter.maxX, candidateCenter.maxY),
       ...(spec.independentRegistration ? { independentRegistration: true } : {}),
       diagnostic,
@@ -658,6 +662,10 @@ interface CandidateCenterQuality {
   meanY: number;
   spreadX: number;
   spreadY: number;
+  scaleX: number;
+  scaleY: number;
+  residualSpreadX: number;
+  residualSpreadY: number;
 }
 
 function calculateGridQuality(
@@ -717,6 +725,34 @@ function getCandidateCenterQuality(
   const meanX = average(deltas.map((delta) => delta.x));
   const meanY = average(deltas.map((delta) => delta.y));
 
+  // A scan can differ from the template by a small scale as well as a shift --
+  // paper stretch and scanner feed both produce one. spreadX measures scatter
+  // about the mean shift alone, so a pure scale difference registers there as
+  // though every cell had wandered independently. Fit the scale the same way
+  // getLineFit does for the rules, and report what scatter survives removing
+  // it. Reported only; the gate below still judges on spreadX.
+  const expectedX = group.candidates.map((candidate) => candidate.rect.x + candidate.rect.width / 2);
+  const expectedY = group.candidates.map((candidate) => candidate.rect.y + candidate.rect.height / 2);
+  const fitAxis = (expected: number[], values: number[], mean: number) => {
+    const expectedMean = average(expected);
+    const denominator = expected.reduce((sum, value) => sum + (value - expectedMean) ** 2, 0);
+    if (denominator <= 0) {
+      return { scale: 0, residualSpread: Math.max(...values.map((value) => Math.abs(value - mean))) };
+    }
+    const scale = expected.reduce(
+      (sum, value, index) => sum + (value - expectedMean) * (values[index] - mean),
+      0,
+    ) / denominator;
+    return {
+      scale,
+      residualSpread: Math.max(
+        ...values.map((value, index) => Math.abs(value - (mean + scale * (expected[index] - expectedMean)))),
+      ),
+    };
+  };
+  const fitX = fitAxis(expectedX, deltas.map((delta) => delta.x), meanX);
+  const fitY = fitAxis(expectedY, deltas.map((delta) => delta.y), meanY);
+
   return {
     maxX: Math.max(...deltas.map((delta) => Math.abs(delta.x))),
     maxY: Math.max(...deltas.map((delta) => Math.abs(delta.y))),
@@ -724,6 +760,10 @@ function getCandidateCenterQuality(
     meanY,
     spreadX: Math.max(...deltas.map((delta) => Math.abs(delta.x - meanX))),
     spreadY: Math.max(...deltas.map((delta) => Math.abs(delta.y - meanY))),
+    scaleX: fitX.scale,
+    scaleY: fitY.scale,
+    residualSpreadX: fitX.residualSpread,
+    residualSpreadY: fitY.residualSpread,
   };
 }
 
@@ -1044,6 +1084,10 @@ function registrationToCandidateCenterQuality(registration: FieldRegistration): 
     meanY: registration.candidateCenterOffset?.y ?? 0,
     spreadX: registration.candidateCenterSpread?.x ?? 1,
     spreadY: registration.candidateCenterSpread?.y ?? 1,
+    scaleX: registration.candidateCenterScale?.x ?? 0,
+    scaleY: registration.candidateCenterScale?.y ?? 0,
+    residualSpreadX: registration.candidateCenterResidualSpread?.x ?? 1,
+    residualSpreadY: registration.candidateCenterResidualSpread?.y ?? 1,
   };
 }
 
