@@ -60,14 +60,21 @@ export default function RecognitionReview({
   // fields that actually need them. Off by default, one click away.
   const [showDiagnostics, setShowDiagnostics] = React.useState(false);
 
-  const buildManualReviewSource = (field: string) => {
+  const buildReviewSource = (field: string, valueSource: RecognitionValueSource) => {
     const priorTrace = draft.source?.recognitionDecisionTrace?.[field];
+    const reviewMessage = valueSource === 'confirmed'
+      ? 'The reviewer confirmed the recognized value.'
+      : valueSource === 'blank_ok'
+        ? 'The reviewer confirmed that the candidate field is blank.'
+        : valueSource === 'manual'
+          ? 'Value was entered or changed during manual review.'
+          : 'The reviewer confirmed the current value.';
 
     return {
       ...(draft.source || {}),
       recognitionValueSource: {
         ...(draft.source?.recognitionValueSource || {}),
-        [field]: 'manual' as RecognitionValueSource,
+        [field]: valueSource,
       },
       recognitionManualEditedAt: {
         ...(draft.source?.recognitionManualEditedAt || {}),
@@ -76,11 +83,13 @@ export default function RecognitionReview({
       recognitionDecisionTrace: {
         ...(draft.source?.recognitionDecisionTrace || {}),
         [field]: priorTrace
-          ? `${priorTrace} Value was entered or changed during manual review.`
-          : 'Value was entered or changed during manual review.',
+          ? `${priorTrace} ${reviewMessage}`
+          : reviewMessage,
       },
     };
   };
+
+  const buildManualReviewSource = (field: string) => buildReviewSource(field, 'manual');
 
   const handleBasicChange = (field: string, val: any) => {
     onChange({
@@ -124,7 +133,10 @@ export default function RecognitionReview({
    * four however much work gets done and the reviewer has to hold the
    * remainder in their head across nineteen students.
    */
-  const isSettled = (key: string) => draft.source?.recognitionValueSource?.[key] === 'manual';
+  const isSettled = (key: string) => {
+    const source = draft.source?.recognitionValueSource?.[key];
+    return source === 'manual' || source === 'confirmed' || source === 'blank_ok' || source === 'restored';
+  };
 
   const fieldDomId = (key: string) => `review-field-${key.replace(/\./g, '-')}`;
 
@@ -179,13 +191,19 @@ export default function RecognitionReview({
   const confirmField = (key: string) => {
     const [group, name] = key.split('.');
     const value = currentValue(key);
+    const valueSource: RecognitionValueSource = needsValue(key) ? 'blank_ok' : 'confirmed';
     // Including when there is no value: a student who answered nothing is a
     // fact about the form, and the reviewer needs a way to record having seen
-    // it. The handlers write the value back as it stands and mark the field
-    // reviewed, so an empty one stays empty and stops being outstanding.
-    if (group === 'basic') handleBasicChange(name, value);
-    else if (group === 'cagi') handleCagiChange(name, value as number);
-    else handleSatisfactionChange(name, value as number);
+    // it. Keep this explicit confirmation separate from a value that was
+    // changed by hand: both are useful labels, but they mean different things.
+    const source = buildReviewSource(key, valueSource);
+    if (group === 'basic') {
+      onChange({ ...draft, source, basic: { ...draft.basic, [name]: value } });
+    } else if (group === 'cagi') {
+      onChange({ ...draft, source, cagi: { ...draft.cagi, [name]: value as number } });
+    } else {
+      onChange({ ...draft, source, satisfaction: { ...draft.satisfaction, [name]: value as number } });
+    }
   };
 
   const renderConfidenceBadge = (key: string) => {
@@ -422,7 +440,7 @@ export default function RecognitionReview({
    * and picking one already marks it settled through the normal change path.
    */
   const renderConfirmButton = (key: string) => {
-    if (confidenceRank[getConfidenceLevel(key)] === 0) return null;
+    if (confidenceRank[getConfidenceLevel(key)] === 0 && !needsValue(key)) return null;
     if (isSettled(key)) return null;
     const empty = needsValue(key);
 
@@ -511,17 +529,24 @@ export default function RecognitionReview({
   const renderValueSourceBadge = (key: string) => {
     const source = draft.source?.recognitionValueSource?.[key] || 'unresolved';
     const manualEditedAt = draft.source?.recognitionManualEditedAt?.[key];
-    const styleMap: Record<RecognitionValueSource, { border: string; text: string; bg: string; label: string }> = {
+    const styleMap: Record<string, { border: string; text: string; bg: string; label: string }> = {
       auto: { border: '#9fdfc5', text: '#177245', bg: '#eefaf3', label: '자동 인식' },
       manual: { border: '#b9c8f3', text: '#405aa8', bg: '#f2f5ff', label: '수기 수정' },
       unresolved: { border: '#d8dde8', text: '#667085', bg: '#f6f8fb', label: '미확정' },
+      restored: { border: '#c7ced8', text: '#52606d', bg: '#f1f4f7', label: '저장값 복원' },
     };
-    const style = styleMap[source];
+    Object.assign(styleMap, {
+      confirmed: { ...styleMap.manual, label: '\uD655\uC778 \uC644\uB8CC' },
+      blank_ok: { ...styleMap.manual, label: '\uBE48\uCE78 \uD655\uC778' },
+    });
+    const style = styleMap[source] || styleMap.unresolved;
     const title = manualEditedAt
       ? `수기 수정 시각: ${new Date(manualEditedAt).toLocaleString('ko-KR')}`
       : source === 'auto'
         ? '자동 인식값으로 확정되었습니다.'
-        : '자동 인식값이 확정되지 않아 검수가 필요합니다.';
+        : source === 'restored'
+          ? '저장된 값으로 복원되었습니다. 사람이 명시적으로 확인한 라벨은 아닙니다.'
+          : '자동 인식값이 확정되지 않아 검수가 필요합니다.';
 
     return (
       <span
@@ -828,7 +853,19 @@ export default function RecognitionReview({
                 <strong>{fieldLabel(key)}</strong>
                 <span style={{ color: 'var(--text-muted)' }}>
                   {' '}| {source ? cropSourceLabel[source] : '좌표 정보 없음'}
-                  {' '}| {valueSource === 'auto' ? '자동 인식' : valueSource === 'manual' ? '수기 수정' : '미확정'}
+                  {' '}| {
+                    valueSource === 'auto'
+                      ? '자동 인식'
+                      : valueSource === 'manual'
+                        ? '수기 수정'
+                        : valueSource === 'confirmed'
+                          ? '확인 완료'
+                          : valueSource === 'blank_ok'
+                            ? '빈칸 확인'
+                            : valueSource === 'restored'
+                              ? '저장값 복원'
+                              : '미확정'
+                  }
                   {registration ? ` | ${registration.tableId} / ${registration.status}` : ''}
                 </span>
                 {horizontal && vertical && (

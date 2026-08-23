@@ -8,6 +8,7 @@ import {
 } from '../../../lib/validation/normalize';
 import { generateWorkbookPair } from '../../../lib/excel/generateWorkbookPair';
 import { StudentData } from '../../../lib/validation/types';
+import { appendRecognitionLabels } from '../../../lib/labelExport/labelStore';
 
 export async function POST(req: Request) {
   try {
@@ -72,6 +73,15 @@ export async function POST(req: Request) {
         error: '엑셀 생성 후 무결성 검증 실패',
         errors: verifyResult.errors.map(msg => ({ code: 'INTEGRITY_ERROR', message: msg }))
       }, { status: 500 });
+    }
+
+    if (newStudent.source?.cagiImageId) {
+      await appendRecognitionLabels({
+        jobId,
+        studentIndex: newIndex,
+        cagiImageId: newStudent.source.cagiImageId,
+        student: newStudent,
+      });
     }
 
     return NextResponse.json({

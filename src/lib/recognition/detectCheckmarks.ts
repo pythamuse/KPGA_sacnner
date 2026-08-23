@@ -8,6 +8,10 @@ import {
   type ImageAnalysisData,
   type PixelRect,
 } from './markDensity';
+import type {
+  RecognitionCandidateMeasurement,
+  RecognitionMeasurementsByField,
+} from '../labelExport/types';
 import { getTemplate, type ChoiceGroup } from './roiTemplates';
 import {
   buildCagiRowDetection,
@@ -19,6 +23,7 @@ import {
   buildSatisfactionGridDetection,
   type FieldRegistration,
   type GridDetectionResult,
+  type RegistrationStatus,
 } from './tableGridDetection';
 import {
   matchBasicCheckboxes,
@@ -32,7 +37,7 @@ import { loadBlankFormBaseline } from './templateBaseline';
 import fs from 'fs/promises';
 
 export type RecognitionCropSource = 'grid' | 'grid-candidate' | 'row' | 'row-fallback' | 'fixed';
-export type RecognitionValueSource = 'auto' | 'manual' | 'unresolved';
+export type RecognitionValueSource = 'auto' | 'manual' | 'confirmed' | 'blank_ok' | 'unresolved' | 'restored';
 
 export interface RecognitionDraft {
   source?: {
@@ -94,6 +99,8 @@ export interface RecognitionDraft {
   recognitionRegistration?: Record<string, FieldRegistration>;
   recognitionValueSource?: Record<string, RecognitionValueSource>;
   recognitionDecisionTrace?: Record<string, string>;
+  /** Server-only outlet; `/api/recognize` removes it before returning JSON. */
+  recognitionMeasurements?: RecognitionMeasurementsByField;
   warnings?: string[];
 }
 
@@ -122,6 +129,7 @@ export async function recognizeStudentForms(
   const recognitionRegistration: Record<string, FieldRegistration> = {};
   const recognitionValueSource: Record<string, RecognitionValueSource> = {};
   const recognitionDecisionTrace: Record<string, string> = {};
+  const recognitionMeasurements: RecognitionMeasurementsByField = {};
   // Instrumentation only: appended to the basic-information traces below so
   // the box placement can be read off real scans instead of inferred. Nothing
   // reads these strings back.
@@ -257,6 +265,13 @@ export async function recognizeStudentForms(
           candidatePixelOverrides: cagiBaseline.basicCheckboxCandidateRects?.[group.field]
             || cagiBaseline.candidateRects[group.field],
         } : undefined,
+      );
+      recognitionMeasurements[result.field] = buildCandidateMeasurements(
+        result,
+        group,
+        registration,
+        cropSource,
+        cagiImage,
       );
       draft.confidence[result.field] = result.confidence;
       draft.candidates![result.field] = mapRecognizedCandidates(result.field, result.candidates);
@@ -404,6 +419,13 @@ export async function recognizeStudentForms(
           candidatePixelOverrides: satisfactionBaseline.candidateRects[group.field],
         } : undefined,
       );
+      recognitionMeasurements[result.field] = buildCandidateMeasurements(
+        result,
+        group,
+        registration,
+        cropSource,
+        satisfactionImage,
+      );
       draft.confidence[result.field] = result.confidence;
       draft.candidates![result.field] = result.candidates;
 
@@ -465,6 +487,17 @@ export async function recognizeStudentForms(
   if (Object.keys(recognitionRegistration).length > 0) {
     draft.recognitionRegistration = recognitionRegistration;
   }
+  if (Object.keys(recognitionMeasurements).length > 0) {
+    draft.recognitionMeasurements = Object.fromEntries(
+      Object.entries(recognitionMeasurements).map(([field, measurements]) => [
+        field,
+        measurements.map((measurement) => ({
+          ...measurement,
+          autoFilled: recognitionValueSource[field] === 'auto',
+        })),
+      ]),
+    );
+  }
   draft.recognitionValueSource = recognitionValueSource;
   draft.recognitionDecisionTrace = recognitionDecisionTrace;
 
@@ -523,25 +556,57 @@ function mapRecognizedGrade(value: number | string): string {
   return map[String(value)] || String(value);
 }
 
+function mapRecognizedCandidateValue(field: string, value: number | string): number | string {
+  if (field === 'basic.schoolType') return mapRecognizedSchoolType(value);
+  if (field === 'basic.grade') return mapRecognizedGrade(value);
+  return value;
+}
+
+function buildCandidateMeasurements(
+  result: ChoiceGroupResult,
+  group: ChoiceGroup,
+  registration: FieldRegistration | undefined,
+  cropSource: RecognitionCropSource,
+  image: Pick<ImageAnalysisData, 'pageInkRatio' | 'pageIsBinarySource'>,
+): RecognitionCandidateMeasurement[] {
+  const measuredByIndex = new Map(
+    (result.candidateMeasurements || []).map((measurement) => [measurement.candidateIndex, measurement]),
+  );
+
+  return group.candidates.map((candidate, candidateIndex) => {
+    const measurement = measuredByIndex.get(candidateIndex);
+    const scored = result.candidates.find((entry) => entry.value === candidate.value);
+    return {
+      field: result.field,
+      candidateValue: mapRecognizedCandidateValue(result.field, candidate.value),
+      candidateIndex,
+      score: measurement?.score ?? scored?.score ?? 0,
+      actualInk: measurement?.actualInk ?? null,
+      baselineInk: measurement?.baselineInk ?? null,
+      brightnessOffset: measurement?.brightnessOffset ?? null,
+      alignX: measurement?.alignX ?? null,
+      alignY: measurement?.alignY ?? null,
+      largestComponentSize: measurement?.largestComponentSize ?? null,
+      largestComponentRatio: measurement?.largestComponentRatio ?? null,
+      diagonalRatio: measurement?.diagonalRatio ?? null,
+      registrationStatus: registration?.status || 'failed' as RegistrationStatus,
+      cropSource,
+      pageInkRatio: image.pageInkRatio ?? 0,
+      pageIsBinarySource: image.pageIsBinarySource ?? false,
+      confidence: result.confidence,
+      autoFilled: false,
+    };
+  });
+}
+
 function mapRecognizedCandidates(
   field: string,
   candidates: Array<{ value: number | string; score: number }>,
 ): Array<{ value: number | string; score: number }> {
-  if (field === 'basic.schoolType') {
-    return candidates.map((candidate) => ({
-      ...candidate,
-      value: mapRecognizedSchoolType(candidate.value),
-    }));
-  }
-
-  if (field === 'basic.grade') {
-    return candidates.map((candidate) => ({
-      ...candidate,
-      value: mapRecognizedGrade(candidate.value),
-    }));
-  }
-
-  return candidates;
+  return candidates.map((candidate) => ({
+    ...candidate,
+    value: mapRecognizedCandidateValue(field, candidate.value),
+  }));
 }
 
 function unionPixelRects(rects: PixelRect[]): PixelRect {

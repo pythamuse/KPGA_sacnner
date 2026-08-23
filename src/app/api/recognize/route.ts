@@ -12,6 +12,7 @@ import {
 import { matchBatch } from '../../../lib/recognition/batchMatcher';
 import { detectCagiEarlyIntervention } from '../../../lib/recognition/cagiEarlyIntervention';
 import { buildSourcePreview } from '../../../lib/recognition/buildSourcePreview';
+import { storeRecognitionMeasurements } from '../../../lib/labelExport/labelStore';
 import {
   isSafeJobId,
   isUploadInventory,
@@ -198,8 +199,16 @@ export async function POST(req: Request) {
         recognitionRejectedCandidateRects,
         recognitionValueSource,
         recognitionDecisionTrace,
+        recognitionMeasurements,
         ...recognizedDraft
       } = draft;
+      const cagiImageId = path.basename(pair.cagiPath).split('.')[0];
+      await storeRecognitionMeasurements({
+        jobId,
+        studentIndex,
+        cagiImageId,
+        measurements: recognitionMeasurements || {},
+      });
       const preview = await buildSourcePreview(
         pair.cagiPath,
         pair.satisfactionPath,
@@ -213,7 +222,7 @@ export async function POST(req: Request) {
       studentDrafts.push({
         ...recognizedDraft,
         source: {
-          cagiImageId: path.basename(pair.cagiPath).split('.')[0],
+          cagiImageId,
           satisfactionImageId: path.basename(pair.satisfactionPath).split('.')[0],
           cagiImageDataUrl: preview.cagiImageDataUrl,
           satisfactionImageDataUrl: preview.satisfactionImageDataUrl,

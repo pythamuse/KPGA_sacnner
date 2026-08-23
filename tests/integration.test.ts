@@ -55,6 +55,7 @@ describe('upload and recognition integration', () => {
     expect(response.status).toBe(200);
     const body = await response.json();
     expect(body.studentDrafts).toHaveLength(1);
+    expect(body.studentDrafts[0].recognitionMeasurements).toBeUndefined();
     expect(body.studentDrafts[0].source.cagiImageDataUrl).toMatch(/^data:image\/jpeg;base64,/);
 
     // Successful recognition removes private originals after it has constructed the review payload.

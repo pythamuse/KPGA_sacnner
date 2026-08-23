@@ -56,7 +56,9 @@ const IMAGE_SOURCE_KEYS = [
 export function stripDraftImages(draft: RecognitionDraft): RecognitionDraft {
   const source = draft.source as Record<string, unknown> | undefined;
   if (!source) {
-    return draft;
+    if (!draft.recognitionMeasurements) return draft;
+    const { recognitionMeasurements: _recognitionMeasurements, ...slimDraft } = draft;
+    return slimDraft as RecognitionDraft;
   }
 
   const slimSource: Record<string, unknown> = { ...source };
@@ -64,7 +66,9 @@ export function stripDraftImages(draft: RecognitionDraft): RecognitionDraft {
     delete slimSource[key];
   }
 
-  return { ...draft, source: slimSource } as RecognitionDraft;
+  // Measurements are server-side training data, never review/session payload.
+  const { recognitionMeasurements: _recognitionMeasurements, ...slimDraft } = draft;
+  return { ...slimDraft, source: slimSource } as RecognitionDraft;
 }
 
 export function stripStudentImages(student: StudentData): StudentData {

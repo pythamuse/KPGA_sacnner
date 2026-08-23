@@ -22,6 +22,9 @@ export interface ImageAnalysisData {
   contentBoundsSource?: ContentBoundsSource;
   pageBounds?: PixelBounds;
   contentBoundsConfident: boolean;
+  /** Whole-page quality measurements kept for the offline training export. */
+  pageInkRatio?: number;
+  pageIsBinarySource?: boolean;
 }
 
 export interface PixelBounds {
@@ -43,11 +46,33 @@ export interface CandidateScore {
   score: number;
 }
 
+/**
+ * Candidate-level measurements used by the offline label exporter.
+ *
+ * These are observations made after the existing scoring calculation. They
+ * are deliberately separate from CandidateScore so the review response keeps
+ * its existing small candidate shape.
+ */
+export interface CandidateMeasurement {
+  candidateIndex: number;
+  score: number;
+  actualInk: number | null;
+  baselineInk: number | null;
+  brightnessOffset: number | null;
+  alignX: number | null;
+  alignY: number | null;
+  largestComponentSize: number | null;
+  largestComponentRatio: number | null;
+  diagonalRatio: number | null;
+}
+
 export interface ChoiceGroupResult {
   field: string;
   value?: number | string;
   confidence: 'high' | 'medium' | 'low';
   candidates: CandidateScore[];
+  /** Internal measurement outlet; removed before the API response is built. */
+  candidateMeasurements?: CandidateMeasurement[];
   /**
    * Why this group landed where it did, as numbers and fixed labels only. See
    * `describeDecision`. Nothing in this string comes from the scanned page
@@ -127,7 +152,8 @@ interface BrightnessReferenceProbe {
 }
 
 interface ScoredCandidate extends CandidateScore {
-  shape?: TemplateInkShape;
+  shape?: TemplateInkFeatures;
+  candidateIndex: number;
   /** Position in the group as the template lists it, 1-based, before sorting. */
   position: number;
   /**
@@ -201,6 +227,7 @@ export async function loadImageAnalysisData(filePath: string): Promise<ImageAnal
     : frameBounds
       ? 'frame'
       : 'dark';
+  const pageQuality = calculatePageQuality(pixels);
 
   return {
     width,
@@ -210,6 +237,39 @@ export async function loadImageAnalysisData(filePath: string): Promise<ImageAnal
     contentBoundsSource,
     pageBounds: pageBounds || undefined,
     contentBoundsConfident: paperContentBounds !== null || frameBounds !== null,
+    ...pageQuality,
+  };
+}
+
+/**
+ * Measures the submitted raster without changing any recognition input.
+ * `sharp` has already flattened and grayscaled the source here, so the
+ * intermediate-pixel ratio is the quality signal available to the server for
+ * deciding whether the source was effectively bilevel.
+ */
+function calculatePageQuality(pixels: Buffer): {
+  pageInkRatio: number;
+  pageIsBinarySource: boolean;
+} {
+  if (pixels.length === 0) {
+    return { pageInkRatio: 0, pageIsBinarySource: true };
+  }
+
+  let inkPixels = 0;
+  let intermediatePixels = 0;
+  for (let index = 0; index < pixels.length; index += 1) {
+    const pixel = pixels[index];
+    if (pixel < 200) inkPixels += 1;
+    if (pixel !== 0 && pixel !== 255) intermediatePixels += 1;
+  }
+
+  const intermediateRatio = intermediatePixels / pixels.length;
+  return {
+    pageInkRatio: inkPixels / pixels.length,
+    // A small amount of anti-aliasing/compression residue is still compatible
+    // with a scanned 1-bit source. The ratio, rather than a single pixel,
+    // keeps the quality flag stable on real uploaded pages.
+    pageIsBinarySource: intermediateRatio <= 0.01,
   };
 }
 
@@ -944,6 +1004,7 @@ export function analyzeChoiceGroup(
 
       return {
         position: index + 1,
+        candidateIndex: index,
         atX: ((rect.left + rect.right) / 2 - contentLeft) / contentWidth,
         value: candidate.value,
         score: roundScore(
@@ -960,6 +1021,18 @@ export function analyzeChoiceGroup(
     })
     .sort((a, b) => b.score - a.score);
   const candidates: CandidateScore[] = scoredCandidates.map(({ value, score }) => ({ value, score }));
+  const candidateMeasurements: CandidateMeasurement[] = scoredCandidates.map((candidate) => ({
+    candidateIndex: candidate.candidateIndex,
+    score: candidate.score,
+    actualInk: candidate.shape?.actualInk ?? null,
+    baselineInk: candidate.shape?.baselineInk ?? null,
+    brightnessOffset: candidate.shape?.brightnessOffset ?? null,
+    alignX: candidate.shape?.alignX ?? null,
+    alignY: candidate.shape?.alignY ?? null,
+    largestComponentSize: candidate.shape?.largestComponentSize ?? null,
+    largestComponentRatio: candidate.shape?.largestComponentRatio ?? null,
+    diagonalRatio: candidate.shape?.diagonalRatio ?? null,
+  }));
 
   const best = scoredCandidates[0];
   const second = scoredCandidates[1];
@@ -988,6 +1061,7 @@ export function analyzeChoiceGroup(
       field: group.field,
       confidence: 'low',
       candidates,
+      candidateMeasurements,
       decision: describeDecision(evidence, 'low', ['no-candidates']),
     };
   }
@@ -1044,6 +1118,7 @@ export function analyzeChoiceGroup(
       field: group.field,
       confidence: 'low',
       candidates,
+      candidateMeasurements,
       decision: describeDecision(
         evidence,
         'low',
@@ -1074,6 +1149,7 @@ export function analyzeChoiceGroup(
       value: best.value,
       confidence: 'high',
       candidates,
+      candidateMeasurements,
       decision: describeDecision(evidence, 'high', refused),
     };
   }
@@ -1087,6 +1163,7 @@ export function analyzeChoiceGroup(
       value: best.value,
       confidence: 'medium',
       candidates,
+      candidateMeasurements,
       decision: describeDecision(evidence, 'medium', refused),
     };
   }
@@ -1099,6 +1176,7 @@ export function analyzeChoiceGroup(
     field: group.field,
     confidence: 'low',
     candidates,
+    candidateMeasurements,
     decision: describeDecision(evidence, 'low', refused),
   };
 }

@@ -536,22 +536,33 @@ export default function Home() {
       const draftGroup = { ...((draft[group] || {}) as Record<string, unknown>) };
       Object.keys(savedGroup).forEach((name) => {
         const key = `${group}.${name}`;
-        // Already the reviewer's own answer this session -- theirs wins.
-        if (valueSource[key] === 'manual') return;
+        // Already the reviewer's own answer this session -- theirs wins. A
+        // saved row is not a manual edit or an explicit confirmation, so an
+        // automatic or unresolved draft value must still be restored below.
+        if (valueSource[key] === 'manual' || valueSource[key] === 'confirmed' || valueSource[key] === 'blank_ok') return;
         const savedValue = savedGroup[name];
         if (savedValue === undefined || savedValue === null || savedValue === '') return;
         if (draftGroup[name] !== savedValue) {
           draftGroup[name] = savedValue;
           changed = true;
         }
-        valueSource[key] = 'manual';
-        editedAt[key] = editedAt[key] || new Date().toISOString();
-        changed = true;
+        // Restored values are settled for the screen, but they were not
+        // explicitly confirmed by a reviewer and must remain weak labels.
+        if (valueSource[key] !== 'restored') {
+          valueSource[key] = 'restored';
+          changed = true;
+        }
+        // A restored value is not a manual edit. Normally this entry is absent,
+        // but remove a stale timestamp so the badge cannot call it hand-edited.
+        if (editedAt[key] !== undefined) {
+          delete editedAt[key];
+          changed = true;
+        }
       });
       rebuilt[group] = draftGroup;
     });
 
-    // Every field it touches becomes `manual`, so a second pass finds nothing
+    // Every field it touches becomes `restored`, so a second pass finds nothing
     // left to do and this cannot drive itself in a loop.
     if (!changed) return;
     const updated = {
