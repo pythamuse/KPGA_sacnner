@@ -105,14 +105,18 @@ REAL_SCAN_CAGI_PDF="..." REAL_SCAN_SAT_PDF="..." REAL_SCAN_PAGES=6 \
 정답 수보다 **먼저** 확인하는 칸이 있다. 정답표상 표시가 없는 칸이며, 점수기가 과거에 고신뢰로 채우려 했던 자리다.
 
 ```
-p3 basic.gender       빈칸이어야 한다
-p3 satisfaction.q01   빈칸이어야 한다
-p5 satisfaction.q01   빈칸이어야 한다
+p3  basic.gender       빈칸이어야 한다
+p3  satisfaction.q01   빈칸이어야 한다
+p5  satisfaction.q01   빈칸이어야 한다
+p12 basic.gender       빈칸이어야 한다
+p19 basic.age          빈칸이어야 한다
 ```
 
 이 셋 중 하나라도 채우면서 총점이 오르는 변경은 **실패**다.
 
-목록을 외우지 말고 정답표에서 뽑는다 — 한동안 이 문서는 p5를 빠뜨린 채 둘만 적고 있었다.
+**목록을 외우지 말고 정답표에서 뽑는다. 이 문서는 두 번 뒤처졌다** — 한동안 p5를 빠뜨린 채
+둘만 적고 있었고, 2026-08-24에는 `p12 basic.gender`와 `p19 basic.age`를 빠뜨린 채 셋만 적고
+있었다. **개수가 다섯이 아니면 이 문서가 아니라 정답표가 맞다.**
 
 ```bash
 node -e "const j=require('./local-scans/answer-key.json');j.pages.forEach(p=>Object.entries(p).forEach(([k,v])=>{if(k!=='page'&&v===null)console.log('p'+p.page,k)}))"
