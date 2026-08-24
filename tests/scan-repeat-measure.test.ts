@@ -4,6 +4,7 @@ import fs from 'fs';
 import os from 'os';
 import { recognizeStudentForms } from '../src/lib/recognition/detectCheckmarks';
 import { PDF_RENDER_OPTIONS } from '../src/lib/pdf/pdfRenderConfig';
+import { matchBatch, type StackOrder } from '../src/lib/recognition/batchMatcher';
 
 /**
  * Noise floor between two scans of the SAME paper.
@@ -31,10 +32,15 @@ import { PDF_RENDER_OPTIONS } from '../src/lib/pdf/pdfRenderConfig';
  * variables the suite skips.
  */
 
+// A run may declare that its back stack was scanned reversed. The pairing goes
+// through the same `matchBatch` the recognize route calls, so a run with the
+// flag set exercises the production path rather than a copy of it.
+const order = (value: string | undefined): StackOrder => (value === 'reversed' ? 'reversed' : 'same');
+
 const RUNS = [
-  { label: 'A', cagi: process.env.REAL_SCAN_CAGI_PDF, sat: process.env.REAL_SCAN_SAT_PDF },
-  { label: 'B', cagi: process.env.REPEAT_SCAN_CAGI_PDF, sat: process.env.REPEAT_SCAN_SAT_PDF },
-  { label: 'C', cagi: process.env.REPEAT3_SCAN_CAGI_PDF, sat: process.env.REPEAT3_SCAN_SAT_PDF },
+  { label: 'A', cagi: process.env.REAL_SCAN_CAGI_PDF, sat: process.env.REAL_SCAN_SAT_PDF, order: order(process.env.REAL_SCAN_ORDER) },
+  { label: 'B', cagi: process.env.REPEAT_SCAN_CAGI_PDF, sat: process.env.REPEAT_SCAN_SAT_PDF, order: order(process.env.REPEAT_SCAN_ORDER) },
+  { label: 'C', cagi: process.env.REPEAT3_SCAN_CAGI_PDF, sat: process.env.REPEAT3_SCAN_SAT_PDF, order: order(process.env.REPEAT3_SCAN_ORDER) },
 ].filter((r) => r.cagi && r.sat);
 
 const PAGES = Number(process.env.REAL_SCAN_PAGES || 19);
@@ -111,13 +117,20 @@ function readValues(draft: Record<string, unknown>): Filled {
   return out;
 }
 
-async function runOnce(cagiPdf: string, satPdf: string, label: string): Promise<Filled[]> {
+async function runOnce(
+  cagiPdf: string,
+  satPdf: string,
+  label: string,
+  satisfactionOrder: StackOrder = 'same',
+): Promise<Filled[]> {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), `kpga-repeat-${label}-`));
   const cagiPages = await renderPdfPages(cagiPdf, PAGES, tmp, 'cagi');
   const satPages = await renderPdfPages(satPdf, PAGES, tmp, 'sat');
+  // The production pairing, not a reimplementation of it.
+  const pairs = matchBatch(cagiPages, satPages, satisfactionOrder);
   const out: Filled[] = [];
-  for (let i = 0; i < Math.min(cagiPages.length, satPages.length); i += 1) {
-    const draft = await recognizeStudentForms(cagiPages[i], satPages[i]);
+  for (const pair of pairs) {
+    const draft = await recognizeStudentForms(pair.cagiPath, pair.satisfactionPath);
     out.push(readValues(draft as unknown as Record<string, unknown>));
   }
   return out;
@@ -151,7 +164,7 @@ describe.skipIf(RUNS.length < 2)('same-paper rescan noise floor', () => {
     const key = loadKey();
     const results: Array<{ label: string; values: Filled[] }> = [];
     for (const run of RUNS) {
-      results.push({ label: run.label, values: await runOnce(run.cagi!, run.sat!, run.label) });
+      results.push({ label: run.label, values: await runOnce(run.cagi!, run.sat!, run.label, run.order) });
     }
 
     const report: string[] = ['\n============== SAME-PAPER RESCAN ==============',
@@ -160,7 +173,8 @@ describe.skipIf(RUNS.length < 2)('same-paper rescan noise floor', () => {
     for (const r of results) {
       const filled = r.values.reduce((n, v) => n + ALL_FIELDS.filter((f) => v[f] != null).length, 0);
       const scored = scoreAgainstKey(r.values, key);
-      report.push(`  run ${r.label}: auto-filled ${filled}`
+      const declared = RUNS.find((run) => run.label === r.label)?.order ?? 'same';
+      report.push(`  run ${r.label} (back stack ${declared}): auto-filled ${filled}`
         + (scored ? `  CORRECT ${scored.correct}  WRONG ${scored.wrong}`
           + `  (blank-cell violations ${scored.blankViolation})` : '  (no answer key)'));
     }

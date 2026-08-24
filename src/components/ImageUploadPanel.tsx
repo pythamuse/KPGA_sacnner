@@ -18,6 +18,7 @@ import {
   hasMeaningfulRenderedPixels,
 } from '@/lib/pdf/pdfRenderConfig';
 import { cagiTemplate, satisfactionTemplate } from '@/lib/recognition/roiTemplates';
+import { describePairing, type StackOrder } from '@/lib/recognition/batchMatcher';
 import type { UploadBatchReference, UploadInventory } from '@/lib/uploadInventory';
 
 export type UploadMode = 'sequential' | 'batch';
@@ -25,7 +26,7 @@ export type UploadMode = 'sequential' | 'batch';
 interface ImageUploadPanelProps {
   mode: UploadMode;
   jobId: string;
-  onAnalyzeTrigger: (inventory: UploadInventory) => void | Promise<void>;
+  onAnalyzeTrigger: (inventory: UploadInventory, satisfactionOrder: StackOrder) => void | Promise<void>;
   onUploadProgressChange?: (isProcessing: boolean) => void;
   onUploadSuccess: (type: 'cagi' | 'satisfaction', imageId: string, filename: string) => void;
 }
@@ -203,6 +204,7 @@ export default function ImageUploadPanel({
   const [cagiCount, setCagiCount] = useState<number>(0);
   const [satCount, setSatCount] = useState<number>(0);
   const [batchStatusMessage, setBatchStatusMessage] = useState<string>('');
+  const [satisfactionOrder, setSatisfactionOrder] = useState<StackOrder>('same');
   const [batchCorrectionWarnings, setBatchCorrectionWarnings] = useState<BatchCorrectionWarning[]>([]);
   const [isBatchProcessing, setIsBatchProcessing] = useState<boolean>(false);
   const [isCameraStarting, setIsCameraStarting] = useState<boolean>(false);
@@ -443,7 +445,8 @@ export default function ImageUploadPanel({
       else setSatCount(1);
 
       if (uploadInventoryRef.current.cagi && uploadInventoryRef.current.satisfaction) {
-        void onAnalyzeTrigger(uploadInventoryRef.current);
+        // One page per side in this flow, so there is no stack to reverse.
+        void onAnalyzeTrigger(uploadInventoryRef.current, 'same');
       }
       return true;
     } catch (err: any) {
@@ -839,6 +842,12 @@ export default function ImageUploadPanel({
   };
 
   const isMismatch = cagiCount !== satCount;
+  // Shown before recognition starts. The two forms share no identifying field,
+  // so this is the only place a wrong stack order is visible to the user --
+  // once pairing is done, a swapped pair looks like an ordinary student.
+  const pairing = describePairing(Math.min(cagiCount, satCount), satisfactionOrder);
+  const pairingFirst = pairing[0];
+  const pairingLast = pairing[pairing.length - 1];
   const cameraStepLabel = cameraFlow.step === 'cagi' ? '선별검사지 촬영' : '만족도조사 촬영';
   const cameraStepDescription = cameraFlow.step === 'cagi'
     ? '종이 전체가 화면 안에 들어오도록 맞춘 뒤 선별검사지 앞면을 촬영해주세요.'
@@ -1161,6 +1170,47 @@ export default function ImageUploadPanel({
                   </div>
                 </div>
               )}
+              {cagiCount > 0 && satCount > 0 && !isMismatch && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  <div>
+                    <strong style={{ fontSize: 15 }}>뒷면(만족도조사) 묶음 순서</strong>
+                    <p style={{ margin: '4px 0 0', fontSize: 13, color: 'var(--text-muted)' }}>
+                      연속 급지 스캐너는 뒷면을 뒤집힌 순서로 내보냅니다. 손으로 정렬하지 않았다면 역순을 고르세요.
+                    </p>
+                  </div>
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    {([
+                      { value: 'same', label: `앞면과 같은 순서 (1 → ${cagiCount})`, hint: '직접 정렬해서 올린 경우' },
+                      { value: 'reversed', label: `역순 (${cagiCount} → 1)`, hint: '스캔한 순서 그대로 올린 경우' },
+                    ] as const).map((option) => (
+                      <button
+                        key={option.value}
+                        type="button"
+                        className={satisfactionOrder === option.value ? 'btn-primary' : 'btn-secondary'}
+                        onClick={() => setSatisfactionOrder(option.value)}
+                        disabled={isBatchProcessing}
+                        aria-pressed={satisfactionOrder === option.value}
+                        style={{ textAlign: 'left', lineHeight: 1.35 }}
+                      >
+                        <span style={{ display: 'block' }}>{option.label}</span>
+                        <span style={{ display: 'block', fontSize: 12, opacity: 0.75 }}>{option.hint}</span>
+                      </button>
+                    ))}
+                  </div>
+                  {pairingFirst && pairingLast && (
+                    <div className="notice" role="status" style={{ fontSize: 14 }}>
+                      <strong>이 순서로 짝을 짓습니다:</strong>{' '}
+                      1번 학생 = 선별검사지 {pairingFirst.cagiPage}장 + 만족도조사 {pairingFirst.satisfactionPage}장
+                      {pairing.length > 1 && (
+                        <>
+                          {' · '}
+                          {pairingLast.student}번 학생 = 선별검사지 {pairingLast.cagiPage}장 + 만족도조사 {pairingLast.satisfactionPage}장
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
               {isBatchProcessing ? (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: 'var(--text-muted)', fontSize: 14 }}>
                   <div className="spinner" style={{ width: 20, height: 20, borderWidth: 2 }} />
@@ -1172,7 +1222,7 @@ export default function ImageUploadPanel({
                     className="btn-primary"
                     type="button"
                     disabled={isMismatch}
-                    onClick={() => void onAnalyzeTrigger(uploadInventoryRef.current)}
+                    onClick={() => void onAnalyzeTrigger(uploadInventoryRef.current, satisfactionOrder)}
                   >
                     전체 설문지 인식 시작
                   </button>

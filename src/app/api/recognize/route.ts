@@ -9,7 +9,7 @@ import {
   createRecognitionOcrDeadlines,
   ROW_ANCHOR_BATCH_BUDGET_MS,
 } from '../../../lib/recognition/ocrBudget';
-import { matchBatch } from '../../../lib/recognition/batchMatcher';
+import { matchBatch, isStackOrder } from '../../../lib/recognition/batchMatcher';
 import { detectCagiEarlyIntervention } from '../../../lib/recognition/cagiEarlyIntervention';
 import { buildSourcePreview } from '../../../lib/recognition/buildSourcePreview';
 import { storeRecognitionMeasurements } from '../../../lib/labelExport/labelStore';
@@ -37,7 +37,20 @@ export async function POST(req: Request) {
   let requestScratchDir: string | null = null;
 
   try {
-    const { jobId, inventory, trustUploadedTypes = false } = await req.json();
+    const { jobId, inventory, trustUploadedTypes = false, satisfactionOrder = 'same' } = await req.json();
+
+    // The back stack comes out of a sheet-feed scanner reversed. Which order
+    // it is in is the caller's to state and cannot be inferred: the two forms
+    // share no identifying field, so a wrong pairing looks entirely normal.
+    // Anything but the two known values is rejected rather than defaulted,
+    // because silently falling back to 'same' is exactly the failure this
+    // argument exists to prevent.
+    if (!isStackOrder(satisfactionOrder)) {
+      return NextResponse.json({
+        error: '뒷면 묶음 순서 설정이 올바르지 않습니다.',
+        code: 'INVALID_STACK_ORDER',
+      }, { status: 400 });
+    }
 
     if (!isSafeJobId(jobId) || !isUploadInventory(inventory) || !inventory.cagi || !inventory.satisfaction) {
       return NextResponse.json({ error: '인식에 필요한 업로드 묶음 정보가 올바르지 않습니다.' }, { status: 400 });
@@ -173,7 +186,7 @@ export async function POST(req: Request) {
 
     let matchedPairs;
     try {
-      matchedPairs = matchBatch(cagiPaths, satisfactionPaths);
+      matchedPairs = matchBatch(cagiPaths, satisfactionPaths, satisfactionOrder);
     } catch (error) {
       const message = error instanceof Error ? error.message : '알 수 없는 매칭 오류';
       return NextResponse.json({ error: `파일 정렬 및 매칭 중 오류가 발생했습니다: ${message}`, code: 'MATCH_ERROR' }, { status: 400 });

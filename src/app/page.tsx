@@ -2,6 +2,7 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import ImageUploadPanel, { UploadMode } from '@/components/ImageUploadPanel';
+import type { StackOrder } from '@/lib/recognition/batchMatcher';
 import type { UploadInventory } from '@/lib/uploadInventory';
 import RecognitionReview from '@/components/RecognitionReview';
 import StudentTable from '@/components/StudentTable';
@@ -149,7 +150,7 @@ function BrandHeader() {
           whiteSpace: 'nowrap',
         }}
       >
-        테스트 버전 v2026-08-21.3
+        테스트 버전 v2026-08-24.1
       </span>
     </div>
   );
@@ -317,7 +318,7 @@ export default function Home() {
     }
   };
 
-  const requestRecognition = async (inventory: UploadInventory) => {
+  const requestRecognition = async (inventory: UploadInventory, satisfactionOrder: StackOrder) => {
     if (!jobId) return;
 
     setIsRecognizing(true);
@@ -331,7 +332,7 @@ export default function Home() {
         const res = await fetch('/api/recognize', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ jobId, inventory, trustUploadedTypes }),
+          body: JSON.stringify({ jobId, inventory, trustUploadedTypes, satisfactionOrder }),
         });
         const data = await res.json();
 
@@ -371,10 +372,13 @@ export default function Home() {
     }
   };
 
-  const handleTriggerBatchAnalysis = async (inventory: UploadInventory) => {
+  const handleTriggerBatchAnalysis = async (
+    inventory: UploadInventory,
+    satisfactionOrder: StackOrder = 'same',
+  ) => {
     if (!jobId) return;
 
-    await requestRecognition(inventory);
+    await requestRecognition(inventory, satisfactionOrder);
   };
 
   const handleDraftChange = (updatedDraft: RecognitionDraft) => {
