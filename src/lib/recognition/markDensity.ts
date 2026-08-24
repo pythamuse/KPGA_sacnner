@@ -92,6 +92,13 @@ interface TemplateInkShape {
   diagonalRatio: number;
 }
 
+interface ResidualEdges {
+  /** Share of the disagreement carried by samples sitting on a printed edge. */
+  edgeShare: number;
+  /** Share of samples that are on a printed edge. */
+  edgeFraction: number;
+}
+
 interface TemplateInkFeatures extends TemplateInkShape {
   score: number;
   /** Mean darkness of the uploaded cell, after brightness normalisation. */
@@ -119,6 +126,19 @@ interface TemplateInkFeatures extends TemplateInkShape {
   stepsY: number;
   /** Mean disagreement per sample once the baseline was placed. */
   fit: number;
+  /**
+   * Where the leftover disagreement sits, measured on every cell rather than
+   * only while tracing.
+   *
+   * `analyzeResidualComposition` has computed this for a while behind the trace
+   * flag and nothing read it back. Measured over three scans of one stack it
+   * carries what the four thresholds are missing: leave-one-student-out, a rule
+   * over these two and the runner-up's fit recovers cells the gate refuses
+   * without admitting a wrong value, where the gate's own features recover none
+   * (§35, §36). This is the cheap half of that function -- no softening, no
+   * matched score -- so it can run on every cell.
+   */
+  edges: ResidualEdges;
   /** Brightness-reference alternatives, measured only while tracing. */
   brightnessProbe?: BrightnessReferenceProbe;
   /** The inset 8x8 residual used by the direct checkbox gate, measured only while tracing. */
@@ -840,6 +860,60 @@ interface DecisionEvidence {
  * rank order without their values, so the row shows the shape of the decision
  * without restating which option a student chose.
  */
+/**
+ * A second route to high confidence, over measurements the four thresholds
+ * never read.
+ *
+ * Three scans of one stack, scored against the key, say the gate refuses 145
+ * cell-readings whose top candidate was right. Its own features cannot pick
+ * those out: leave-one-student-out, a fitted boundary over floor, gap,
+ * contrast and shape recovers none of them without admitting a wrong value.
+ * The numbers `analyzeResidualComposition` and the alignment already produce,
+ * and nothing reads, recover 44 -- shuffling the labels drops that to about 7,
+ * which is what the search over feature subsets is worth on noise alone.
+ *
+ * What it says, in the order the weights rank it:
+ *
+ *  - the runner-up's `fit` is the strongest term and it is negative. A runner-up
+ *    that agrees with the blank form is empty paper, so the winner is alone in
+ *    the group and the mark is real. A runner-up that disagrees means ink in two
+ *    places and a genuinely ambiguous cell.
+ *  - `edgeShare` is negative: disagreement concentrated on the printed rules is
+ *    registration residue, not a pen stroke.
+ *  - `edgeFraction` is positive and mostly normalises the one above, since a
+ *    cell that is mostly printed edge will carry more of its mass there.
+ *
+ * Fitted on 19 students, which is the sample this project has; the honest
+ * out-of-sample figure is the leave-one-out one, not what it scores here.
+ * §36 carries the full accounting, including the permutation controls.
+ */
+const RESCUE_EDGE_FRACTION_WEIGHT = 6.136;
+const RESCUE_EDGE_SHARE_WEIGHT = -4.3472;
+const RESCUE_SECOND_FIT_WEIGHT = -20.8018;
+const RESCUE_BIAS = 4.2005;
+
+/**
+ * Chosen well clear of the boundary rather than at it. At 1.40 the rule still
+ * admits no wrong value on this sample and takes 48 cells, but the nearest
+ * wrong one sits 0.031 away; at 1.80 it takes 23 and the nearest sits 0.431
+ * away, spread over 14 of the 19 students. On a sample this size the margin is
+ * worth more than the cells.
+ */
+const RESCUE_THRESHOLD = 1.8;
+
+function rescueConfidence(
+  best: TemplateInkFeatures | undefined,
+  second: TemplateInkFeatures | undefined,
+): number | null {
+  if (!best?.edges || !second || second.fit === undefined) {
+    return null;
+  }
+  return RESCUE_EDGE_FRACTION_WEIGHT * best.edges.edgeFraction
+    + RESCUE_EDGE_SHARE_WEIGHT * best.edges.edgeShare
+    + RESCUE_SECOND_FIT_WEIGHT * second.fit
+    + RESCUE_BIAS;
+}
+
 function describeDecision(evidence: DecisionEvidence, outcome: string, refused: string[]): string {
   const {
     field, usesBaseline, usesGridCells, scores, best, gap, relativeContrast,
@@ -1128,6 +1202,8 @@ export function analyzeChoiceGroup(
   }
 
   const hasStructuredMark = !usesBaseline || hasStructuredTemplateMark(best.shape);
+  const rescue = rescueConfidence(best.shape as TemplateInkFeatures | undefined,
+    second?.shape as TemplateInkFeatures | undefined);
 
   // Which of the four high-confidence tests refused, recorded as they are
   // evaluated. This reads the same values the condition below reads and
@@ -1144,6 +1220,22 @@ export function analyzeChoiceGroup(
     && hasStructuredMark
     && (!usesBaseline || relativeContrast >= HIGH_RELATIVE_CONTRAST)
   ) {
+    return {
+      field: group.field,
+      value: best.value,
+      confidence: 'high',
+      candidates,
+      candidateMeasurements,
+      decision: describeDecision(evidence, 'high', refused),
+    };
+  }
+
+  // A second route to the same confidence, for cells the four thresholds refuse
+  // on their own. It never overrides a decision -- it only runs after the
+  // conjunction above has already declined -- so nothing the gate accepts today
+  // can change, and only refused cells can move.
+  if (usesBaseline && rescue !== null && rescue >= RESCUE_THRESHOLD) {
+    refused.push(`rescued:${rescue.toFixed(2)}`);
     return {
       field: group.field,
       value: best.value,
@@ -1225,6 +1317,7 @@ function calculateTemplateInkFeatures(
       stepsX: 1,
       stepsY: 1,
       fit: 0,
+      edges: { edgeShare: 0, edgeFraction: 0 },
     };
   }
 
@@ -1328,6 +1421,10 @@ function calculateTemplateInkFeatures(
     probe: isTracing()
       ? probeAlignment(actual, blank, sampleWidth, sampleHeight, brightnessOffset, alignment.x, alignment.y)
       : undefined,
+    edges: analyzeResidualEdges(
+      actual, blank, sampleWidth, sampleHeight, brightnessOffset,
+      alignment.x, alignment.y, radiusX, radiusY,
+    ),
     composition: isTracing()
       ? analyzeResidualComposition(
         actual,
@@ -1341,6 +1438,78 @@ function calculateTemplateInkFeatures(
         radiusY,
       )
       : undefined,
+  };
+}
+
+/**
+ * The cheap half of `analyzeResidualComposition`, run on every cell.
+ *
+ * Only the two numbers a decision reads: how much of the leftover disagreement
+ * sits on a printed edge, and how much of the cell is printed edge to begin
+ * with. No softened copies and no matched score, so this costs one pass with a
+ * four-neighbour gradient rather than two blurs -- the full function stays
+ * behind the trace flag for the readings that are only ever looked at.
+ */
+function analyzeResidualEdges(
+  actual: number[],
+  blank: number[],
+  width: number,
+  height: number,
+  brightnessOffset: number,
+  offsetX: number,
+  offsetY: number,
+  radiusX: number,
+  radiusY: number,
+): ResidualEdges {
+  const page = new Float32Array(width * height);
+  const base = new Float32Array(width * height);
+  for (let index = 0; index < page.length; index++) {
+    page[index] = darkness(actual[index] + brightnessOffset);
+    base[index] = darkness(blank[index]);
+  }
+  const at = (grid: Float32Array, x: number, y: number): number => {
+    const cx = clamp(x, 0, width - 1);
+    const cy = clamp(y, 0, height - 1);
+    const x0 = Math.floor(cx);
+    const y0 = Math.floor(cy);
+    const fx = cx - x0;
+    const fy = cy - y0;
+    const x1 = Math.min(x0 + 1, width - 1);
+    const y1 = Math.min(y0 + 1, height - 1);
+    const topLeft = grid[y0 * width + x0];
+    const topRight = grid[y0 * width + x1];
+    const bottomLeft = grid[y1 * width + x0];
+    const bottomRight = grid[y1 * width + x1];
+    return topLeft
+      + (topRight - topLeft) * fx
+      + (bottomLeft - topLeft) * fy
+      + (topLeft - topRight - bottomLeft + bottomRight) * fx * fy;
+  };
+  const gradient = (grid: Float32Array, x: number, y: number): number => Math.max(
+    Math.abs(at(grid, x + 1, y) - at(grid, x - 1, y)),
+    Math.abs(at(grid, x, y + 1) - at(grid, x, y - 1)),
+  );
+
+  let total = 0;
+  let edgeMass = 0;
+  let edgeCount = 0;
+  let count = 0;
+  for (let y = radiusY; y < height - radiusY; y++) {
+    for (let x = radiusX; x < width - radiusX; x++) {
+      const bx = x + offsetX;
+      const by = y + offsetY;
+      const difference = Math.abs(at(page, x, y) - at(base, bx, by));
+      total += difference;
+      count++;
+      if (gradient(base, bx, by) >= RESIDUAL_EDGE_GRADIENT) {
+        edgeMass += difference;
+        edgeCount++;
+      }
+    }
+  }
+  return {
+    edgeShare: total > 0 ? edgeMass / total : 0,
+    edgeFraction: edgeCount / Math.max(count, 1),
   };
 }
 
