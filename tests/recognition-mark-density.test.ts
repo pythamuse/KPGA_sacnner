@@ -289,13 +289,11 @@ describe('마킹 밀도 기반 선택지 분석', () => {
       ...image,
       contentBounds,
       pageBounds: paperBounds || undefined,
-      contentBoundsConfident: true,
       contentBoundsSource: 'paper',
     })).toBe(true);
     expect(hasUsableFormBounds({
       ...image,
       contentBounds,
-      contentBoundsConfident: false,
       contentBoundsSource: 'dark',
     })).toBe(false);
   });
