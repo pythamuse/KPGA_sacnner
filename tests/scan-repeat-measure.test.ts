@@ -179,6 +179,47 @@ describe.skipIf(RUNS.length < 2)('same-paper rescan noise floor', () => {
           + `  (blank-cell violations ${scored.blankViolation})` : '  (no answer key)'));
     }
 
+    // Order integrity. A page that holds a different sheet than the key row at
+    // its position will agree with some OTHER row better than its own. Sheets
+    // whose recorded answers are identical cannot be told apart this way, and
+    // do not need to be: swapping two sheets that produce the same values
+    // produces the same output either way.
+    if (key) {
+      const agreement = (values: Filled, row: Record<string, unknown>) => {
+        let hits = 0, seen = 0;
+        for (const field of ALL_FIELDS) {
+          const got = values[field];
+          if (got == null || row[field] == null) continue;
+          seen += 1;
+          if (String(row[field]) === got) hits += 1;
+        }
+        return seen === 0 ? 0 : hits / seen;
+      };
+      report.push("");
+      report.push("--- order integrity: which key row does each page agree with? ---");
+      for (const r of results) {
+        const misplaced: string[] = [];
+        r.values.forEach((values, index) => {
+          const ranked = key.map((row, j) => ({ j, a: agreement(values, row) }))
+            .sort((x, y) => y.a - x.a);
+          const own = ranked.find((entry) => entry.j === index)!;
+          const best = ranked[0];
+          // A tie at the top means indistinguishable rows, not a misplaced page.
+          const tied = ranked.filter((entry) => entry.a >= own.a - 1e-9).map((entry) => entry.j + 1);
+          if (best.a > own.a + 1e-9) {
+            misplaced.push(`p${index + 1} agrees with key row ${best.j + 1}`
+              + ` (${(100 * best.a).toFixed(1)}%) more than its own row ${index + 1}`
+              + ` (${(100 * own.a).toFixed(1)}%)`);
+          } else if (tied.length > 1) {
+            misplaced.push(`p${index + 1} ties with rows ${tied.join(",")}`
+              + ` at ${(100 * own.a).toFixed(1)}% -- indistinguishable, and harmless`);
+          }
+        });
+        report.push(`  run ${r.label}: ${misplaced.length === 0 ? "every page agrees with its own row best" : ""}`);
+        misplaced.forEach((m) => report.push(`    ${m}`));
+      }
+    }
+
     // Every pair, so a third pass is used rather than ignored.
     const perFieldMoves: Record<string, number> = {};
     for (let a = 0; a < results.length; a += 1) {
