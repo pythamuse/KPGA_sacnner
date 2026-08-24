@@ -249,6 +249,100 @@ describe.skipIf(RUNS.length < 2)('same-paper rescan noise floor', () => {
       }
     }
 
+    // Consensus across every run. With one scan a failure and a coin flip look
+    // the same; with three, a cell that fails every time is the algorithm and a
+    // cell that fails once is the feed.
+    if (key && results.length >= 3) {
+      const buckets: Record<string, string[]> = {
+        stableCorrect: [], stableWrong: [], stableBlank: [],
+        // A cell filled in some runs and not others is only noise if the value
+        // it does produce is right. Where it is wrong, the gate wobbles but the
+        // misreading underneath repeats, and that is the error a user meets.
+        gateWobbleCorrect: [], gateWobbleWrong: [],
+        unstableValue: [],
+      };
+      const byField: Record<string, Record<string, number>> = {};
+      const byStudent: Record<string, Record<string, number>> = {};
+      const note = (bucket: string, field: string, student: number, label: string) => {
+        buckets[bucket].push(label);
+        (byField[bucket] ||= {})[field] = ((byField[bucket] || {})[field] || 0) + 1;
+        (byStudent[bucket] ||= {})[`p${student}`] = ((byStudent[bucket] || {})[`p${student}`] || 0) + 1;
+      };
+
+      for (let index = 0; index < results[0].values.length; index += 1) {
+        const row = key[index];
+        if (!row) continue;
+        for (const field of ALL_FIELDS) {
+          if (row[field] === undefined) continue;
+          const readings = results.map((r) => r.values[index]?.[field] ?? null);
+          const filled = readings.filter((v) => v != null) as string[];
+          const label = `p${index + 1} ${field}`;
+          if (filled.length === 0) { note("stableBlank", field, index + 1, label); continue; }
+          const distinct = new Set(filled);
+          if (distinct.size > 1) {
+            note("unstableValue", field, index + 1, `${label}: ${Array.from(distinct).join("/")}`);
+            continue;
+          }
+          const want = row[field];
+          const got = filled[0];
+          if (filled.length < readings.length) {
+            const agrees = want !== null && want !== undefined && String(want) === got;
+            note(agrees ? "gateWobbleCorrect" : "gateWobbleWrong", field, index + 1,
+              `${label} (${filled.length}/${readings.length})`
+              + (agrees ? "" : `: got ${got}, want ${want === null ? "blank" : want}`));
+            continue;
+          }
+          if (want === null || String(want) !== got) {
+            note("stableWrong", field, index + 1,
+              `${label}: got ${got}, want ${want === null ? "blank" : want}`);
+          } else {
+            note("stableCorrect", field, index + 1, label);
+          }
+        }
+      }
+
+      report.push("");
+      report.push(`--- consensus over ${results.length} runs ---`);
+      const order = ["stableCorrect", "stableWrong", "stableBlank", "gateWobbleCorrect", "gateWobbleWrong", "unstableValue"];
+      const titles: Record<string, string> = {
+        stableCorrect: "stable & correct     ",
+        stableWrong:   "stable & WRONG       (reproducible errors)",
+        stableBlank:       "stable & blank       (reproducible refusals)",
+        gateWobbleCorrect: "gate wobbles, right  (the noise band)",
+        gateWobbleWrong:   "gate wobbles, WRONG  (repeating misread)",
+        unstableValue:     "unstable, value      ",
+      };
+      for (const bucket of order) {
+        report.push(`  ${titles[bucket]} ${String(buckets[bucket].length).padStart(4)}`);
+      }
+      for (const bucket of ["stableWrong", "stableBlank", "gateWobbleWrong", "gateWobbleCorrect"]) {
+        const fields = Object.entries(byField[bucket] || {}).sort((a, b) => b[1] - a[1]);
+        const students = Object.entries(byStudent[bucket] || {}).sort((a, b) => b[1] - a[1]).slice(0, 6);
+        report.push("");
+        report.push(`  ${bucket} by field: ${fields.map(([f, n]) => `${f} ${n}`).join("  ")}`);
+        report.push(`  ${bucket} top students: ${students.map(([p2, n]) => `${p2} ${n}`).join("  ")}`);
+      }
+      report.push("");
+      for (const bucket of ["stableWrong", "gateWobbleWrong", "unstableValue"]) {
+        report.push("");
+        report.push(`  ${bucket}, in full:`);
+        buckets[bucket].forEach((line) => report.push(`    ${line}`));
+      }
+      // Kept so a later question about a cell does not cost another full run.
+      if (process.env.REPEAT_CELLS) {
+        const dump: Record<string, unknown> = {};
+        for (let index = 0; index < results[0].values.length; index += 1) {
+          for (const field of ALL_FIELDS) {
+            dump[`p${index + 1} ${field}`] = {
+              readings: results.map((r) => r.values[index]?.[field] ?? null),
+              key: key[index] ? key[index][field] ?? null : null,
+            };
+          }
+        }
+        fs.writeFileSync(process.env.REPEAT_CELLS, JSON.stringify(dump, null, 1), "utf8");
+      }
+    }
+
     const hot = Object.entries(perFieldMoves).sort((a, b) => b[1] - a[1]).slice(0, 10);
     if (hot.length > 0) {
       report.push('');
