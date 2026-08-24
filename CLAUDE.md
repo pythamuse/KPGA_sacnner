@@ -151,8 +151,13 @@ node -e "const j=require('./local-scans/answer-key.json');j.pages.forEach(p=>Obj
 
 | 계측기 | 재는 것 | 역할 |
 |---|---|---|
-| **브라우저 19명** | 학생별 `확인 필요` 칸 합계 | **개선 판정** |
-| **노드** [tests/real-scan-measure.test.ts](tests/real-scan-measure.test.ts) | `CORRECT` / `WRONG` | **`WRONG = 0` 안전장치** |
+| **브라우저 — 확인 필요 합계** | 학생별 미확정 칸 수 | **개선 판정** (검수자 작업량) |
+| **브라우저 — 값 대조** | 자동 입력값 vs 정답표 | **`WRONG = 0` 판정** |
+| **노드** [tests/real-scan-measure.test.ts](tests/real-scan-measure.test.ts) | `CORRECT` / `WRONG` | **빠른 사전 점검만** |
+
+> **노드로 `WRONG = 0`을 판정하지 마라.** 2026-08-24에 둘을 나란히 재보니 오답 목록이 거의 겹치지 않았다 — 노드는 실사용에 없는 오답을 보고하고(p7·p14), 실사용에 있는 오답을 놓친다(p8·p15·p19). 래스터 경로가 다르므로 둘 다 자기 경로에서는 참이지만, **사용자가 받는 것은 브라우저 쪽**이다.
+>
+> 값 대조 방법은 §5.2의 순회에서 `select`/`input`의 `value`와 `자동 인식` 배지를 함께 긁어 정답표와 맞추는 것이다.
 
 **노드만 보고 개선을 판단하지 마라.** 네 사이클 모두 노드에서 `CORRECT 108 · WRONG 0`으로 중립이었는데 브라우저는 각각 무변동·무변동·**악화**·무변동이었다. **사이클 3은 노드 증거만으로는 병합했을 변경이다.**
 
@@ -174,7 +179,13 @@ node -e "const j=require('./local-scans/answer-key.json');j.pages.forEach(p=>Obj
 7. 학생을 순회하며 `확인 필요 항목 N개`와 항목 이름을 읽는다.
    **페이지 안에서 긴 루프를 돌리지 마라** — 배경 탭은 타이머를 스로틀링하고, 학생당 렌더가 무거워 `Runtime.evaluate`가 45초에서 끊긴다. **한 호출에 5~7명씩** 끊어서 돈다.
 
-기준선은 **19명 합계 135칸**이다. 상세는 [Task/MEASUREMENT_RENDER_PARITY_2026-08-19.md](Task/MEASUREMENT_RENDER_PARITY_2026-08-19.md).
+기준선(2026-08-24):
+
+```
+확인 필요 135칸 · 자동 입력 302칸 · 오답 10칸
+```
+
+상세는 [Task/MEASUREMENT_RENDER_PARITY_2026-08-19.md](Task/MEASUREMENT_RENDER_PARITY_2026-08-19.md), 오답 10건의 기제는 [Task/FIELD_TEST_2026-08-21.md](Task/FIELD_TEST_2026-08-21.md) §22.
 
 ### 5.3 한 사이클
 
@@ -189,7 +200,7 @@ node -e "const j=require('./local-scans/answer-key.json');j.pages.forEach(p=>Obj
 
 | 조건 | 판정 |
 |---|---|
-| `WRONG > 0` | **기각.** 정답 수가 올라도 기각 |
+| **브라우저 값 대조에서 오답 증가** | **기각.** 정답 수가 올라도 기각 |
 | 브라우저 합계 변화 없음 | **병합하지 않는다.** 노드나 등록 상태가 좋아져도 |
 | 브라우저 합계 증가 | **기각** |
 | 경계선 한 칸만 움직임 | **판정하지 않는다.** 같은 스캔이 기기에 따라 다르게 읽힌다 |
