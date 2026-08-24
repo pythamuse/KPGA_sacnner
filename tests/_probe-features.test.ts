@@ -79,6 +79,12 @@ const COLUMNS = [
   'floor', 'gap', 'contrast', 'size', 'compact', 'diag',
   'actualInk', 'baselineInk', 'shift', 'alignX', 'alignY', 'fit',
   'pitchX', 'pitchY', 'candidates', 'secondScore',
+  // Already computed by the pipeline and ignored by the gate. §36 asks whether
+  // any of them carries what the four thresholds are missing.
+  'inner', 'bcoreCore', 'bcoreFill', 'wantX', 'wantY', 'gain',
+  'edgeShare', 'edgeFraction', 'bal', 'pageSharp', 'blankSharp',
+  'softBlank', 'softBoth', 'mscore',
+  'secondInner', 'secondFit', 'secondBal', 'secondEdgeShare',
   'value', 'bestValue', 'keyValue', 'autoFilled', 'correct', 'correctIfFilled',
 ];
 
@@ -100,6 +106,7 @@ describe.skipIf(RUNS.length === 0)('gate feature export', () => {
       ? (JSON.parse(fs.readFileSync(KEY_PATH, 'utf8')) as { pages: Array<Record<string, unknown>> }).pages
       : undefined;
     const rows: string[] = [COLUMNS.join(',')];
+    const allTraces: string[] = [];
 
     for (const run of RUNS) {
       const cagiFiles = await renderPdfPages(run.cagi!, tmp, `${run.label}-cagi`);
@@ -135,6 +142,7 @@ describe.skipIf(RUNS.length === 0)('gate feature export', () => {
         const measured = (draft.recognitionMeasurements || {}) as
           Record<string, Array<{ candidateValue: unknown; score: number }>>;
 
+        allTraces.push(...captured.map((t) => `${run.label} p${i + 1} ${t}`));
         for (const trace of captured) {
           const field = /field=([\w.]+)/.exec(trace)?.[1];
           if (!field) continue;
@@ -169,6 +177,17 @@ describe.skipIf(RUNS.length === 0)('gate feature export', () => {
             fromBest(trace, /page=([0-9.]+),[0-9.]+ blank=/), fromBest(trace, /page=[0-9.]+,([0-9.]+) blank=/),
             scores.split('/').length,
             fromBest(runnerUp, /scr=([0-9.]+)/),
+            fromBest(best, / inner=([0-9.]+)/),
+            fromBest(best, / bcore=([0-9.]+)\//), fromBest(best, / bcore=[0-9.]+\/([0-9.]+)/),
+            fromBest(best, / want=(-?[0-9]+),/), fromBest(best, / want=-?[0-9]+,(-?[0-9]+)/),
+            fromBest(best, / gain=(-?[0-9.]+)/),
+            fromBest(best, / edge=([0-9.]+)\//), fromBest(best, / edge=[0-9.]+\/([0-9.]+)/),
+            fromBest(best, / bal=([0-9.]+)/),
+            fromBest(best, / sharp=([0-9.]+),/), fromBest(best, / sharp=[0-9.]+,([0-9.]+)/),
+            fromBest(best, / soft=([0-9.]+),/), fromBest(best, / soft=[0-9.]+,([0-9.]+)/),
+            fromBest(best, / mscore=([0-9.]+)/),
+            fromBest(runnerUp, / inner=([0-9.]+)/), fromBest(runnerUp, / fit=([0-9.]+)/),
+            fromBest(runnerUp, / bal=([0-9.]+)/), fromBest(runnerUp, / edge=([0-9.]+)\//),
             value == null ? '' : `"${String(value)}"`,
             bestValue == null ? '' : `"${String(bestValue)}"`,
             want === undefined ? '' : want === null ? '"BLANK"' : `"${String(want)}"`,
@@ -181,6 +200,9 @@ describe.skipIf(RUNS.length === 0)('gate feature export', () => {
     }
 
     fs.writeFileSync(OUT, rows.join(String.fromCharCode(10)), 'utf8');
+    // Raw traces alongside, so adding another feature later costs a parse
+    // rather than another hour of recognition.
+    fs.writeFileSync(`${OUT}.traces.txt`, allTraces.join(String.fromCharCode(10)), 'utf8');
     // eslint-disable-next-line no-console
     console.log(`wrote ${rows.length - 1} rows to ${OUT}`);
   }, 5_400_000);
