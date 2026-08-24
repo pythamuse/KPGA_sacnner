@@ -83,6 +83,13 @@ interface Gates {
   gap: [number, number];
   contrast: [number, number];
   size: [number, number] | null;
+  /** The winning box: the two sides of the subtraction the score is built on. */
+  actualInk: number;
+  baselineInk: number;
+  alignX: number;
+  alignY: number;
+  pitchX: number;
+  pitchY: number;
 }
 
 function parseGates(trace: string): Gates | undefined {
@@ -92,10 +99,20 @@ function parseGates(trace: string): Gates | undefined {
   };
   const floor = pair('floor'), gap = pair('gap'), contrast = pair('contrast');
   if (!floor || !gap || !contrast) return undefined;
+  // The winning candidate is the first entry of `boxes=[...]`, split rather
+  // than matched so the bracket does not need escaping.
+  const best = (trace.split('boxes=[')[1] || '').split(' | ')[0] || '';
+  const num = (re: RegExp, src = best) => { const m = re.exec(src); return m ? Number(m[1]) : NaN; };
   return {
     outcome: /outcome=(\w+)/.exec(trace)?.[1] || '?',
     refused: /refused=([\w-]+)/.exec(trace)?.[1] || '?',
     floor, gap, contrast, size: pair('size'),
+    actualInk: num(/ page=([0-9.]+)/),
+    baselineInk: num(/ blank=([0-9.]+)/),
+    alignX: num(/ align=(-?[0-9.]+),/),
+    alignY: num(/ align=-?[0-9.]+,(-?[0-9.]+)/),
+    pitchX: num(/page=([0-9.]+),[0-9.]+ blank=/, trace),
+    pitchY: num(/page=[0-9.]+,([0-9.]+) blank=/, trace),
   };
 }
 
@@ -160,7 +177,7 @@ describe.skipIf(RUNS.length < 3)('gate wobble', () => {
       return agrees ? 'stableCorrect' : 'stableWrong';
     };
 
-    const rows: string[] = ['cell,bucket,binding,floorMean,floorCV,gapMean,gapCV,contrastMean,contrastCV,sizeMean,sizeCV,marginAtBinding'];
+    const rows: string[] = ['cell,bucket,binding,floorMean,floorCV,gapMean,gapCV,contrastMean,contrastCV,sizeMean,sizeCV,marginAtBinding,actualMean,actualCV,baselineMean,baselineCV,alignXsd,alignYsd,pitchXCV,pitchYCV'];
     const lines: string[] = ['================ GATE WOBBLE ================'];
     const GATES = ['floor', 'gap', 'contrast', 'size'] as const;
     const perBucket: Record<string, { binding: Record<string, number>; cvs: Record<string, number[]>; margins: number[] }> = {};
@@ -192,6 +209,17 @@ describe.skipIf(RUNS.length < 3)('gate wobble', () => {
         `"${cellKey}"`, bucket, binding ? binding[0] : "none",
         ...cells4.flatMap(([m, c]) => [Number.isFinite(m) ? m.toFixed(5) : "", Number.isFinite(c) ? c.toFixed(4) : ""]),
         binding ? binding[1].toFixed(4) : "",
+        ...(() => {
+          const col = (pick: (g: Gates) => number) => readings.map(pick);
+          const sd = (v: number[]) => { const m = mean(v); return Math.sqrt(mean(v.map((x) => (x - m) * (x - m)))); };
+          const a = col((g) => g.actualInk), b = col((g) => g.baselineInk);
+          return [
+            mean(a).toFixed(5), cv(a).toFixed(4),
+            mean(b).toFixed(5), cv(b).toFixed(4),
+            sd(col((g) => g.alignX)).toFixed(4), sd(col((g) => g.alignY)).toFixed(4),
+            cv(col((g) => g.pitchX)).toFixed(4), cv(col((g) => g.pitchY)).toFixed(4),
+          ];
+        })(),
       ].join(","));
       if (binding) {
         slot.binding[binding[0]] = (slot.binding[binding[0]] || 0) + 1;
