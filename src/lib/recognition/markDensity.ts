@@ -1896,8 +1896,30 @@ function analyzeResidualComposition(
   const softPage = softenSamples(page, width, height);
   const softBase = softenSamples(base, width, height);
 
-  const at = (grid: Float32Array, x: number, y: number): number =>
-    grid[clamp(y, 0, height - 1) * width + clamp(x, 0, width - 1)];
+  // The alignment offset is fractional wherever the search runs sub-sample,
+  // and the score path reads the baseline through a bilinear interpolation
+  // there. Indexing with the raw offset instead is wrong two different ways:
+  // 0.5 * width is a whole number, so it silently reads another row, and any
+  // other fraction reads undefined and turns the reading into NaN. This is
+  // exact at whole positions, so it changes nothing where the offset is one.
+  const at = (grid: Float32Array, x: number, y: number): number => {
+    const cx = clamp(x, 0, width - 1);
+    const cy = clamp(y, 0, height - 1);
+    const x0 = Math.floor(cx);
+    const y0 = Math.floor(cy);
+    const fx = cx - x0;
+    const fy = cy - y0;
+    const x1 = Math.min(x0 + 1, width - 1);
+    const y1 = Math.min(y0 + 1, height - 1);
+    const topLeft = grid[y0 * width + x0];
+    const topRight = grid[y0 * width + x1];
+    const bottomLeft = grid[y1 * width + x0];
+    const bottomRight = grid[y1 * width + x1];
+    return topLeft
+      + (topRight - topLeft) * fx
+      + (bottomLeft - topLeft) * fy
+      + (topLeft - topRight - bottomLeft + bottomRight) * fx * fy;
+  };
   const gradient = (grid: Float32Array, x: number, y: number): number => Math.max(
     Math.abs(at(grid, x + 1, y) - at(grid, x - 1, y)),
     Math.abs(at(grid, x, y + 1) - at(grid, x, y - 1)),
