@@ -215,6 +215,7 @@ node -e "const j=require('./local-scans/answer-key.json');j.pages.forEach(p=>Obj
 - **좌표계·페이지 기하는 병목이 아니다.** 페이지 위치 상관 `r=-0.550`, 콘텐츠 상자 이봉분포, CAGI 빈 양식 6.4% 오차 — 마지막 것을 **실제로 제거했는데 한 칸도 안 바뀌었다.** `GRID_TEMPLATE_TOLERANCE_RATIO = 0.35`가 그 정도를 흡수한다
 - **기본정보 실패는 정렬 정밀도 문제가 아니다.** 샘플링을 정밀하게 하면 악화, 탐색 범위를 넓히면 중립
 - **게이트 완화는 답이 아니다.** 좌표 게이트가 실제로 오답을 막은 장면이 관측돼 있다 ([Task/FIELD_TEST_2026-08-21.md](Task/FIELD_TEST_2026-08-21.md) §13.1)
+- **노드와 브라우저의 래스터 정합은 도달 불가능하다.** `pdfjs-dist` 를 프로덕션과 같은 6.1.200으로 올려도 오답이 **한 칸도 바뀌지 않았다.** 남는 차이는 node-canvas(Cairo) 대 브라우저 canvas(Skia), libjpeg 대 Chrome JPEG 인코더이고 맞출 수 없다. **두 경로를 같게 만들려는 시도는 하지 마라** — 표적은 정합이 아니라 **약한 신호에서의 안정성**이다 ([Task/RASTER_PARITY_PLAN_2026-08-24.md](Task/RASTER_PARITY_PLAN_2026-08-24.md))
 
 전체 기록은 [Task/AUTONOMOUS_LOOP_2026-08-22.md](Task/AUTONOMOUS_LOOP_2026-08-22.md).
 
