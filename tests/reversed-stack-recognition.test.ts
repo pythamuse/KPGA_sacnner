@@ -9,12 +9,16 @@ import { matchBatch, type StackOrder } from '../src/lib/recognition/batchMatcher
 /**
  * Does the reversal flag actually re-pair a reversed back stack?
  *
- * Showing that a reversed scan scores well WITH the flag is only half an
- * argument -- a stack that was never reversed would score well too. The claim
- * only holds if the flag also breaks the sets that are in forward order. So
- * every satisfaction set is scored under both settings, and the expected shape
- * is a diagonal: forward sets good under `same` and ruined under `reversed`,
- * the reversed set the other way round.
+ * What this measures is ASSIGNMENT, not recognition. A sheet is rendered and
+ * read the same way whichever student it ends up under, so reversing cannot
+ * make recognition better or worse -- it only decides which key row a sheet is
+ * checked against. Counts below are "the sheet assigned to student i agrees
+ * with key row i", and a low count means sheets landed on the wrong students.
+ *
+ * Scoring the reversed set with the flag on is only half an argument, because
+ * a stack that was never reversed would also land correctly under `same`. The
+ * flag is only shown to do something if it ALSO misassigns the sets that are
+ * in forward order. Hence both settings on every set, and a diagonal.
  *
  * One screening stack is used as the front for every run, so the only thing
  * varying is which satisfaction sheet is paired with it. Each satisfaction page
@@ -97,7 +101,7 @@ function readSatisfaction(draft: Record<string, unknown>): Filled {
 }
 
 describe.skipIf(!CAGI_PDF || SAT_SETS.length === 0)('reversed back stack', () => {
-  it('scores every satisfaction set under both orders', async () => {
+  it('checks which student each satisfaction sheet lands on, under both orders', async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kpga-reversed-'));
     const key = fs.existsSync(KEY_PATH)
       ? (JSON.parse(fs.readFileSync(KEY_PATH, 'utf8')) as { pages: Array<Record<string, unknown>> }).pages
@@ -120,9 +124,11 @@ describe.skipIf(!CAGI_PDF || SAT_SETS.length === 0)('reversed back stack', () =>
 
     const report: string[] = ['\n============== REVERSED BACK STACK =============='];
     report.push(`front stack: ${path.basename(CAGI_PDF!)}   students: ${cagiFiles.length}`);
-    report.push('satisfaction fields only (10 per student)');
+    report.push('satisfaction fields only (10 per student).');
+    report.push('agrees/disagrees = does the sheet assigned to student i match key row i.');
+    report.push('This is assignment, not recognition: the same sheet reads the same either way.');
     report.push('');
-    report.push('  set                              order      auto  CORRECT  WRONG  blank-cell');
+    report.push('  set                              order      auto   agrees  disagrees  blank-cell');
     const rows: Array<{ label: string; order: StackOrder; correct: number; wrong: number }> = [];
 
     for (const set of bySet) {
@@ -155,14 +161,16 @@ describe.skipIf(!CAGI_PDF || SAT_SETS.length === 0)('reversed back stack', () =>
     for (const set of bySet) {
       const same = rows.find((r) => r.label === set.label && r.order === 'same')!;
       const rev = rows.find((r) => r.label === set.label && r.order === 'reversed')!;
-      const better = same.correct > rev.correct ? 'same' : 'reversed';
-      report.push(`  ${set.label.padEnd(32)} scans forward under "${better}"`
+      const setting = same.correct > rev.correct ? 'same' : 'reversed';
+      report.push(`  ${set.label.padEnd(32)} lands on the right students under "${setting}"`
         + `  (same ${same.correct}/${same.correct + same.wrong},`
         + ` reversed ${rev.correct}/${rev.correct + rev.wrong})`);
     }
     report.push('');
-    report.push('A flag that did nothing would leave both columns equal. A stack that was');
-    report.push('never reversed would score well under "same" and badly under "reversed".');
+    report.push('A flag that did nothing would leave both columns equal. Neither column is a');
+    report.push('recognition score, and the two are not comparable across sets: those come');
+    report.push('from different scans and differ for reasons that have nothing to do with');
+    report.push('the order. Only the two columns of one row may be compared.');
 
     // eslint-disable-next-line no-console
     console.log(report.join('\n'));
