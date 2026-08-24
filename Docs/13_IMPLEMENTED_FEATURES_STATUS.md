@@ -260,6 +260,7 @@
 | PDF 처리 | 클라이언트 `pdf.js` 전역 객체 의존 방식이라 운영 안정화가 필요하다. |
 | 임시파일 운영 | cleanup API는 있으나 자동 호출 시점과 다운로드 만료 정책이 남아 있다. |
 | 카메라 | 모바일 HTTPS 실기기 QA가 필요하다. |
+| 묶음 짝짓기 | 앞뒷면을 i번째끼리 붙인다. 연속 급지 후 뒤집힌 뒷면 묶음(19→1)은 **장수가 맞고 양식도 맞아 아무 검사에도 걸리지 않은 채** 19명 전원의 만족도가 뒤바뀐다. 두 양식이 식별 필드를 공유하지 않아 검수 화면에서도 드러나지 않는다 → [Task/REVERSED_STACK_PAIRING_2026-08-24.md](../Task/REVERSED_STACK_PAIRING_2026-08-24.md) |
 
 ---
 
@@ -295,6 +296,7 @@ npm.cmd run build
 3. 실제 촬영 이미지 기반 crop preview/ROI 좌표 품질 튜닝
 4. PDF 처리 안정화
 5. cleanup API 자동 호출 정책 정리
+6. 역순 묶음 짝짓기 — 뒷면 묶음 순서 지정과 짝 확인 표시 ([계획](../Task/REVERSED_STACK_PAIRING_2026-08-24.md))
 
 ---
 
@@ -502,5 +504,6 @@ npm.cmd run build
 | 이미지 내용 기반 양식 판별 | [Task/MOBILE_PHOTO_MISCLASSIFICATION_FIX.md](../Task/MOBILE_PHOTO_MISCLASSIFICATION_FIX.md) |
 | 카메라 촬영 흐름 / 원근 보정 | [Task/MOBILE_CAPTURE_PERSPECTIVE_CORRECTION.md](../Task/MOBILE_CAPTURE_PERSPECTIVE_CORRECTION.md), [Task/CAMERA_UPLOAD_ROBUSTNESS_FIXES.md](../Task/CAMERA_UPLOAD_ROBUSTNESS_FIXES.md) |
 | ROI 마킹 밀도 계산 / CAGI·만족도 인식 정확도 | [Task/RECOGNITION_ACCURACY_DYNAMIC_ROW_DETECTION.md](../Task/RECOGNITION_ACCURACY_DYNAMIC_ROW_DETECTION.md), [Task/OCR_ANCHORED_ROW_DETECTION.md](../Task/OCR_ANCHORED_ROW_DETECTION.md) |
+| 앞뒷면 묶음 짝짓기 | [Task/REVERSED_STACK_PAIRING_2026-08-24.md](../Task/REVERSED_STACK_PAIRING_2026-08-24.md) |
 
 버그로 확정된 항목은 [Docs/BUG_REPORTS.md](BUG_REPORTS.md)에도 원인·대응이 요약되어 있다.
