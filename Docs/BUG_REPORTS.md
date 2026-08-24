@@ -25,6 +25,7 @@
 | 19 | 격자 거부 시 템플릿 폴백이 실제 페이지보다 부정확해 값 인식 실패 | 원인 확정, 수정 착수 전 | [RECOGNITION_ROOT_CAUSE_ISOLATION_2026-08-13](../Task/RECOGNITION_ROOT_CAUSE_ISOLATION_2026-08-13.md) |
 | 20 | 표시가 없는 칸에 값을 만들어내 `높음`으로 확정 (배포본에 존재) | 배포본 해상도에서 해소(`WRONG 0`), 실배포 재확인 필요 | [RECOGNITION_ROOT_CAUSE_ISOLATION_2026-08-13](../Task/RECOGNITION_ROOT_CAUSE_ISOLATION_2026-08-13.md), [MEASUREMENT_RENDER_PARITY_2026-08-19](../Task/MEASUREMENT_RENDER_PARITY_2026-08-19.md) |
 | 21 | 계측기가 배포본과 다른 해상도·형식의 이미지를 측정해 모든 판정이 무효 | 계측기 수정 완료, 기준선 재설정 | [MEASUREMENT_RENDER_PARITY_2026-08-19](../Task/MEASUREMENT_RENDER_PARITY_2026-08-19.md) |
+| 22 | `contentBoundsConfident`와 `contentBoundsSource`가 같은 사실을 이중 저장해 분류·인식 게이트가 갈라질 수 있음 | **미발현 — 기록만** | — (본 문서 §22) |
 
 ---
 
@@ -176,3 +177,25 @@
 **대응**: 렌더 상수를 `src/lib/pdf/pdfRenderConfig.ts`로 올려 앱과 계측기가 **같은 값을 import**하게 했고, 계측기를 배포본과 동일한 JPEG 렌더로 교체했다. 새 기준선은 `CORRECT 92/135, WRONG 1`이다.
 
 **상태**: 계측기 수정 완료(`npm test` 101 passed, `npm run build` 통과). **2026-08-13 스레드에서 병합한 네 라운드가 배포본 조건에서도 개선이었는지는 재판정이 필요하다.**
+
+## 22. 경계 신뢰도를 두 필드에 이중 저장
+
+**원인**: `ImageAnalysisData`가 같은 사실을 두 번 들고 있다. 생성 지점 두 곳 모두에서
+`contentBoundsConfident === (contentBoundsSource !== 'dark')`이며, 이 일치는 **손으로 유지**된다.
+소비자는 갈라져 있다 — [classifyForm.ts:58](../src/lib/recognition/classifyForm.ts)은 `contentBoundsConfident`를,
+[markDensity.ts:702](../src/lib/recognition/markDensity.ts)의 `hasUsableFormBounds`는 `contentBoundsSource`를 읽는다.
+
+**위험**: `ContentBoundsSource`에 값을 추가하거나 생성 지점을 늘리면서 한쪽만 갱신하면,
+**분류 게이트와 인식 게이트가 같은 페이지를 두고 다른 판단을 한다.** 두 값 모두 타입상 유효하므로
+타입 검사기가 잡지 못하고, 증상은 특정 스캔에서만 나타난다.
+
+**발견 경위**: `npx tsc --noEmit`이 [tests/recognition-mark-density.test.ts](../tests/recognition-mark-density.test.ts)에서
+`hasUsableFormBounds`에 `contentBoundsConfident`를 넘기는 두 줄을 오류로 보고했다(함수의 `Pick<>`에 없는 필드).
+그 두 줄은 지웠고(커밋 `283728c`) 타입 검사는 통과하지만, **이중 저장 자체는 그대로다.**
+게이트가 값을 놓치고 있는 것은 아니다 — 두 필드가 같은 사실이므로 어느 쪽을 봐도 결과는 같다.
+
+**대응**: 기록만. 해소하려면 저장을 버리고 `contentBoundsSource`에서 파생시킨다
+(손댈 곳은 소비자 1·생성자 2·타입 1줄). **측정 이득이 0이므로 지금은 병합하지 않는다**([CLAUDE.md](../CLAUDE.md) §1.4).
+실제로 갈라지는 장면이 관측되면 그때 근거와 함께 착수한다.
+
+**상태**: 미발현 — 현재 두 필드는 일치한다.
