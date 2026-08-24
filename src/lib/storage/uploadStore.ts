@@ -12,13 +12,20 @@ import {
   type UploadKind,
 } from '../uploadInventory';
 
+// vitest 기본 풀은 worker_threads라 워커가 프로세스를 공유한다. pid 만으로는 갈라지지 않아
+// 세 테스트 파일이 한 루트를 쓰고, resetUploadStoreForTests 가 남의 업로드를 지운다.
+const LOCAL_TEST_SCOPE =
+  process.env.NODE_ENV === 'test'
+    ? `${process.pid}-${process.env.VITEST_WORKER_ID ?? process.env.VITEST_POOL_ID ?? '0'}`
+    : '';
+
 const STORAGE_PREFIX = 'kpga-scan/jobs';
 const LOCAL_UPLOAD_ROOT = path.join(
   os.tmpdir(),
   'kpga-scanner',
   'upload-store',
   createHash('sha256')
-    .update(`${process.cwd()}|${process.env.NODE_ENV || 'development'}|${process.env.NODE_ENV === 'test' ? process.pid : ''}`)
+    .update(`${process.cwd()}|${process.env.NODE_ENV || 'development'}|${LOCAL_TEST_SCOPE}`)
     .digest('hex')
     .slice(0, 16),
 );
@@ -172,7 +179,7 @@ export async function deleteUploadBatch(jobId: string, type: UploadKind, batch: 
 
 export function resetUploadStoreForTests() {
   if (usesLocalMemoryStore()) {
-    rmSync(LOCAL_UPLOAD_ROOT, { recursive: true, force: true });
+    rmSync(LOCAL_UPLOAD_ROOT, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }
 }
 
