@@ -90,6 +90,14 @@ interface Gates {
   alignY: number;
   pitchX: number;
   pitchY: number;
+  /**
+   * The common-mode corrector. §31.2 measured that the baseline subtraction
+   * cancels 41% of the input jitter on stable cells and only 19% on wobbling
+   * ones, and this is what does the cancelling -- estimated from the cell's own
+   * 82nd percentile, so a cell with little printed structure has less to
+   * estimate it from.
+   */
+  shift: number;
 }
 
 function parseGates(trace: string): Gates | undefined {
@@ -113,6 +121,7 @@ function parseGates(trace: string): Gates | undefined {
     alignY: num(/ align=-?[0-9.]+,(-?[0-9.]+)/),
     pitchX: num(/page=([0-9.]+),[0-9.]+ blank=/, trace),
     pitchY: num(/page=[0-9.]+,([0-9.]+) blank=/, trace),
+    shift: num(/ shift=(-?[0-9]+)/),
   };
 }
 
@@ -177,7 +186,7 @@ describe.skipIf(RUNS.length < 3)('gate wobble', () => {
       return agrees ? 'stableCorrect' : 'stableWrong';
     };
 
-    const rows: string[] = ['cell,bucket,binding,floorMean,floorCV,gapMean,gapCV,contrastMean,contrastCV,sizeMean,sizeCV,marginAtBinding,actualMean,actualCV,baselineMean,baselineCV,alignXsd,alignYsd,pitchXCV,pitchYCV'];
+    const rows: string[] = ['cell,bucket,binding,floorMean,floorCV,gapMean,gapCV,contrastMean,contrastCV,sizeMean,sizeCV,marginAtBinding,actualMean,actualCV,baselineMean,baselineCV,alignXsd,alignYsd,pitchXCV,pitchYCV,shiftMean,shiftSd'];
     const lines: string[] = ['================ GATE WOBBLE ================'];
     const GATES = ['floor', 'gap', 'contrast', 'size'] as const;
     const perBucket: Record<string, { binding: Record<string, number>; cvs: Record<string, number[]>; margins: number[] }> = {};
@@ -218,6 +227,7 @@ describe.skipIf(RUNS.length < 3)('gate wobble', () => {
             mean(b).toFixed(5), cv(b).toFixed(4),
             sd(col((g) => g.alignX)).toFixed(4), sd(col((g) => g.alignY)).toFixed(4),
             cv(col((g) => g.pitchX)).toFixed(4), cv(col((g) => g.pitchY)).toFixed(4),
+            mean(col((g) => g.shift)).toFixed(3), sd(col((g) => g.shift)).toFixed(3),
           ];
         })(),
       ].join(","));
