@@ -260,6 +260,7 @@
 | PDF 처리 | 클라이언트 `pdf.js` 전역 객체 의존 방식이라 운영 안정화가 필요하다. |
 | 임시파일 운영 | cleanup API는 있으나 자동 호출 시점과 다운로드 만료 정책이 남아 있다. |
 | 카메라 | 모바일 HTTPS 실기기 QA가 필요하다. |
+| **사진 인식 정확도** | **측정된 적이 없다.** 저장소의 모든 정확도 수치(정답표 19명, `CORRECT 354/432`, 브라우저 135·302·10)는 스캔 PDF에서 나왔다. 원근 보정은 있으나 `confidence`가 사각형의 그럴듯함을 잴 뿐 왜곡 잔차를 재지 않고, 실패하면 카메라·단일 경로는 경고 없이 원본을 올린다 → [Task/PHOTO_PATH_PLAN_2026-08-25.md](../Task/PHOTO_PATH_PLAN_2026-08-25.md) |
 | 묶음 짝짓기 | 앞뒷면을 i번째끼리 붙이므로 **두 묶음이 같은 순서일 때만** 맞다. 연속 급지 스캔은 뒷면이 역순(19→1)으로 나오고, 지금은 사용자가 손으로 되돌려 올린다. 그 수동 단계에서 두 장이 함께 넘어가 생기는 뒤바뀜은 장수도 양식도 맞아 **어떤 검사에도 걸리지 않는다** → [Task/REVERSED_STACK_PAIRING_2026-08-24.md](../Task/REVERSED_STACK_PAIRING_2026-08-24.md) |
 
 ---
@@ -297,6 +298,7 @@ npm.cmd run build
 4. PDF 처리 안정화
 5. cleanup API 자동 호출 정책 정리
 6. 역순 묶음 짝짓기 — 뒷면 묶음 순서 지정과 짝 확인 표시 ([계획](../Task/REVERSED_STACK_PAIRING_2026-08-24.md))
+7. **사진 경로 측정과 단계별 개선** — 0단계 측정 → 워프 검증 → 호모그래피 정합 → 다중 프레임 합의 → 크롭 분류 ([계획](../Task/PHOTO_PATH_PLAN_2026-08-25.md))
 
 ---
 
@@ -505,5 +507,6 @@ npm.cmd run build
 | 카메라 촬영 흐름 / 원근 보정 | [Task/MOBILE_CAPTURE_PERSPECTIVE_CORRECTION.md](../Task/MOBILE_CAPTURE_PERSPECTIVE_CORRECTION.md), [Task/CAMERA_UPLOAD_ROBUSTNESS_FIXES.md](../Task/CAMERA_UPLOAD_ROBUSTNESS_FIXES.md) |
 | ROI 마킹 밀도 계산 / CAGI·만족도 인식 정확도 | [Task/RECOGNITION_ACCURACY_DYNAMIC_ROW_DETECTION.md](../Task/RECOGNITION_ACCURACY_DYNAMIC_ROW_DETECTION.md), [Task/OCR_ANCHORED_ROW_DETECTION.md](../Task/OCR_ANCHORED_ROW_DETECTION.md) |
 | 앞뒷면 묶음 짝짓기 | [Task/REVERSED_STACK_PAIRING_2026-08-24.md](../Task/REVERSED_STACK_PAIRING_2026-08-24.md) |
+| 사진(카메라) 경로 측정·개선 | [Task/PHOTO_PATH_PLAN_2026-08-25.md](../Task/PHOTO_PATH_PLAN_2026-08-25.md) |
 
 버그로 확정된 항목은 [Docs/BUG_REPORTS.md](BUG_REPORTS.md)에도 원인·대응이 요약되어 있다.
