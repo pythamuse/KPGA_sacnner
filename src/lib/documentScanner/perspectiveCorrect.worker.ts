@@ -43,12 +43,21 @@ const workerSelf = self as unknown as {
   postMessage: (message: CorrectResponse) => void;
 };
 
-let openCvPromise: Promise<any> | null = null;
+// `cv` is an emscripten Module, and an emscripten Module carries its own
+// `then` method -- which makes it a *thenable*. Resolving a promise with it
+// hands control to that method, which resolves to the module again, so the
+// promise never settles. Awaiting it has the same effect. Every correction
+// request therefore sat here until the client's timeout fired, terminated the
+// worker, and reported `timeout`; the panel then uploaded the original photo
+// unchanged. Keep `cv` inside a box so no promise ever sees the thenable.
+type OpenCvBox = { cv: any };
+
+let openCvPromise: Promise<OpenCvBox> | null = null;
 let importStarted = false;
 
-function loadOpenCvInWorker(): Promise<any> {
+function loadOpenCvInWorker(): Promise<OpenCvBox> {
   if (workerSelf.cv?.Mat) {
-    return Promise.resolve(workerSelf.cv);
+    return Promise.resolve({ cv: workerSelf.cv });
   }
 
   if (openCvPromise) {
@@ -70,12 +79,12 @@ function loadOpenCvInWorker(): Promise<any> {
       }
 
       if (cv.Mat) {
-        resolve(cv);
+        resolve({ cv });
         return;
       }
 
       cv.onRuntimeInitialized = () => {
-        resolve(cv);
+        resolve({ cv });
       };
     } catch (error) {
       openCvPromise = null;
@@ -329,7 +338,7 @@ workerSelf.onmessage = (event) => {
 
   void (async () => {
     try {
-      const cv = await loadOpenCvInWorker();
+      const { cv } = await loadOpenCvInWorker();
 
       if (message.type === 'warmup') {
         workerSelf.postMessage({ type: 'ready', requestId: message.requestId });

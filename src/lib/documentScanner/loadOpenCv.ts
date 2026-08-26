@@ -6,15 +6,21 @@ declare global {
   }
 }
 
-let openCvPromise: Promise<any> | null = null;
+// Same thenable trap as the worker loader: an emscripten Module carries a
+// `then` method, so a promise resolved with `cv` adopts it and never settles.
+// Box it. This module currently has no callers -- the live path is the worker
+// -- but the bug is identical and would hang the first caller that appeared.
+type OpenCvBox = { cv: any };
 
-export function loadOpenCv(): Promise<any> {
+let openCvPromise: Promise<OpenCvBox> | null = null;
+
+export function loadOpenCv(): Promise<OpenCvBox> {
   if (typeof window === 'undefined' || typeof document === 'undefined') {
     return Promise.reject(new Error('OpenCV.js can only be loaded in a browser.'));
   }
 
   if (window.cv?.Mat) {
-    return Promise.resolve(window.cv);
+    return Promise.resolve({ cv: window.cv });
   }
 
   if (openCvPromise) {
@@ -35,12 +41,12 @@ export function loadOpenCv(): Promise<any> {
       }
 
       if (cv.Mat) {
-        resolve(cv);
+        resolve({ cv });
         return;
       }
 
       cv.onRuntimeInitialized = () => {
-        resolve(cv);
+        resolve({ cv });
       };
     };
 
