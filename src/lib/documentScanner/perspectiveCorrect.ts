@@ -98,6 +98,21 @@ export function orderQuadPoints(points: Point[]): Point[] {
   return [0, 1, 2, 3].map((offset) => sorted[(topLeftIndex + offset) % sorted.length]);
 }
 
+// The page quads measured on real photos span 1.300 to 1.415 against an
+// expected 1.384, so a 1.25x band holds every one of them with room to
+// spare while still excluding both off-shape printed blocks (0.19, 2.10).
+const PAGE_ASPECT_TOLERANCE = 1.25;
+
+// A quad flush against the frame edge is the signature of a page that runs
+// off the photo, so what it encloses is not the whole sheet. That is the case
+// the position test is here to catch -- the rejected candidate in
+// tests/perspective-correct.test.ts sits 1.7% from the right edge. It used to
+// be written as "must span from 20% to 80% of the frame", which is a
+// centring requirement rather than a cropping one: a page covering 66% with
+// margins of 13% and 21% is whole and well inside the frame, and was rejected
+// anyway.
+const MIN_FRAME_MARGIN = 0.02;
+
 export function evaluateQuad(
   points: Point[],
   imageWidth: number,
@@ -136,22 +151,41 @@ export function evaluateQuad(
   const widthCoverage = (right - left) / imageWidth;
   const heightCoverage = (bottom - top) / imageHeight;
 
-  // Keep the client-side correction gate aligned with the server-side frame
-  // gate. A wide internal table can look rectangular, but it must not be
-  // stretched into a full page and then drive fixed ROI classification.
+  // What this gate is for: a printed table inside the form can also produce a
+  // clean convex quadrilateral, and warping one into a page-sized image would
+  // feed the server a stretched table for fixed-ROI classification.
+  //
+  // It used to do that with size alone, at 0.70 wide by 0.78 tall. Measured
+  // against the forms themselves, that was about three times stricter than the
+  // job needs on one axis -- and it was rejecting real pages. On ten sample photos the
+  // largest printed cluster that shares the page's aspect is the CAGI answer
+  // column at 0.21 x 0.21, while the page quads the detector actually found
+  // ranged from 0.60 x 0.58 to 0.84 x 0.88. Five of ten pages failed the old
+  // floor and were reported `no-document`; the panel then uploaded the
+  // unrectified photo, which scored CORRECT 8 / WRONG 13 against the key.
+  //
+  // So the floor moves down to where it still clears the largest same-aspect
+  // table by nearly 3x, and the shape test the old rule lacked is added
+  // beside it: the quad must also be page-shaped. That pair excludes every
+  // printed cluster on both forms -- the CAGI answer column on size, the CAGI
+  // basic block (aspect 0.19) and the satisfaction answer block (aspect 2.10)
+  // on shape. Nine of the ten photos now rectify; the tenth fills only 58% of
+  // the frame height, which is a capture problem and stays refused.
+  const aspectRatio = averageHeight / averageWidth;
   if (
-    widthCoverage < 0.7 ||
-    heightCoverage < 0.78 ||
-    left > imageWidth * 0.2 ||
-    right < imageWidth * 0.8 ||
-    top > imageHeight * 0.2 ||
-    bottom < imageHeight * 0.8
+    widthCoverage < 0.6 ||
+    heightCoverage < 0.6 ||
+    left < imageWidth * MIN_FRAME_MARGIN ||
+    right > imageWidth * (1 - MIN_FRAME_MARGIN) ||
+    top < imageHeight * MIN_FRAME_MARGIN ||
+    bottom > imageHeight * (1 - MIN_FRAME_MARGIN) ||
+    aspectRatio < expectedAspectRatio / PAGE_ASPECT_TOLERANCE ||
+    aspectRatio > expectedAspectRatio * PAGE_ASPECT_TOLERANCE
   ) {
     return null;
   }
 
   const areaRatio = polygonArea(ordered) / (imageWidth * imageHeight);
-  const aspectRatio = averageHeight / averageWidth;
   const widthConsistency = Math.min(topWidth, bottomWidth) / Math.max(topWidth, bottomWidth);
   const heightConsistency = Math.min(leftHeight, rightHeight) / Math.max(leftHeight, rightHeight);
   const edgeConsistency = (widthConsistency + heightConsistency) / 2;
