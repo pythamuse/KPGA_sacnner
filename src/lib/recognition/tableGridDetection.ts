@@ -1365,6 +1365,25 @@ function deriveCellBoundaries(centers: number[], fallbackSize: number): number[]
   return boundaries;
 }
 
+/**
+ * Ceiling on the choose-k-from-n search below.
+ *
+ * The search has no pruning: the tolerance test needs the whole selection,
+ * because each gap is normalised by the span of the selection itself, so a
+ * prefix cannot be rejected. That is fine while the detector returns about as
+ * many lines as the template expects, which is what a scan gives. A photo does
+ * not: perspective breaks each printed rule into pieces and the surface behind
+ * the sheet contributes its own, and C(n, k) then runs away. One real photo
+ * (cagi-p3) did not come back in four minutes -- in production that is a
+ * request that never answers, not a page that reads badly.
+ *
+ * Exceeding the ceiling reports no match, which is the same outcome the search
+ * already produces when nothing fits, and drops the field to row detection or
+ * the fixed template. Set far above what a real scan needs: the measured
+ * satisfaction and CAGI pages settle in the low thousands of visits.
+ */
+const TEMPLATE_LINE_MATCH_BUDGET = 200_000;
+
 function matchTemplateLinePattern(detected: number[], expected: number[]): number[] | null {
   if (detected.length < expected.length || expected.length < 2) {
     return null;
@@ -1376,7 +1395,18 @@ function matchTemplateLinePattern(detected: number[], expected: number[]): numbe
   let best: number[] | undefined;
   let bestScore = Number.POSITIVE_INFINITY;
 
+  let visits = 0;
+  let exhausted = false;
+
   const visit = (start: number, selected: number[]) => {
+    if (exhausted) {
+      return;
+    }
+    if (visits >= TEMPLATE_LINE_MATCH_BUDGET) {
+      exhausted = true;
+      return;
+    }
+    visits += 1;
     if (selected.length === expected.length) {
       const deviations = getNormalizedGapDeviations(selected, expected);
       if (!deviations) {
@@ -1406,6 +1436,11 @@ function matchTemplateLinePattern(detected: number[], expected: number[]): numbe
   };
 
   visit(0, []);
+  // A partial sweep has not seen every candidate, so whatever it happened to
+  // score best is not the best match. Report no match rather than a lucky one.
+  if (exhausted) {
+    return null;
+  }
   return best || null;
 }
 
