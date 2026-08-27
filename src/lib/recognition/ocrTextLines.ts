@@ -13,7 +13,14 @@ export interface OcrOptions {
   deadlineAt?: number;
 }
 
-export interface DigitOcrOptions extends OcrOptions {}
+export interface DigitOcrOptions extends OcrOptions {
+  /**
+   * The sheet went through F1 capture correction (its registration meta was
+   * stored with the upload). Photo-only refusals hang off this; a scan leaves
+   * it `false` and takes exactly the path it took before this flag existed.
+   */
+  photoProvenance?: boolean;
+}
 
 export type DigitOcrStatus =
   | 'accepted'
@@ -23,12 +30,22 @@ export type DigitOcrStatus =
   | 'invalid_crop'
   | 'no_handwriting_found'
   | 'timeout_or_error'
-  | 'parse_or_confidence_rejected';
+  | 'parse_or_confidence_rejected'
+  | 'photo_confidence_refused';
 
 export interface DigitOcrResult {
   value?: number;
   status: DigitOcrStatus;
   diagnostic: string;
+  /**
+   * The reader confidence (tesseract's 0-100 scale) the accept decision was
+   * made on, or would have been made on had the read reached a gate. Absent
+   * only where no reader ever spoke -- an invalid crop, an expired deadline,
+   * an empty box. Recorded on every path, accepted or not, so the confidence
+   * distribution can be read off the decision traces of a real set without
+   * re-instrumenting this file.
+   */
+  confidence?: number;
 }
 
 export interface DigitTemplateReference {
@@ -40,6 +57,25 @@ const MIN_CONFIDENCE = 30;
 // Handwritten digits are optional enrichment. A value below this level is
 // shown as blank for manual review instead of being written as a wrong age.
 const MIN_DIGIT_CONFIDENCE = 60;
+/**
+ * PROVISIONAL -- UNCALIBRATED. A second, higher confidence floor applied only
+ * to sheets with photo provenance.
+ *
+ * Measured defect (spec §8 mechanism C): on one photographed sheet a
+ * handwritten "15" was read as "17" and written into the draft. A wrong age is
+ * stored as if a person had checked it; a blank one costs the reviewer a
+ * keystroke. Under `WRONG = 0` the blank wins, so on the photo path a read
+ * that clears `MIN_DIGIT_CONFIDENCE` still has to clear this before it may
+ * reach the draft.
+ *
+ * This value is a placeholder, not a measurement. This worktree has no scans,
+ * no photos and no answer key, so nothing here could separate the wrong read
+ * from the right ones. The central checkout calibrates it on the 19-set from
+ * the `ageOcrConfidence=` figures this file now records on every trace.
+ * `75` is only "above the existing floor of 60, below tesseract's confident
+ * range" -- treat any accuracy claim attached to it as unmade.
+ */
+export const AGE_OCR_MIN_CONFIDENCE = 75;
 const MIN_LINE_HEIGHT = 6;
 const GROUP_DISTANCE_PX = 8;
 // Emergency fix (see Task/OCR_ANCHORED_ROW_DETECTION.md cycle 1 feedback): the original
@@ -236,48 +272,57 @@ export async function recognizeDigitsInRegionDetailed(
   options?: DigitOcrOptions,
   templateReference?: DigitTemplateReference,
 ): Promise<DigitOcrResult> {
+  const photoProvenance = options?.photoProvenance === true;
   try {
     if (!Buffer.isBuffer(imageBuffer) || imageWidth <= 0 || imageHeight <= 0) {
-      return {
+      return recordAgeOcrConfidence({
         status: 'invalid_input',
         diagnostic: 'Age OCR was skipped because the input image was invalid.',
-      };
+      }, photoProvenance);
     }
 
     const remainingMs = options?.deadlineAt
       ? Math.min(DIGIT_OCR_TOTAL_TIMEOUT_MS, options.deadlineAt - Date.now())
       : DIGIT_OCR_TOTAL_TIMEOUT_MS;
     if (remainingMs <= 0) {
-      return {
+      return recordAgeOcrConfidence({
         status: 'deadline_exhausted',
         diagnostic: 'Age OCR was skipped because the per-student deadline had expired.',
-      };
+      }, photoProvenance);
     }
 
     if (digitWorkerPromise && !digitWorkerReady) {
-      return {
+      return recordAgeOcrConfidence({
         status: 'worker_pending',
         diagnostic: 'Age OCR was skipped because the shared OCR worker was still initializing.',
-      };
+      }, photoProvenance);
     }
 
     const crop = buildPixelCropBounds(imageWidth, imageHeight, rect);
     if (!crop) {
-      return {
+      return recordAgeOcrConfidence({
         status: 'invalid_crop',
         diagnostic: 'Age OCR was skipped because the age-number box was invalid.',
-      };
+      }, photoProvenance);
     }
 
-    return await withTimeout(
+    // The photo-only refusal is applied to the finished read, after every gate
+    // inside `recognizeDigitsCropDetailed` has had its say, so it can subtract
+    // a value but never add one back.
+    const read = await withTimeout(
       recognizeDigitsCropDetailed(imageBuffer, crop, templateReference),
       remainingMs,
     );
+
+    return recordAgeOcrConfidence(
+      applyPhotoAgeConfidenceGate(read, photoProvenance),
+      photoProvenance,
+    );
   } catch {
-    return {
+    return recordAgeOcrConfidence({
       status: 'timeout_or_error',
       diagnostic: 'Age OCR did not finish within the allowed time.',
-    };
+    }, photoProvenance);
   }
 }
 
@@ -301,6 +346,68 @@ export function parseTrustedAgeOcrText(text: unknown, confidence: number): numbe
   }
 
   return parseAgeOcrText(text);
+}
+
+/**
+ * The photo-only confidence refusal, as a pure function of a finished read.
+ *
+ * It sits after every existing gate, and it can only take a value away: it
+ * never accepts a read the gates rejected, never lowers a threshold, and on a
+ * sheet without photo provenance it returns the result it was handed. The
+ * plausibility and agreement gates upstream (`parseAgeOcrText`'s 1-20 range,
+ * the two-reader agreement, the frame-removal partial-read refusal) are
+ * untouched -- this is additive.
+ *
+ * An accepted read that arrived without a confidence figure is refused rather
+ * than trusted. That cannot happen through `recognizeDigitsCropDetailed`,
+ * which records one on every branch that produced a value, but the safe
+ * direction under `WRONG = 0` is blank.
+ */
+export function applyPhotoAgeConfidenceGate(
+  result: DigitOcrResult,
+  photoProvenance: boolean,
+): DigitOcrResult {
+  if (!photoProvenance || result.value === undefined) {
+    return result;
+  }
+
+  const { confidence } = result;
+  if (typeof confidence === 'number' && Number.isFinite(confidence)
+    && confidence >= AGE_OCR_MIN_CONFIDENCE) {
+    return result;
+  }
+
+  const read = typeof confidence === 'number' && Number.isFinite(confidence)
+    ? `confidence ${Math.round(confidence)}`
+    : 'no confidence figure';
+  return {
+    status: 'photo_confidence_refused',
+    confidence,
+    diagnostic: `Age OCR refused ${result.value} [gate=photo-confidence]: the sheet came from a photo and the accepted digits carried ${read} of ${AGE_OCR_MIN_CONFIDENCE} needed on the photo path. ${result.diagnostic}`,
+  };
+}
+
+/**
+ * Appends the machine-readable confidence figure to every age-OCR diagnostic.
+ *
+ * The prose already carried a rounded `conf=` inside its evidence on some
+ * paths and nothing at all on others. This token is on every path, in one
+ * shape, so the central calibration can read a per-student confidence out of
+ * `recognitionDecisionTrace['basic.age']` instead of re-instrumenting the
+ * pipeline for each threshold it wants to try.
+ */
+function recordAgeOcrConfidence(result: DigitOcrResult, photoProvenance: boolean): DigitOcrResult {
+  const { confidence } = result;
+  const figure = typeof confidence === 'number' && Number.isFinite(confidence)
+    ? confidence.toFixed(1)
+    : 'none';
+
+  return {
+    ...result,
+    diagnostic: `${result.diagnostic} [ageOcrConfidence=${figure}`
+      + ` photo=${photoProvenance ? 'yes' : 'no'}`
+      + ` accepted=${result.value !== undefined}]`,
+  };
 }
 
 type StrokeReading = NonNullable<DigitReading['perStroke']>[number];
@@ -460,6 +567,12 @@ async function recognizeDigitsCropDetailed(
     const evidence = `${describeReadings(wholeBox, perDigit)} ${describeShape(shape)}`;
     const wholeBoxValue = parseAgeOcrText(wholeBox.text);
     const perDigitValue = perDigit ? parseAgeOcrText(perDigit.text) : undefined;
+    // Carried on every branch below so a refused read still reports what the
+    // readers were worth. Where a gate compares one specific figure, that
+    // figure is reported instead of this one.
+    const bestConfidence = perDigit
+      ? Math.max(wholeBox.confidence, perDigit.confidence)
+      : wholeBox.confidence;
 
     // One shape the reader will not speak for, narrow enough that no digit but
     // `1` can be drawn that way, beside one it read confidently. This is
@@ -478,6 +591,7 @@ async function recognizeDigitsCropDetailed(
         return {
           value: narrowOne.value,
           status: 'accepted',
+          confidence: narrowOne.confidence,
           diagnostic: `Age OCR accepted ${narrowOne.value} [gate=narrow-stroke-is-one]: the wide shape read as ${narrowOne.read} at confidence ${Math.round(narrowOne.confidence)} of ${MIN_DIGIT_CONFIDENCE} needed, and the other is too narrow for any digit but 1. ${evidence}`,
         };
       }
@@ -487,12 +601,14 @@ async function recognizeDigitsCropDetailed(
       if (wholeBoxValue !== perDigitValue) {
         return {
           status: 'parse_or_confidence_rejected',
+          confidence: bestConfidence,
           diagnostic: `Age OCR rejected [gate=readers-disagreed]: the two readings were different numbers. ${evidence}`,
         };
       }
       if (isPartialReading(shape, wholeBox.text)) {
         return {
           status: 'parse_or_confidence_rejected',
+          confidence: bestConfidence,
           diagnostic: `Age OCR rejected [gate=one-digit-after-frame-removal]: both readings said ${wholeBoxValue}, but printed structure was removed from the box and a single digit cannot be told apart from the other one having gone with it. ${evidence}`,
         };
       }
@@ -502,11 +618,13 @@ async function recognizeDigitsCropDetailed(
         return {
           value,
           status: 'accepted',
+          confidence,
           diagnostic: `Age OCR accepted ${value} [gate=readers-agreed]: best confidence ${Math.round(confidence)} of ${MIN_DIGIT_CONFIDENCE} needed. ${evidence}`,
         };
       }
       return {
         status: 'parse_or_confidence_rejected',
+        confidence,
         diagnostic: `Age OCR rejected [gate=agreed-below-confidence]: both readings said ${wholeBoxValue} but the best confidence was ${Math.round(confidence)} of ${MIN_DIGIT_CONFIDENCE} needed. ${evidence}`,
       };
     }
@@ -516,6 +634,7 @@ async function recognizeDigitsCropDetailed(
       if (isPartialReading(shape, wholeBox.text)) {
         return {
           status: 'parse_or_confidence_rejected',
+          confidence: wholeBox.confidence,
           diagnostic: `Age OCR rejected [gate=one-digit-after-frame-removal]: the only number read was ${wholeBoxValue}, but printed structure was removed from the box and a single digit cannot be told apart from the other one having gone with it. ${evidence}`,
         };
       }
@@ -524,11 +643,13 @@ async function recognizeDigitsCropDetailed(
         return {
           value,
           status: 'accepted',
+          confidence: wholeBox.confidence,
           diagnostic: `Age OCR accepted ${value} [gate=whole-box-only]: confidence ${Math.round(wholeBox.confidence)} of ${MIN_DIGIT_CONFIDENCE} needed. ${evidence}`,
         };
       }
       return {
         status: 'parse_or_confidence_rejected',
+        confidence: wholeBox.confidence,
         diagnostic: `Age OCR rejected [gate=whole-box-below-confidence]: the only number read was ${wholeBoxValue} at confidence ${Math.round(wholeBox.confidence)} of ${MIN_DIGIT_CONFIDENCE} needed. ${evidence}`,
       };
     }
@@ -536,12 +657,14 @@ async function recognizeDigitsCropDetailed(
     if (perDigitValue !== undefined) {
       return {
         status: 'parse_or_confidence_rejected',
+        confidence: bestConfidence,
         diagnostic: `Age OCR rejected [gate=whole-box-unreadable]: only the per-digit reading was a number in range. ${evidence}`,
       };
     }
 
     return {
       status: 'parse_or_confidence_rejected',
+      confidence: bestConfidence,
       diagnostic: `Age OCR rejected [gate=no-number-read]: neither reading was a 1-20 number. ${evidence}`,
     };
   } catch {
