@@ -12,6 +12,7 @@ import type {
   RecognitionCandidateMeasurement,
   RecognitionMeasurementsByField,
 } from '../labelExport/types';
+import type { SheetQualityAttachment } from './sheetQualityDisplay';
 import { getTemplate, type ChoiceGroup } from './roiTemplates';
 import {
   buildCagiRowDetection,
@@ -101,6 +102,13 @@ export interface RecognitionDraft {
   recognitionDecisionTrace?: Record<string, string>;
   /** Server-only outlet; `/api/recognize` removes it before returning JSON. */
   recognitionMeasurements?: RecognitionMeasurementsByField;
+  /**
+   * Per-sheet capture verdicts attached by `/api/recognize` (spec F3.2).
+   * Review-screen display only — it never reaches a recognized value, and
+   * `/api/students` rebuilds the saved student from an explicit whitelist, so
+   * it is dropped at save. Absent on drafts made before F3 existed.
+   */
+  sheetQuality?: SheetQualityAttachment;
   warnings?: string[];
 }
 
