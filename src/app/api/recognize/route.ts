@@ -12,6 +12,7 @@ import {
 import { matchBatch, isStackOrder } from '../../../lib/recognition/batchMatcher';
 import { detectCagiEarlyIntervention } from '../../../lib/recognition/cagiEarlyIntervention';
 import { buildSourcePreview } from '../../../lib/recognition/buildSourcePreview';
+import { evaluateSheetQuality, type SheetQualityVerdict } from '../../../lib/recognition/sheetQuality';
 import { storeRecognitionMeasurements } from '../../../lib/labelExport/labelStore';
 import {
   isSafeJobId,
@@ -232,8 +233,17 @@ export async function POST(req: Request) {
         recognitionRejectedCandidateRects,
       );
 
+      // Same evaluator as POST /api/uploads/quality (spec F3.2 consistency
+      // requirement) — two different judges would let "it said fine at upload"
+      // disagree with the review screen. The scan path carries no F1
+      // registration meta, so the verdict here reads as provenance-unknown
+      // ('good' with reason no-registration-meta) and the image measurements
+      // ride along for the reviewer.
+      const sheetQuality = await buildSheetQualityAttachment(pair.cagiPath, pair.satisfactionPath);
+
       studentDrafts.push({
         ...recognizedDraft,
+        ...(sheetQuality ? { sheetQuality } : {}),
         source: {
           cagiImageId,
           satisfactionImageId: path.basename(pair.satisfactionPath).split('.')[0],
@@ -277,6 +287,44 @@ export async function POST(req: Request) {
       await fs.rm(requestScratchDir, { recursive: true, force: true }).catch(() => undefined);
     }
   }
+}
+
+/**
+ * Attaches per-sheet quality verdicts to a student draft without ever being
+ * able to fail recognition: a sheet whose evaluation throws simply has no
+ * verdict attached (spec F3.3 — the verdict is a reviewer signal, never a
+ * gate). Draft-field safety: `validateStudent` checks only known fields and
+ * `/api/students` rebuilds the saved student from an explicit whitelist, so
+ * this extra top-level field travels to the review client and is dropped at
+ * save, like the other review-only draft fields.
+ */
+async function buildSheetQualityAttachment(
+  cagiPath: string,
+  satisfactionPath: string,
+): Promise<{ cagi?: SheetQualityVerdict; satisfaction?: SheetQualityVerdict } | null> {
+  const attachment: { cagi?: SheetQualityVerdict; satisfaction?: SheetQualityVerdict } = {};
+
+  try {
+    attachment.cagi = await evaluateSheetQuality({
+      imagePath: cagiPath,
+      formType: 'cagi',
+      registration: null,
+    });
+  } catch (error) {
+    console.error('cagi sheet-quality evaluation failed', error);
+  }
+
+  try {
+    attachment.satisfaction = await evaluateSheetQuality({
+      imagePath: satisfactionPath,
+      formType: 'satisfaction',
+      registration: null,
+    });
+  } catch (error) {
+    console.error('satisfaction sheet-quality evaluation failed', error);
+  }
+
+  return attachment.cagi || attachment.satisfaction ? attachment : null;
 }
 
 async function materializeUploadBatch(
