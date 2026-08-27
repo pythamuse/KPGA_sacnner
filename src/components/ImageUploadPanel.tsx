@@ -718,6 +718,7 @@ export default function ImageUploadPanel({
     type: UploadKind,
     batch: UploadBatchReference,
     pageNumber: number,
+    registration: RegistrationMeta | null = null,
   ): Promise<any> => {
     const uploadFile = await shrinkImageFileIfNeeded(file, MAX_UPLOAD_IMAGE_BYTES);
     const formData = new FormData();
@@ -727,6 +728,13 @@ export default function ImageUploadPanel({
     formData.append('batchId', batch.batchId);
     formData.append('expectedPageCount', String(batch.expectedPageCount));
     formData.append('pageNumber', String(pageNumber));
+    // F1 meta travels WITH the page so the review screen can still read it
+    // after /api/uploads/quality's answer is gone. The server treats it as
+    // optional: an absent or malformed field stores nothing and the upload
+    // still succeeds, so this can never turn a good upload into a failure.
+    if (registration) {
+      formData.append('registration', JSON.stringify(registration));
+    }
 
     const res = await fetch('/api/upload', {
       method: 'POST',
@@ -863,7 +871,7 @@ export default function ImageUploadPanel({
 
     try {
       const batch = { batchId: createBatchId(), expectedPageCount: 1 };
-      const data = await uploadSingleFile(file, type, batch, 1);
+      const data = await uploadSingleFile(file, type, batch, 1, registration);
       uploadInventoryRef.current = { ...uploadInventoryRef.current, [type]: batch };
       onUploadSuccess(type, data.imageId, data.filename);
       if (type === 'cagi') setCagiCount(1);
@@ -1107,7 +1115,7 @@ export default function ImageUploadPanel({
   ) => {
     for (const page of pages) {
       setBatchStatusMessage(`페이지를 업로드하고 있습니다. (${page.page}/${pages.length})`);
-      await uploadSingleFile(page.file, type, batch, page.page);
+      await uploadSingleFile(page.file, type, batch, page.page, page.registration);
     }
 
     uploadInventoryRef.current = { ...uploadInventoryRef.current, [type]: batch };

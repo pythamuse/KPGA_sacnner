@@ -30,6 +30,15 @@ const LOCAL_UPLOAD_ROOT = path.join(
     .slice(0, 16),
 );
 const LOCAL_CONTENT_TYPE_SUFFIX = '.content-type';
+/**
+ * Capture metadata (spec F1.2 RegistrationMeta) rides beside its page as a
+ * sibling blob rather than inside the JPEG, so the page bytes stay exactly
+ * what was uploaded. The suffix keeps it under the same prefix the two
+ * deletion paths sweep (see deleteJobUploads / deleteUploadBatch below), so a
+ * cleaned-up job leaves no meta behind.
+ */
+const REGISTRATION_META_SUFFIX = '.registration.json';
+const REGISTRATION_META_CONTENT_TYPE = 'application/json';
 
 export interface StoreUploadPageInput {
   jobId: string;
@@ -44,6 +53,15 @@ export interface StoredUploadPage {
   pathname: string;
   data: Buffer;
   contentType: string;
+}
+
+export interface StoreUploadPageMetaInput {
+  jobId: string;
+  type: UploadKind;
+  batch: UploadBatchReference;
+  pageNumber: number;
+  /** Structure is the caller's business; this layer only serialises it. */
+  registration: unknown;
 }
 
 export class UploadStorageError extends Error {
@@ -90,6 +108,15 @@ export function getUploadPagePath(
 ) {
   assertPageInput(jobId, type, batch, pageNumber);
   return `${buildUploadPrefix(jobId, type, batch)}/page-${String(pageNumber).padStart(4, '0')}.jpg`;
+}
+
+export function getUploadPageMetaPath(
+  jobId: string,
+  type: UploadKind,
+  batch: UploadBatchReference,
+  pageNumber: number,
+) {
+  return `${getUploadPagePath(jobId, type, batch, pageNumber)}${REGISTRATION_META_SUFFIX}`;
 }
 
 export async function storeUploadPage(input: StoreUploadPageInput) {
@@ -141,6 +168,81 @@ export async function readUploadPage(
     };
   } catch (error) {
     throw toStorageError(error);
+  }
+}
+
+/**
+ * Persists the capture metadata for one uploaded page (spec F1.2).
+ *
+ * Addressed by exactly the key the page itself uses — (jobId, type, batch,
+ * pageNumber) — so the meta can never drift onto a different physical sheet
+ * than the bytes it describes.
+ */
+export async function storeUploadPageMeta(input: StoreUploadPageMetaInput) {
+  const pathname = getUploadPageMetaPath(input.jobId, input.type, input.batch, input.pageNumber);
+  const data = Buffer.from(JSON.stringify(input.registration ?? null), 'utf8');
+
+  if (usesLocalMemoryStore()) {
+    await storeLocalUploadPage(pathname, data, REGISTRATION_META_CONTENT_TYPE);
+    return { pathname };
+  }
+
+  try {
+    const result = await put(pathname, data, {
+      access: 'private',
+      allowOverwrite: true,
+      contentType: REGISTRATION_META_CONTENT_TYPE,
+    });
+    return { pathname: result.pathname };
+  } catch (error) {
+    throw toStorageError(error);
+  }
+}
+
+/**
+ * Reads back capture metadata, or `null` when a page carries none.
+ *
+ * Absence is the normal case, not an error: scans, PDF batches and every
+ * upload made before this existed have no meta, and the F3 evaluator reads
+ * `null` as provenance-unknown ('good' / `no-registration-meta`). Unparseable
+ * content reads as `null` too — a corrupt sidecar must not fail recognition.
+ */
+export async function readUploadPageMeta(
+  jobId: string,
+  type: UploadKind,
+  batch: UploadBatchReference,
+  pageNumber: number,
+): Promise<unknown | null> {
+  const pathname = getUploadPageMetaPath(jobId, type, batch, pageNumber);
+
+  if (usesLocalMemoryStore()) {
+    const stored = await readLocalUploadPage(pathname);
+    return stored ? parseRegistrationMetaJson(stored.data) : null;
+  }
+
+  try {
+    const result = await get(pathname, { access: 'private', useCache: false });
+    if (!result || result.statusCode !== 200 || !result.stream) {
+      return null;
+    }
+
+    return parseRegistrationMetaJson(Buffer.from(await new Response(result.stream).arrayBuffer()));
+  } catch (error) {
+    // Deliberately not rethrown. A page with no sidecar is the normal case
+    // (scans, PDF batches, every upload predating F1), and `get` on a missing
+    // private blob raises rather than returning a 404 result. Failing here
+    // would turn "no capture metadata" into a failed recognition.
+    console.warn('Unable to read upload page registration meta', pathname, error);
+    return null;
+  }
+}
+
+function parseRegistrationMetaJson(data: Buffer): unknown | null {
+  try {
+    const parsed = JSON.parse(data.toString('utf8'));
+    return parsed ?? null;
+  } catch {
+    return null;
   }
 }
 

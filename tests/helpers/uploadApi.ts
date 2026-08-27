@@ -23,6 +23,12 @@ export async function uploadTestPage(
   data: Buffer | string,
   filename = `${type}_page_${String(pageNumber).padStart(3, '0')}.png`,
   contentType = 'image/png',
+  /**
+   * Optional F1 capture meta, exactly as the client sends it: a stringified
+   * value in the `registration` form field. Pass a raw string to exercise the
+   * malformed-input path; anything else is JSON-stringified here.
+   */
+  registration?: unknown,
 ) {
   const formData = new FormData();
   formData.append('jobId', jobId);
@@ -30,6 +36,12 @@ export async function uploadTestPage(
   formData.append('batchId', batch.batchId);
   formData.append('expectedPageCount', String(batch.expectedPageCount));
   formData.append('pageNumber', String(pageNumber));
+  if (registration !== undefined) {
+    formData.append(
+      'registration',
+      typeof registration === 'string' ? registration : JSON.stringify(registration),
+    );
+  }
   const fileData: BlobPart = typeof data === 'string' ? data : new Uint8Array(Array.from(data));
   formData.append('file', new File([fileData], filename, { type: contentType }));
 
