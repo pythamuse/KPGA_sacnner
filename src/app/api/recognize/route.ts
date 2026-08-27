@@ -206,10 +206,23 @@ export async function POST(req: Request) {
     const rowOcrDeadlineAt = Date.now() + ROW_ANCHOR_BATCH_BUDGET_MS;
     for (let studentIndex = 0; studentIndex < matchedPairs.length; studentIndex++) {
       const pair = matchedPairs[studentIndex];
+      // Read the stored F1 meta before recognizing: its presence is the
+      // photo-provenance flag that arms photo-only refusals (the band check
+      // cost the scan set 4 correct cells when it ran unconditionally), and
+      // the same values feed the sheet-quality attachment below so meta is
+      // read once per sheet.
+      const [cagiRegistration, satisfactionRegistration] = await Promise.all([
+        readRegistrationForPath(jobId, pair.cagiPath, uploadOrigins),
+        readRegistrationForPath(jobId, pair.satisfactionPath, uploadOrigins),
+      ]);
       const draft = await recognizeStudentForms(
         pair.cagiPath,
         pair.satisfactionPath,
-        createRecognitionOcrDeadlines(rowOcrDeadlineAt, studentIndex),
+        {
+          ...createRecognitionOcrDeadlines(rowOcrDeadlineAt, studentIndex),
+          cagiPhotoProvenance: Boolean(cagiRegistration),
+          satisfactionPhotoProvenance: Boolean(satisfactionRegistration),
+        },
       );
       const {
         recognitionCropRects,
@@ -248,10 +261,10 @@ export async function POST(req: Request) {
       // carries no meta and stays provenance-unknown ('good' with reason
       // no-registration-meta).
       const sheetQuality = await buildSheetQualityAttachment(
-        jobId,
         pair.cagiPath,
         pair.satisfactionPath,
-        uploadOrigins,
+        cagiRegistration,
+        satisfactionRegistration,
       );
 
       studentDrafts.push({
@@ -312,10 +325,10 @@ export async function POST(req: Request) {
  * save, like the other review-only draft fields.
  */
 async function buildSheetQualityAttachment(
-  jobId: string,
   cagiPath: string,
   satisfactionPath: string,
-  origins: Map<string, UploadPageOrigin>,
+  cagiRegistration: RegistrationMetaLike | null,
+  satisfactionRegistration: RegistrationMetaLike | null,
 ): Promise<{ cagi?: SheetQualityVerdict; satisfaction?: SheetQualityVerdict } | null> {
   const attachment: { cagi?: SheetQualityVerdict; satisfaction?: SheetQualityVerdict } = {};
 
@@ -323,7 +336,7 @@ async function buildSheetQualityAttachment(
     attachment.cagi = await evaluateSheetQuality({
       imagePath: cagiPath,
       formType: 'cagi',
-      registration: await readRegistrationForPath(jobId, cagiPath, origins),
+      registration: cagiRegistration,
     });
   } catch (error) {
     console.error('cagi sheet-quality evaluation failed', error);
@@ -333,7 +346,7 @@ async function buildSheetQualityAttachment(
     attachment.satisfaction = await evaluateSheetQuality({
       imagePath: satisfactionPath,
       formType: 'satisfaction',
-      registration: await readRegistrationForPath(jobId, satisfactionPath, origins),
+      registration: satisfactionRegistration,
     });
   } catch (error) {
     console.error('satisfaction sheet-quality evaluation failed', error);

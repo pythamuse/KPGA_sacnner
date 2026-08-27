@@ -122,6 +122,9 @@ const RECOGNITION_FIELDS = [
 export interface RecognitionOptions {
   ocrDeadlineAt?: number;
   digitOcrDeadlineAt?: number;
+  /** The sheet went through F1 capture correction (stored registration meta). Enables photo-only refusals. */
+  cagiPhotoProvenance?: boolean;
+  satisfactionPhotoProvenance?: boolean;
 }
 
 export async function recognizeStudentForms(
@@ -282,6 +285,7 @@ export async function recognizeStudentForms(
           candidatePixelOverrides: cagiBaseline.basicCheckboxCandidateRects?.[group.field]
             || cagiBaseline.candidateRects[group.field],
         } : undefined,
+        options.cagiPhotoProvenance ?? false,
       );
       recognitionMeasurements[result.field] = buildCandidateMeasurements(
         result,
@@ -440,6 +444,7 @@ export async function recognizeStudentForms(
           image: satisfactionBaseline.image,
           candidatePixelOverrides: satisfactionBaseline.candidateRects[group.field],
         } : undefined,
+        options.satisfactionPhotoProvenance ?? false,
       );
       recognitionMeasurements[result.field] = buildCandidateMeasurements(
         result,

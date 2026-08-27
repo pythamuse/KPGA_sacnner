@@ -171,10 +171,12 @@ function analyze(page: Buffer, blank: Buffer) {
     pixels: blank,
     contentBoundsConfident: true,
   };
+  // photoProvenance: true — the band refusal is photo-only. Running it on
+  // scans measurably cost 4 correct cells for zero WRONG change (2026-08-27).
   return analyzeChoiceGroup(image, group, undefined, true, boxes, false, {
     image: baseline,
     candidatePixelOverrides: boxes,
-  });
+  }, true);
 }
 
 describe('analyzeChoiceGroup -- where the refusal sits', () => {
@@ -287,7 +289,7 @@ describe('analyzeChoiceGroup -- where the refusal sits', () => {
       contentBoundsConfident: true,
     };
 
-    const result = analyzeChoiceGroup(image, group, undefined, true, boxes);
+    const result = analyzeChoiceGroup(image, group, undefined, true, boxes, false, undefined, true);
 
     expect(result.decision).toContain('base=0');
     expect(result.decision).not.toContain('band-structure');

@@ -1131,6 +1131,13 @@ export function analyzeChoiceGroup(
   candidatePixelOverrides?: PixelRect[],
   requireHighVisualConfidence = false,
   baseline?: ChoiceGroupBaseline,
+  // Photo provenance: the sheet went through F1 capture correction (its
+  // registration meta was stored with the upload). Photo-only refusals hang
+  // off this — measured 2026-08-27: the band-structure check removed a wrong
+  // value on the photo set but cost the scan set 4 correct cells (node 355->
+  // 351, WRONG 7 unchanged), so it must not run where the failure mode it
+  // detects cannot occur.
+  photoProvenance = false,
 ): ChoiceGroupResult {
   const usesGridCells = candidatePixelOverrides?.length === group.candidates.length;
   const usesBaseline = baseline?.candidatePixelOverrides.length === group.candidates.length;
@@ -1300,10 +1307,14 @@ export function analyzeChoiceGroup(
   //
   // Template ink only. The raw-density path has no `actualInk` to read, and a
   // density reading is not the same measurement, so it is left alone.
-  const bandInks = usesBaseline
+  // Photo sheets only: the off-row signature comes from a warped photo's band
+  // landing on printed text, and on scans the same shape occurs benignly —
+  // enabling it there measurably cost 4 correct cells for zero WRONG change.
+  const bandInks = photoProvenance && usesBaseline
     ? scoredCandidates.map((candidate) => candidate.shape?.actualInk)
     : [];
-  const offRowBand = usesBaseline && bandInks.every((ink) => typeof ink === 'number')
+  const offRowBand = photoProvenance && usesBaseline && bandInks.length > 0
+    && bandInks.every((ink) => typeof ink === 'number')
     ? detectOffRowBand(bandInks as number[], 0)
     : null;
   if (offRowBand) {

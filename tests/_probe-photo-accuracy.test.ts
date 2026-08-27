@@ -56,7 +56,12 @@ describe.skipIf(!CAGI_DIR || !SAT_DIR)('photo accuracy probe', () => {
 
     const pairs = Math.min(cagiFiles.length, satFiles.length);
     for (let i = 0; i < pairs; i += 1) {
-      const draft = await recognizeStudentForms(cagiFiles[i], satFiles[i]) as unknown as Record<string, unknown>;
+      // Provenance flags on: this probe simulates the photo path, where the
+      // product arms photo-only refusals from the stored F1 meta.
+      const draft = await recognizeStudentForms(cagiFiles[i], satFiles[i], {
+        cagiPhotoProvenance: true,
+        satisfactionPhotoProvenance: true,
+      }) as unknown as Record<string, unknown>;
       const source = (draft.recognitionValueSource || {}) as Record<string, string>;
       const flat: Record<string, unknown> = {
         ...Object.fromEntries(Object.entries((draft.basic || {}) as object).map(([k, v]) => [`basic.${k}`, v])),
