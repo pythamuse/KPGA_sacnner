@@ -5,6 +5,7 @@ import {
   PixelRect,
 } from '../src/lib/recognition/markDensity';
 import { ChoiceGroup } from '../src/lib/recognition/roiTemplates';
+import { withAffineTone } from './helpers/affineTone';
 
 /**
  * The raised floor a two-candidate group answers to on a photo sheet, from
@@ -329,24 +330,50 @@ describe('PHOTO_BINARY_FLOOR -- where it cannot reach', () => {
 
 describe('PHOTO_BINARY_FLOOR -- what supersedes it', () => {
   /**
-   * On the default configuration the floor never gets asked. Every reading it
+   * Under the affine tone map the floor never gets asked. Every reading it
    * would have admitted is refused first, which is the whole of §14.1: the six
    * wrong binary values were the *other box winning outright*, so no floor can
    * reach them without also cutting the correct ones.
    *
+   * `MARK_AFFINE_TONE` is armed here because that is the condition the refusal
+   * was scoped to on measurement -- §14.1's wrong binary reads all appear under
+   * that map, and refusing the same questions on the shipped linear path cost
+   * 33 correct cells on the 19-student photo set for no wrong value removed. So
+   * on the shipped path the floor is not superseded at all; it is what a
+   * two-candidate photo group answers to, which is what the rest of this file
+   * measures.
+   *
    * Detail covered in `photo-binary-refusal.test.ts`; what belongs here is the
    * one fact this file would otherwise assert falsely -- that the readings
-   * below reach a value.
+   * below reach a value once the map is armed.
    */
-  it('admits nothing the refusal has already declined', () => {
+  it('admits nothing the refusal has already declined, under the map it was scoped to', () => {
     delete process.env.PHOTO_BINARY_REFUSAL;
 
     for (const samples of [SURVIVING_CORRECT, AT_FLOOR]) {
-      const result = run(samples, 2, true);
+      const result = withAffineTone(true, () => run(samples, 2, true));
       expect(result.value).toBeUndefined();
       expect(result.confidence).toBe('low');
       expect(result.decision).toContain('photo-binary-refused');
     }
+  });
+
+  it('NON-REGRESSION: on the shipped path the floor still answers, and admits', () => {
+    // The refusal left at its default (on) and the tone map left at its default
+    // (off), which is what ships. `photoBinaryRefusalEnabled()` is true and the
+    // group is still not refused, because the conjunction in `analyzeChoiceGroup`
+    // also requires `affineToneEnabled()`. The reading above the floor comes
+    // through; the floor is doing the work.
+    delete process.env.PHOTO_BINARY_REFUSAL;
+
+    const admitted = withAffineTone(false, () => run(SURVIVING_CORRECT, 2, true));
+    expect(admitted.decision).not.toContain('photo-binary-refused');
+    expect(admitted.value).toBe(1);
+    expect(admitted.decision).toContain('floor=0.067/0.042(');
+
+    const refused = withAffineTone(false, () => run(UNDER_FLOOR, 2, true));
+    expect(refused.value).toBeUndefined();
+    expect(refused.decision).toContain('photo-binary-floor');
   });
 
   it('still refuses on its own where the refusal is switched off', () => {
