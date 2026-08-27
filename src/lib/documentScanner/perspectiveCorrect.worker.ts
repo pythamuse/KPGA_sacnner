@@ -1,6 +1,10 @@
 import { orderQuadPoints, type Point, type QuadRejection } from './perspectiveCorrect';
 import { detectDocumentQuadFromMat } from './detectDocumentQuad';
 import {
+  measureFrameExposureInRegion,
+  type FrameExposureSample,
+} from './captureGuidance';
+import {
   alignToTemplate,
   composeToFullRes,
   decideRegistration,
@@ -94,6 +98,15 @@ type CorrectResponse =
     /** Dimensions the points are expressed in -- the frame as received. */
     width: number;
     height: number;
+    /**
+     * Tone (CAPTURE_GUIDANCE §11.3). Measured HERE rather than on the main
+     * thread because this is where the frame's ImageData already is: the
+     * client transfers the buffer into this worker, so the main thread would
+     * have to run a second `getImageData` -- a full ~700KB readback per tick,
+     * every tick, to avoid a pass this side does for free. Null when the frame
+     * could not be measured.
+     */
+    exposure: FrameExposureSample | null;
   }
   | {
     type: 'result';
@@ -440,12 +453,24 @@ async function detectAndWarp(
   }
 }
 
-/** Quad detection only, on the frame exactly as received. */
+/**
+ * Quad detection and tone, on the frame exactly as received.
+ *
+ * The exposure pass is deliberately downstream of the quad: it needs the four
+ * corners to know which pixels are paper (CAPTURE_GUIDANCE §6.2), and when
+ * there is no quad it falls back to the guide rectangle and says so. It runs
+ * even when detection was refused -- a rejected frame still has a tone, and the
+ * reducer decides whether that is the thing worth saying.
+ */
 function detectOnly(
   cv: any,
   imageData: ImageData,
   expectedAspectRatio: number,
-): { quality: LiveQuadQuality | null; rejection: QuadRejection | null } {
+): {
+  quality: LiveQuadQuality | null;
+  rejection: QuadRejection | null;
+  exposure: FrameExposureSample | null;
+} {
   const source = cv.matFromImageData(imageData);
 
   try {
@@ -457,8 +482,22 @@ function detectOnly(
       expectedAspectRatio,
     );
 
+    let exposure: FrameExposureSample | null = null;
+    try {
+      exposure = measureFrameExposureInRegion(
+        imageData.data,
+        imageData.width,
+        imageData.height,
+        quality ? quality.points : null,
+      );
+    } catch {
+      // Guidance, never a verdict: a tone reading that throws costs the user
+      // nothing, and must not cost them the geometry hints alongside it.
+      exposure = null;
+    }
+
     if (!quality) {
-      return { quality: null, rejection };
+      return { quality: null, rejection, exposure };
     }
 
     // Only the four fields the overlay reads cross the wire; `areaRatio` and
@@ -471,6 +510,7 @@ function detectOnly(
         aspectRatio: quality.aspectRatio,
       },
       rejection: null,
+      exposure,
     };
   } finally {
     source.delete();
@@ -501,6 +541,7 @@ workerSelf.onmessage = (event) => {
           rejection: detection.rejection,
           width: message.imageData.width,
           height: message.imageData.height,
+          exposure: detection.exposure,
         });
         return;
       }
@@ -548,6 +589,7 @@ workerSelf.onmessage = (event) => {
           rejection: null,
           width: 0,
           height: 0,
+          exposure: null,
         });
         return;
       }

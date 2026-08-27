@@ -553,11 +553,19 @@ export default function ImageUploadPanel({
         'contain',
       );
 
+      // `exposure` rides in on the SAME response, measured by the worker from
+      // the same ImageData it detected on (CAPTURE_GUIDANCE §11.3). The panel
+      // does not grab the frame a second time: the buffer it sends is
+      // transferred, so a main-thread read would be a fresh ~700KB
+      // `getImageData` every tick to duplicate a pass the worker already has
+      // the pixels for. Null whenever the frame could not be measured, and the
+      // reducer then simply has nothing to say about tone.
       const status = evaluateCaptureGuidance({
         quality: detection?.quality ?? null,
         rejection: detection?.rejection ?? null,
         frameWidth,
         frameHeight,
+        exposure: detection?.exposure ?? null,
       });
 
       const guideInFrame = computeGuideRect(frameWidth, frameHeight);
