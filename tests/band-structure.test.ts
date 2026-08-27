@@ -351,13 +351,20 @@ describe('analyzeChoiceGroup -- where the refusal sits', () => {
     expect(result.decision).not.toContain('band-structure');
     expect(result.decision).not.toContain('band=refused');
     // The four thresholds all refuse it, which is the gate that owns an empty
-    // reading. What follows is not this check's business: two blank buffers
-    // give the rescue rule an all-zero feature vector, where its bias alone
-    // clears the threshold, so this synthetic pair comes out confirmed. That
-    // is a property of a fixture with no printed form on it at all -- recorded
-    // here so the next reader does not mistake it for the band rule leaking.
+    // reading. What follows is not this check's business, and is recorded here
+    // so the next reader does not mistake it for the band rule leaking.
+    //
+    // Two blank buffers give the rescue rule an all-zero feature vector, where
+    // its bias alone clears the threshold, and this pair used to come out
+    // confirmed on that alone. The total-ink invariant now closes that route
+    // (FEATURE_SPEC_CAPTURE_PIPELINE_2026-08-27 §14.2, `tests/ink-invariant`):
+    // both boxes carry 0.000 page ink against 0.000 blank ink, so nothing was
+    // added to either and the rescue -- which reads shape and fit but never a
+    // score -- is not allowed to confirm one.
     expect(result.decision).toContain('absolute-floor');
-    expect(result.decision).toContain('rescued:');
+    expect(result.decision).toContain('ink-invariant');
+    expect(result.decision).not.toContain('rescued:');
+    expect(result.value).toBeUndefined();
   });
 
   it('does not run on the raw-density path, which has no template ink to read', () => {
