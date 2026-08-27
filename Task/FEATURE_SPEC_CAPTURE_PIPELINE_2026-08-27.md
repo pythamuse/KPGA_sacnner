@@ -169,13 +169,32 @@ interface SheetQualityVerdict {
 }
 ```
 
-해석 규칙(초안 — **밴드 경계는 T3 측정으로 확정**, 상수에 출처 주석 필수):
+해석 규칙 — **T3 측정(아래 §F3.4)이 초안 밴드를 기각했다. 확정 규칙은 다음이다:**
 
-| verdict | 초안 조건 |
+| verdict | 조건 (정합 메타만 사용) |
 |---|---|
-| `unusable` | `gridFields ≤ 3` 또는 (`registration.method='none'` 그리고 `gridFields ≤ 5`) |
-| `retake-suggested` | `gridFields 4~7` 또는 `verified=false` 또는 `pageInkRatio > 0.55` |
-| `good` | 그 외 |
+| `unusable` | `registration.method = 'none'` |
+| `retake-suggested` | `method ≠ 'none'`이지만 `verified = false` |
+| `good` | `verified = true`, 또는 registration 메타가 없음(스캔·기존 업로드 — 스캔에 재촬영을 말해선 안 된다. reason `no-registration-meta`) |
+
+`gridFields` / `pageInkRatio` 등 이미지 신호는 **signals로 보고만 하고 판정에 쓰지 않는다.**
+
+### F3.4 T3 측정 — 초안 밴드 기각 근거 (2026-08-27)
+
+19명을 "정답을 한 칸이라도 낸 학생"(7명: 1~5, 16, 17)과 못 낸 학생(12명)으로 갈라, 장당
+신호의 최적 단일 절단 정확도를 섞은 라벨 대조군 500회의 p95와 비교했다.
+
+| 신호 | 최적 절단 (19명 중) | 섞은 라벨 p95 | 판정 |
+|---|---|---|---|
+| gridFields | 14 | 14 | **우연 수준** |
+| pageInkRatio | 16 | 15 | 경계선, 그리고 **방향이 반대** — 성공 학생의 ink가 더 높다(0.56~0.61) |
+| orbInliers (cagi/sat) | 13 / 13 | 15 | 우연 이하 |
+| 쿼드 confidence (cagi/sat) | 13 / 17 | 16 / 15 | 우연 수준 |
+
+초안의 "ink > 0.55 → retake"는 **좋은 묶음을 걸러내는 규칙**이었다. 시트 수준 이미지
+신호로는 이 표본에서 밴드를 자를 수 없다 — 성패를 가르는 것은 셀 수준 게이트 신호이며,
+그것은 Stage A 계측(잔여 오답 기제)의 몫이다. 새 증거 없이 이 신호들에 문턱을 다시 달지
+않는다.
 
 **신규 엔드포인트** `POST /api/uploads/quality`
 `{ jobId, type, imageId, registration? }` → `SheetQualityVerdict`.
