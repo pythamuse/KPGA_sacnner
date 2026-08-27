@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   analyzeChoiceGroup,
   ImageAnalysisData,
@@ -9,9 +9,11 @@ import {
   ChoiceGroup,
   satisfactionTemplate,
 } from '../src/lib/recognition/roiTemplates';
+import { withAffineTone } from './helpers/affineTone';
 
 /**
- * Two-candidate groups on a photo sheet reach no automatic value at all.
+ * Two-candidate groups on a photo sheet reach no automatic value at all --
+ * **while the affine tone map is armed.**
  *
  * FEATURE_SPEC_CAPTURE_PIPELINE_2026-08-27 §14.1. With the affine tone map
  * armed the binary questions produced 27 automatic values over the 19 photo
@@ -32,6 +34,16 @@ import {
  *
  * Plus the two properties that make it measurable: it is on by default, and
  * `PHOTO_BINARY_REFUSAL=0` takes it off without touching anything else.
+ *
+ * **The scope narrowed after this file was written, and the tests moved with
+ * it.** The refusal was built unconditionally on photo sheets; measured on the
+ * shipped linear path it cost 33 correct cells on the same 19 sheets (59 -> 23)
+ * and removed no wrong value, because §14.1's six wrong reads all appear under
+ * the map and not under the shift. `analyzeChoiceGroup` therefore also requires
+ * `affineToneEnabled()`, so every case below arms `MARK_AFFINE_TONE` -- that is
+ * the configuration the rule exists in. The shipped path is pinned separately
+ * at the end of the file, and it is the half that protects the 59 correct
+ * cells.
  */
 
 // Restated so a change of polarity has to change this file on purpose.
@@ -201,8 +213,23 @@ const UNDER_FLOOR = 31; // scores 0.032
 const MEDIUM_WINNER = 128;
 const MEDIUM_RUNNER_UP = 123;
 
+// The rule under test exists only under the affine tone map, so it is armed for
+// the file rather than repeated in every case. Set here rather than at module
+// scope so the shipped-path cases at the end can take it back, and restored so
+// the suite behaves the same whether or not `MARK_AFFINE_TONE` is already in the
+// environment -- the pair of runs that measures the flag.
+let ambientAffineTone: string | undefined;
+beforeEach(() => {
+  ambientAffineTone = process.env.MARK_AFFINE_TONE;
+  process.env.MARK_AFFINE_TONE = '1';
+});
 afterEach(() => {
   delete process.env.PHOTO_BINARY_REFUSAL;
+  if (ambientAffineTone === undefined) {
+    delete process.env.MARK_AFFINE_TONE;
+  } else {
+    process.env.MARK_AFFINE_TONE = ambientAffineTone;
+  }
 });
 
 describe('the fixture reads as the measurement it stands in for', () => {
@@ -441,6 +468,52 @@ describe('the refusal -- how it is switched off for measurement', () => {
     const on = run(STRONG, 2, false).decision;
     process.env.PHOTO_BINARY_REFUSAL = '0';
     const off = run(STRONG, 2, false).decision;
+    expect(on).toBe(off);
+  });
+});
+
+describe('NON-REGRESSION -- the shipped path, where the refusal does not apply', () => {
+  /**
+   * `MARK_AFFINE_TONE` is off by default, so this is what actually runs today.
+   * Every case here takes the flag back off, over the `beforeEach` above.
+   *
+   * The measurement these pin: refusing binary groups on the linear photo path
+   * cost 33 correct cells on the 19-student set, 59 -> 23, and removed no wrong
+   * value -- §14.1's six wrong reads are all under the map. A refusal is still a
+   * cost, and it is only worth paying where the failure it prevents occurs.
+   */
+  it('auto-fills a strong two-candidate photo reading, which is worth 33 cells', () => {
+    const result = withAffineTone(false, () => run(STRONG, 2, true));
+
+    expect(result.decision).not.toContain(REFUSAL_LABEL);
+    expect(result.value).toBe(1);
+    expect(result.confidence).toBe('high');
+  });
+
+  it('leaves PHOTO_BINARY_FLOOR as the rule a binary photo group answers to', () => {
+    // Not superseded on this path: the raised floor is still cut against the
+    // reading, and it is still what refuses one below it. That is why the
+    // constant is live code rather than a leftover.
+    const admitted = withAffineTone(false, () => run(STRONG, 2, true));
+    expect(admitted.decision).toContain('floor=0.067/0.042(');
+
+    const refused = withAffineTone(false, () => run(UNDER_FLOOR, 2, true));
+    expect(refused.value).toBeUndefined();
+    expect(refused.decision).toContain('photo-binary-floor');
+  });
+
+  it('does not read PHOTO_BINARY_REFUSAL at all while the map is off', () => {
+    // The two flags are a conjunction, not alternatives. With the map off the
+    // refusal's own switch changes nothing in either position, so a measurement
+    // run that moves only `PHOTO_BINARY_REFUSAL` is measuring nothing.
+    const on = withAffineTone(false, () => {
+      delete process.env.PHOTO_BINARY_REFUSAL;
+      return run(STRONG, 2, true).decision;
+    });
+    const off = withAffineTone(false, () => {
+      process.env.PHOTO_BINARY_REFUSAL = '0';
+      return run(STRONG, 2, true).decision;
+    });
     expect(on).toBe(off);
   });
 });

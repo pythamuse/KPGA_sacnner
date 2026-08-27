@@ -6,6 +6,7 @@ import {
   PixelRect,
 } from '../src/lib/recognition/markDensity';
 import { ChoiceGroup } from '../src/lib/recognition/roiTemplates';
+import { withAffineTone } from './helpers/affineTone';
 
 /**
  * The band-structure refusal, from FEATURE_SPEC_CAPTURE_PIPELINE_2026-08-27
@@ -346,21 +347,27 @@ describe('analyzeChoiceGroup -- where the refusal sits', () => {
     const page = Buffer.alloc(PAGE_WIDTH * PAGE_HEIGHT, 255);
     const blank = Buffer.alloc(PAGE_WIDTH * PAGE_HEIGHT, 255);
 
-    const result = analyze(page, blank);
+    // The band rule reads the same inks either way, so its own claim is checked
+    // on the shipped configuration.
+    const shipped = withAffineTone(false, () => analyze(page, blank));
+    expect(shipped.decision).not.toContain('band-structure');
+    expect(shipped.decision).not.toContain('band=refused');
 
-    expect(result.decision).not.toContain('band-structure');
-    expect(result.decision).not.toContain('band=refused');
     // The four thresholds all refuse it, which is the gate that owns an empty
     // reading. What follows is not this check's business, and is recorded here
     // so the next reader does not mistake it for the band rule leaking.
     //
     // Two blank buffers give the rescue rule an all-zero feature vector, where
-    // its bias alone clears the threshold, and this pair used to come out
-    // confirmed on that alone. The total-ink invariant now closes that route
-    // (FEATURE_SPEC_CAPTURE_PIPELINE_2026-08-27 §14.2, `tests/ink-invariant`):
-    // both boxes carry 0.000 page ink against 0.000 blank ink, so nothing was
-    // added to either and the rescue -- which reads shape and fit but never a
-    // score -- is not allowed to confirm one.
+    // its bias alone clears the threshold, so this pair comes out confirmed on
+    // that alone. The total-ink guard closes that route -- both boxes carry
+    // 0.000 page ink against 0.000 blank ink, so nothing was added to either
+    // and the rescue, which reads shape and fit but never a score, is not
+    // allowed to confirm one -- but only under the affine package it was
+    // scoped to on measurement (`tests/ink-invariant`): enforcing it on the
+    // linear paths cost 21 correct cells on scans and 33 on photos. So the
+    // flag is armed here, which is the condition the product applies it under.
+    const result = withAffineTone(true, () => analyze(page, blank));
+    expect(result.decision).not.toContain('band-structure');
     expect(result.decision).toContain('absolute-floor');
     expect(result.decision).toContain('ink-invariant');
     expect(result.decision).not.toContain('rescued:');
