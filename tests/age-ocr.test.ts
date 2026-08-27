@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
+  AGE_OCR_MIN_CONFIDENCE,
+  applyPhotoAgeConfidenceGate,
   parseAgeOcrText,
   parseTrustedAgeOcrText,
   recognizeDigitsInRegion,
   recognizeDigitsInRegionDetailed,
+  type DigitOcrResult,
 } from '../src/lib/recognition/ocrTextLines';
 import path from 'path';
 import { getAgeDigitsRect, recognizeStudentForms } from '../src/lib/recognition/detectCheckmarks';
@@ -84,5 +87,105 @@ describe('age OCR validation', () => {
 
     expect(draft.basic.age).toBeUndefined();
     expect(draft.confidence['basic.age']).toBe('medium');
+  }, 10_000);
+});
+
+/**
+ * The refusal is exercised through the pure decision function rather than by
+ * mocking tesseract: this suite drives the real engine on fixture crops, and a
+ * crop that reliably reads at a chosen confidence is not something a synthetic
+ * image can promise. `applyPhotoAgeConfidenceGate` is the whole decision, so
+ * driving it directly tests the rule rather than a stand-in for the reader.
+ *
+ * Thresholds are read from `AGE_OCR_MIN_CONFIDENCE` instead of written out, so
+ * the central calibration can move the constant without editing these tests.
+ */
+describe('age OCR photo-provenance confidence refusal', () => {
+  const acceptedRead = (confidence?: number): DigitOcrResult => ({
+    value: 15,
+    status: 'accepted',
+    ...(confidence === undefined ? {} : { confidence }),
+    diagnostic: 'Age OCR accepted 15 [gate=readers-agreed]: best confidence x of 60 needed.',
+  });
+
+  it('leaves a low-confidence photo read blank instead of writing a wrong age', () => {
+    const result = applyPhotoAgeConfidenceGate(acceptedRead(AGE_OCR_MIN_CONFIDENCE - 1), true);
+
+    expect(result.value).toBeUndefined();
+    expect(result.status).toBe('photo_confidence_refused');
+    expect(result.confidence).toBe(AGE_OCR_MIN_CONFIDENCE - 1);
+    expect(result.diagnostic).toContain('gate=photo-confidence');
+  });
+
+  it('still fills a photo read that clears the photo floor', () => {
+    const read = acceptedRead(AGE_OCR_MIN_CONFIDENCE);
+
+    expect(applyPhotoAgeConfidenceGate(read, true)).toBe(read);
+  });
+
+  it('leaves the scan path untouched at any confidence', () => {
+    const low = acceptedRead(AGE_OCR_MIN_CONFIDENCE - 1);
+    const veryLow = acceptedRead(0);
+
+    // Identity, not equality: on a sheet without photo provenance this gate
+    // hands back the object it was given, so nothing about a scan can change.
+    expect(applyPhotoAgeConfidenceGate(low, false)).toBe(low);
+    expect(applyPhotoAgeConfidenceGate(veryLow, false)).toBe(veryLow);
+  });
+
+  it('refuses an accepted photo read that arrived without a confidence figure', () => {
+    const result = applyPhotoAgeConfidenceGate(acceptedRead(undefined), true);
+
+    expect(result.value).toBeUndefined();
+    expect(result.status).toBe('photo_confidence_refused');
+    expect(result.diagnostic).toContain('no confidence figure');
+  });
+
+  it('never turns a refusal into a filled value', () => {
+    const rejected: DigitOcrResult = {
+      status: 'parse_or_confidence_rejected',
+      confidence: 99,
+      diagnostic: 'Age OCR rejected [gate=readers-disagreed]: the two readings were different numbers.',
+    };
+
+    expect(applyPhotoAgeConfidenceGate(rejected, true)).toBe(rejected);
+    expect(applyPhotoAgeConfidenceGate(rejected, false)).toBe(rejected);
+  });
+});
+
+describe('age OCR confidence recording', () => {
+  it('records a machine-readable confidence on a path that never reached a reader', async () => {
+    const result = await recognizeDigitsInRegionDetailed(
+      Buffer.from('not-an-image'),
+      100,
+      100,
+      { left: 10, top: 10, right: 90, bottom: 90 },
+      { deadlineAt: Date.now() - 1, photoProvenance: true },
+    );
+
+    expect(result.diagnostic).toContain('[ageOcrConfidence=none photo=yes accepted=false]');
+  });
+
+  it('marks the scan path as such so calibration can separate the two sets', async () => {
+    const result = await recognizeDigitsInRegionDetailed(
+      Buffer.from('not-an-image'),
+      100,
+      100,
+      { left: 10, top: 10, right: 90, bottom: 90 },
+      { deadlineAt: Date.now() - 1 },
+    );
+
+    expect(result.diagnostic).toContain('[ageOcrConfidence=none photo=no accepted=false]');
+  });
+
+  it('threads photo provenance from the recognition entry point into the age trace', async () => {
+    const draft = await recognizeStudentForms(
+      path.join(blankFormDir, 'cagi-blank.png'),
+      path.join(blankFormDir, 'satisfaction-blank.png'),
+      { ocrDeadlineAt: Date.now() + 6_000, cagiPhotoProvenance: true },
+    );
+
+    expect(draft.basic.age).toBeUndefined();
+    expect(draft.recognitionDecisionTrace?.['basic.age']).toContain('photo=yes');
   }, 10_000);
 });

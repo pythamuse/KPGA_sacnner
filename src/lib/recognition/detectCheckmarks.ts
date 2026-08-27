@@ -34,7 +34,7 @@ import {
   normalizeBasicCheckboxRects,
   type BasicCheckboxGridDetection,
 } from './basicCheckboxDetection';
-import { recognizeDigitsInRegionDetailed } from './ocrTextLines';
+import { recognizeDigitsInRegionDetailed, type DigitOcrOptions } from './ocrTextLines';
 import { loadBlankFormBaseline } from './templateBaseline';
 import fs from 'fs/promises';
 
@@ -553,10 +553,15 @@ function toOcrOptions(options: RecognitionOptions): { deadlineAt?: number } | un
     : { deadlineAt: options.ocrDeadlineAt };
 }
 
-function toDigitOcrOptions(options: RecognitionOptions): { deadlineAt?: number } | undefined {
-  return options.digitOcrDeadlineAt === undefined
-    ? undefined
-    : { deadlineAt: options.digitOcrDeadlineAt };
+// `basic.age` is read from the CAGI sheet, so the CAGI flag is the one that
+// arms the photo-only confidence refusal. An options object is now always
+// produced: `deadlineAt: undefined` takes the same branch as no options at
+// all, so a caller that passed no deadline keeps the full digit-OCR budget.
+function toDigitOcrOptions(options: RecognitionOptions): DigitOcrOptions {
+  return {
+    deadlineAt: options.digitOcrDeadlineAt,
+    photoProvenance: options.cagiPhotoProvenance ?? false,
+  };
 }
 
 function mapRecognizedSchoolType(value: number | string): string {
