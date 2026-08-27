@@ -100,7 +100,26 @@ interface ResidualEdges {
 }
 
 interface TemplateInkFeatures extends TemplateInkShape {
+  /**
+   * The differential score this cell is decided on, after the total-ink
+   * invariant. Equal to `residualScore` unless `inkInvariantZeroed`, in which
+   * case it is 0. See `TEMPLATE_INK_INVARIANT_EPSILON`.
+   */
   score: number;
+  /**
+   * The mean clipped residual as it was summed, before the invariant. Kept
+   * because the invariant must be able to remove a value without widening any
+   * other candidate's margin: `analyzeChoiceGroup` ranks and computes `gap`
+   * and `relativeContrast` off this, so zeroing one box can only ever lower a
+   * threshold's input, never raise one.
+   */
+  residualScore: number;
+  /**
+   * True when the invariant applied, i.e. this box's aggregate page ink did
+   * not exceed the blank form's. Vacuously true for a box whose residual was
+   * already 0.
+   */
+  inkInvariantZeroed: boolean;
   /** Mean darkness of the uploaded cell, after brightness normalisation. */
   actualInk: number;
   /** Mean darkness of the same cell on the blank form. */
@@ -181,6 +200,16 @@ interface BrightnessReferenceProbe {
 }
 
 interface ScoredCandidate extends CandidateScore {
+  /**
+   * `score` before the total-ink invariant zeroed it, and identical to `score`
+   * for every box the invariant did not touch -- including every box on the
+   * raw-density path, which has no baseline and therefore no invariant.
+   *
+   * Ranking and the two margin tests read this rather than `score` so that
+   * removing one box's signal cannot hand another box a wider gap than it
+   * earned. See `TEMPLATE_INK_INVARIANT_EPSILON`.
+   */
+  residualScore: number;
   shape?: TemplateInkFeatures;
   candidateIndex: number;
   /** Position in the group as the template lists it, 1-based, before sorting. */
@@ -1036,6 +1065,13 @@ function describeDecision(evidence: DecisionEvidence, outcome: string, refused: 
         : '';
       return `${candidate.position}@${candidate.atX.toFixed(2)}:scr=${candidate.score.toFixed(3)}`
         + ` page=${features.actualInk.toFixed(3)} blank=${features.baselineInk.toFixed(3)}`
+        // Only where the invariant actually took something away. It is
+        // vacuously true of every empty box on the page, and a marker that
+        // fires on all of them would bury the one that mattered; `scr0` is the
+        // residual it removed, so the row still shows the size of the removal.
+        + (features.inkInvariantZeroed && features.residualScore > 0
+          ? ` inkInvariant=zeroed(page<=blank,scr0=${features.residualScore.toFixed(4)})`
+          : '')
         + ` shift=${features.brightnessOffset.toFixed(0)}`
         // Which correction the box was actually measured through. `shift=`
         // alone stopped being the answer once a photographed box could be
@@ -1253,24 +1289,35 @@ export function analyzeChoiceGroup(
       const contentLeft = image.contentBounds?.left ?? 0;
       const contentWidth = Math.max((image.contentBounds?.right ?? image.width) - contentLeft, 1);
 
+      // What the measurement produced. On the raw-density path this is the
+      // density, and there is no baseline to hold it to an invariant.
+      const residualScore = roundScore(
+        templateEvidence?.residualScore ?? calculateDarkPixelDensity(
+          image,
+          candidate.rect,
+          150,
+          yOverride,
+          usesGridCells ? candidatePixelOverrides[index] : undefined,
+        ),
+      );
+
       return {
         position: index + 1,
         candidateIndex: index,
         atX: ((rect.left + rect.right) / 2 - contentLeft) / contentWidth,
         value: candidate.value,
-        score: roundScore(
-          templateEvidence?.score ?? calculateDarkPixelDensity(
-            image,
-            candidate.rect,
-            150,
-            yOverride,
-            usesGridCells ? candidatePixelOverrides[index] : undefined,
-          ),
-        ),
+        // The total-ink invariant, applied where both quantities exist.
+        score: templateEvidence?.inkInvariantZeroed ? 0 : residualScore,
+        residualScore,
         shape: templateEvidence,
       };
     })
-    .sort((a, b) => b.score - a.score);
+    // Ranked on the pre-invariant score, so the invariant never promotes a
+    // box: the order here is the order this file has always produced, and a
+    // zeroed winner stays the winner and is refused below rather than handing
+    // its group to the runner-up. Promotion is a decision about the other box
+    // and this invariant says nothing about the other box.
+    .sort((a, b) => b.residualScore - a.residualScore);
   const candidates: CandidateScore[] = scoredCandidates.map(({ value, score }) => ({ value, score }));
   const candidateMeasurements: CandidateMeasurement[] = scoredCandidates.map((candidate) => ({
     candidateIndex: candidate.candidateIndex,
@@ -1319,7 +1366,13 @@ export function analyzeChoiceGroup(
 
   // A fallback content bound may still produce plausible-looking candidate scores.
   // Never turn those scores into automatic data when the page frame was not trusted.
-  const gap = best.score - (second?.score || 0);
+  // The runner-up enters both margin tests at its pre-invariant score. That is
+  // what makes this unit a pure tightening: `best.score` can only fall and the
+  // denominator cannot, so `gap` and `relativeContrast` are both monotonically
+  // non-increasing and no gate below can newly pass. Zeroing a runner-up would
+  // otherwise widen the winner's margin -- and send `relativeContrast` to
+  // infinity -- which is manufacturing evidence out of a refusal.
+  const gap = best.score - (second?.residualScore || 0);
   // Printed circles and rules do not cancel perfectly: the blank form is a
   // 200dpi scan while an uploaded page is rendered at roughly half that, so
   // every option keeps a similar floor of leftover ink. That floor makes the
@@ -1333,8 +1386,8 @@ export function analyzeChoiceGroup(
   // answer key (1.15-1.25 both give CORRECT 92 WRONG 0; 1.35 drops to 87), so
   // it maximizes the margin against unseen pages without trading accuracy. The
   // one measured wrong answer sat at 1.14.
-  const relativeContrast = second && second.score > 0
-    ? best.score / second.score
+  const relativeContrast = second && second.residualScore > 0
+    ? best.score / second.residualScore
     : Number.POSITIVE_INFINITY;
   // The baseline score now acts only as a minimum signal floor. For a real
   // mark, the residual must also form a compact, stroke-like shape. This is
@@ -1398,6 +1451,12 @@ export function analyzeChoiceGroup(
   // evaluated. This reads the same values the condition below reads and
   // decides nothing.
   const refused: string[] = [];
+  // Named separately from `absolute-floor`, which is where a zeroed winner
+  // otherwise lands: those are different facts. `absolute-floor` says the
+  // signal was too weak to trust; this says there was no added ink to measure
+  // at all, and only the second is an invariant.
+  const bestInkInvariantZeroed = best.shape?.inkInvariantZeroed === true;
+  if (bestInkInvariantZeroed) refused.push('ink-invariant');
   if (!(best.score >= highScoreThreshold)) refused.push('absolute-floor');
   if (!(gap >= highGapThreshold)) refused.push('gap');
   if (!hasStructuredMark) refused.push('mark-shape');
@@ -1467,7 +1526,18 @@ export function analyzeChoiceGroup(
   // photo group under the raised floor is precisely the case it would rescue
   // -- and the floor exists because those readings were wrong as often as they
   // were right.
-  if (usesBaseline && !belowPhotoBinaryFloor && rescue !== null && rescue >= RESCUE_THRESHOLD) {
+  //
+  // `bestInkInvariantZeroed` is the second thing it may not overrule, and for
+  // the same reason: its weights read shape and fit, never signal strength, so
+  // it is the one route that would still confirm a box the invariant emptied.
+  // The floors below and above both refuse a zero score on their own.
+  if (
+    usesBaseline
+    && !belowPhotoBinaryFloor
+    && !bestInkInvariantZeroed
+    && rescue !== null
+    && rescue >= RESCUE_THRESHOLD
+  ) {
     refused.push(`rescued:${rescue.toFixed(2)}`);
     return {
       field: group.field,
@@ -1512,6 +1582,10 @@ export function analyzeChoiceGroup(
  * Scores only ink that is present in the submitted form but not in the
  * measured blank template. This removes the printed answer glyph and table
  * rules from the decision, which otherwise dominate small hand-drawn circles.
+ *
+ * Returns the score after the total-ink invariant, which is the number the
+ * gate decides on: 0 for a box whose page ink does not exceed the blank's.
+ * See `TEMPLATE_INK_INVARIANT_EPSILON`.
  */
 export function calculateTemplateInkDifference(
   image: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>,
@@ -1837,6 +1911,38 @@ export function normalizeTone(
   };
 }
 
+/**
+ * How far a box's aggregate page ink must exceed the blank form's before its
+ * differential residual is allowed to stand. **Zero, deliberately.**
+ *
+ * Differential scoring rests on one premise: count only what the student
+ * ADDED. A box carrying no more total ink than the blank form has nothing
+ * added, whatever the per-sample arithmetic says. That premise is an
+ * invariant, not a threshold, so the comparison is exact.
+ *
+ * It was measured broken. `Task/FEATURE_SPEC_CAPTURE_PIPELINE_2026-08-27.md`
+ * §14.2: the winning box of `p3 basic.gender` -- a cell the answer key marks
+ * blank, and filling it is the failure CLAUDE.md §3 ranks above every other
+ * number -- read
+ *
+ *     page=0.099  blank=0.112   scr=0.056   tone=affine(53,209->0,255,g=1.63)
+ *
+ * Less total ink than the blank form, and a positive residual anyway. The two
+ * quantities are summed over the same samples in the same loop below, so they
+ * are directly comparable; what lets them disagree in sign is that the
+ * aggregates are two-sided while the residual is `max(0, actual - baseline -
+ * 0.08)` per sample. Clipping discards every sample where the page is lighter,
+ * so a box that is darker in a few places and lighter everywhere else still
+ * accumulates a positive score. Stretching a photograph's darkest tone onto
+ * the blank's (§13) manufactures exactly that arrangement in an unmarked box,
+ * but the invariant is not a property of the affine map -- it has to hold
+ * whichever correction ran, which is why this is unconditional.
+ *
+ * A non-zero epsilon here would be a signal threshold, and there is no
+ * measurement to cut one on. Leave it at 0 unless someone measures otherwise.
+ */
+const TEMPLATE_INK_INVARIANT_EPSILON = 0;
+
 function calculateTemplateInkFeatures(
   image: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>,
   actualRect: PixelRect,
@@ -1854,6 +1960,10 @@ function calculateTemplateInkFeatures(
   if (actual.length === 0 || blank.length === 0) {
     return {
       score: 0,
+      // Nothing was sampled, so nothing was removed. The invariant did not
+      // act here and must not claim to have.
+      residualScore: 0,
+      inkInvariantZeroed: false,
       largestComponentSize: 0,
       largestComponentRatio: 0,
       diagonalRatio: 0,
@@ -1938,11 +2048,21 @@ function calculateTemplateInkFeatures(
   // must be divided by fewer, or its score would shrink for no reason.
   const usablePixels = Math.max((sampleWidth - 2 * radiusX) * (sampleHeight - 2 * radiusY), 1);
   const shape = analyzeResidualShape(residual, sampleWidth, sampleHeight);
+  const actualInk = actualTotal / usablePixels;
+  const baselineInk = baselineTotal / usablePixels;
+  const residualScore = difference / usablePixels;
+  // The total-ink invariant. Both totals come from the loop above -- same
+  // samples, same window, same tone, same alignment, same `darkness` scale --
+  // so this comparison is the aggregate form of the very subtraction that
+  // produced `difference`. See `TEMPLATE_INK_INVARIANT_EPSILON`.
+  const inkInvariantZeroed = actualInk <= baselineInk + TEMPLATE_INK_INVARIANT_EPSILON;
   return {
-    score: difference / usablePixels,
+    score: inkInvariantZeroed ? 0 : residualScore,
+    residualScore,
+    inkInvariantZeroed,
     ...shape,
-    actualInk: actualTotal / usablePixels,
-    baselineInk: baselineTotal / usablePixels,
+    actualInk,
+    baselineInk,
     brightnessOffset,
     tone: tone.label,
     alignX: alignment.x,
