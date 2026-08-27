@@ -106,6 +106,15 @@ interface TemplateInkFeatures extends TemplateInkShape {
   /** Mean darkness of the same cell on the blank form. */
   baselineInk: number;
   brightnessOffset: number;
+  /**
+   * Which tonal correction this cell was measured through, as `ToneCorrection`
+   * labelled it. `linear(...)` is the shift every sheet had before 2026-08-27
+   * and is still what every scan takes; `affine(...)` is the photo-only
+   * two-point map. Carried per cell rather than per group even though the map
+   * is a group decision, because that is what makes "every box of this group
+   * was measured the same way" a readable fact rather than an assumption.
+   */
+  tone: string;
   alignX: number;
   alignY: number;
   /**
@@ -1028,6 +1037,11 @@ function describeDecision(evidence: DecisionEvidence, outcome: string, refused: 
       return `${candidate.position}@${candidate.atX.toFixed(2)}:scr=${candidate.score.toFixed(3)}`
         + ` page=${features.actualInk.toFixed(3)} blank=${features.baselineInk.toFixed(3)}`
         + ` shift=${features.brightnessOffset.toFixed(0)}`
+        // Which correction the box was actually measured through. `shift=`
+        // alone stopped being the answer once a photographed box could be
+        // mapped rather than moved, and a correction that cannot be read back
+        // from the trace is not diagnosable.
+        + ` tone=${features.tone}`
         + (features.brightnessProbe
           ? ` ref82=${features.brightnessProbe.actualP82.toFixed(0)},${features.brightnessProbe.blankP82.toFixed(0)}`
             + ` ref95=${features.brightnessProbe.actualP95.toFixed(0)},${features.brightnessProbe.blankP95.toFixed(0)}`
@@ -1203,20 +1217,37 @@ export function analyzeChoiceGroup(
 ): ChoiceGroupResult {
   const usesGridCells = candidatePixelOverrides?.length === group.candidates.length;
   const usesBaseline = baseline?.candidatePixelOverrides.length === group.candidates.length;
+  const candidateRects = group.candidates.map((candidate, index) => (usesGridCells
+    ? candidatePixelOverrides![index]
+    : toPixelRect(image, candidate.rect, yOverride)));
+  // A third photo-only behaviour, alongside the band check and the binary
+  // floor: which tonal correction the cells are measured through. It is
+  // resolved once for the whole group, because every rule below compares the
+  // boxes with each other and two boxes on different scales is a wrong value
+  // waiting to happen. A scan gets `undefined` here before any anchor is even
+  // computed, and each of its cells then takes the shift it always took.
+  const groupTone = usesBaseline
+    ? createGroupToneCorrection(
+      image,
+      candidateRects,
+      baseline!.image,
+      baseline!.candidatePixelOverrides,
+      photoProvenance,
+    )
+    : undefined;
   const scoredCandidates: ScoredCandidate[] = group.candidates
     .map((candidate, index) => {
       const templateEvidence = usesBaseline
         ? calculateTemplateInkFeatures(
           image,
-          usesGridCells ? candidatePixelOverrides![index] : toPixelRect(image, candidate.rect, yOverride),
+          candidateRects[index],
           baseline!.image,
           baseline!.candidatePixelOverrides[index],
+          groupTone,
         )
         : undefined;
 
-      const rect = usesGridCells
-        ? candidatePixelOverrides![index]
-        : toPixelRect(image, candidate.rect, yOverride);
+      const rect = candidateRects[index];
       // Falls back to the whole bitmap when no envelope was resolved, which is
       // the same frame the rest of this file uses in that case.
       const contentLeft = image.contentBounds?.left ?? 0;
@@ -1491,14 +1522,306 @@ export function calculateTemplateInkDifference(
   return calculateTemplateInkFeatures(image, actualRect, baseline, baselineRect).score;
 }
 
+/**
+ * How a choice group's tones are mapped onto the blank form's before any ink
+ * is counted. See `createGroupToneCorrection` for why it is one correction for
+ * the group rather than one per box.
+ *
+ * Two shapes, and the linear one is the special case: `applyTone` at
+ * `gain === 1` is exactly `value + shift`, the correction every sheet took
+ * before 2026-08-27 and the only one a scan can ever take.
+ *
+ * Measured (FEATURE_SPEC_CAPTURE_PIPELINE_2026-08-27 §12.2), over the twelve
+ * photo students who produced no automatic value at all: the winner box's page
+ * ink has median 0.000 against a blank-template median of 0.096 -- the
+ * photographed box reads emptier than the printed circle underneath it -- and
+ * 0 of 263 boxes clear the 0.08 differential margin. Their per-box
+ * `brightnessOffset` reaches 185 where no productive student exceeds 61, which
+ * puts those pages' 82nd percentile around grey 70. `darkness()` returns 0
+ * from 178 up, so adding 185 carries paper at 70 and a mark at 50 over that
+ * edge together: a shift cannot separate two tones because it moves them
+ * equally. Stretching the range can, which is what the affine mode is.
+ */
+interface ToneCorrection {
+  mode: 'linear' | 'affine';
+  /** `blank p82 - actual p82`: the shift the linear correction applies. */
+  shift: number;
+  /** The dark anchor, on the page and on the blank form. */
+  actualLo: number;
+  blankLo: number;
+  /** The paper anchor, on the page and on the blank form. */
+  actualHi: number;
+  blankHi: number;
+  /** Blank-form levels per page level. Exactly 1 on the linear path. */
+  gain: number;
+  /** Why the map was declined, when it was. Null on a scan and on the map. */
+  fallback: string | null;
+  /** What `describeDecision` prints, so the path taken is never silent. */
+  label: string;
+}
+
+/**
+ * The two anchors, as percentiles of the samples.
+ *
+ * PROVISIONAL. The checkout that wrote them has neither scans nor an answer
+ * key; the central measurement calibrates or rejects them.
+ *
+ * The paper anchor is 0.82 because that is the percentile `brightnessOffset`
+ * has always been defined on, so the two corrections are the same function at
+ * `gain === 1` and differ only in slope. `BrightnessReferenceProbe` already
+ * carries a 0.95 pair if a cleaner paper anchor measures better.
+ *
+ * The dark anchor is 0.05 because §12.2 measured a blank-template ink median
+ * of 0.096 per box -- roughly a tenth of a box is printed glyph -- so the 5th
+ * percentile of the blank form's samples lands inside printed ink rather than
+ * on paper, which is the whole reason it can serve as an anchor. Where it does
+ * not, `blankSpan` collapses and the correction falls back to the shift. It is
+ * read over the group's cells together, which is also what keeps a student's
+ * pen mark (about 1% of the pooled samples) from becoming its own anchor.
+ */
+const TONE_LOW_PERCENTILE = 0.05;
+const TONE_HIGH_PERCENTILE = 0.82;
+
+/**
+ * The fixed grid every cell is resampled onto before it is scored. Named
+ * because the tonal anchors have to be read off the same samples the scorer
+ * reads, or the correction would be calibrated on pixels nothing scores.
+ */
+const TEMPLATE_SAMPLE_WIDTH = 36;
+const TEMPLATE_SAMPLE_HEIGHT = 28;
+
+/**
+ * The narrowest anchor separation that may be divided by, in grey levels.
+ * PROVISIONAL. Below this the two anchors are one reading with noise between
+ * them and the gain they imply is arbitrary, so the shift is used instead.
+ */
+const TONE_MIN_SPAN = 8;
+
+/**
+ * The most a page's range may be stretched. PROVISIONAL.
+ *
+ * §12.2's worst sheet sits at a p82 near grey 70 against a blank p82 near 255,
+ * so the stretch those pages ask for is single-digit; 12 leaves room above the
+ * measured worst case while stopping a nearly-degenerate span from licensing
+ * unbounded amplification of the paper's own grain. The cap changes only how
+ * far the dark half of the range is pulled down -- the paper anchor still
+ * lands on the blank's paper anchor at any gain -- and a capped correction is
+ * marked `!` in the trace.
+ */
+const TONE_MAX_GAIN = 12;
+
+/**
+ * One raw sample (0-255) mapped onto the blank form's tonal range.
+ *
+ * The affine branch is written about the paper anchor rather than the dark
+ * one. `blankLo + (v - actualLo) * gain` is the same line whenever `gain` is
+ * the ratio of the two spans, and this form additionally keeps
+ * `actualHi -> blankHi` true when TONE_MAX_GAIN has reduced the slope.
+ *
+ * The linear branch is `value + shift` and nothing else -- no clamp, no
+ * arithmetic that was not there before -- because every scan takes it and the
+ * scan measurement is byte-exact. (The affine clamp is a no-op through
+ * `darkness`, which saturates outside 0..178 anyway; it is there so the mapped
+ * value is a grey level rather than an extrapolation.)
+ */
+function applyTone(tone: ToneCorrection, value: number): number {
+  if (tone.mode === 'linear') {
+    return value + tone.shift;
+  }
+  return clamp(tone.blankHi + (value - tone.actualHi) * tone.gain, 0, 255);
+}
+
+/**
+ * The correction as it was before this file knew about photographs.
+ *
+ * `fallback` is the group-level reason, when there was one, so a box scored
+ * through the shift on a photo sheet still says why in the trace.
+ */
+function linearTone(shift: number, fallback: string | null = null): ToneCorrection {
+  return {
+    mode: 'linear',
+    shift,
+    actualLo: 0,
+    blankLo: 0,
+    actualHi: 0,
+    blankHi: 0,
+    gain: 1,
+    fallback,
+    label: `linear(${shift.toFixed(0)}${fallback ? `,${fallback}` : ''})`,
+  };
+}
+
+/**
+ * Chooses the correction from a set of page samples and the blank form's.
+ *
+ * `photoProvenance === false` returns the shift before anything else is even
+ * measured, so no scan can reach the two-point map by any route.
+ *
+ * Three refusals, each stated as a negation so that a NaN anchor takes the
+ * shift rather than the map:
+ *
+ *   `span`       the page's own anchors are too close to divide by;
+ *   `blank-span` the blank form has no tonal range to map onto, which is what
+ *                a cell with almost no printed content looks like;
+ *   `flat`       the page's range is already as wide as the blank's, so there
+ *                is nothing to stretch. A healthy photograph lands here and
+ *                takes exactly the correction it took before.
+ */
+function createToneCorrection(
+  actual: number[],
+  blank: number[],
+  photoProvenance: boolean,
+): ToneCorrection {
+  const actualHi = percentile(actual, TONE_HIGH_PERCENTILE);
+  const blankHi = percentile(blank, TONE_HIGH_PERCENTILE);
+  const shift = blankHi - actualHi;
+  if (!photoProvenance) {
+    return linearTone(shift);
+  }
+
+  const actualLo = percentile(actual, TONE_LOW_PERCENTILE);
+  const blankLo = percentile(blank, TONE_LOW_PERCENTILE);
+  const actualSpan = actualHi - actualLo;
+  const blankSpan = blankHi - blankLo;
+  const rawGain = actualSpan > 0 ? blankSpan / actualSpan : 0;
+
+  let fallback: string | null = null;
+  if (!(actualSpan >= TONE_MIN_SPAN)) fallback = 'span';
+  else if (!(blankSpan >= TONE_MIN_SPAN)) fallback = 'blank-span';
+  else if (!(rawGain > 1)) fallback = 'flat';
+
+  if (fallback) {
+    // The spans are printed with the reason: a fallback whose numbers cannot
+    // be read is a silent change, which is the thing this label exists to
+    // prevent.
+    const reason = `${fallback}=${actualSpan.toFixed(0)}/${blankSpan.toFixed(0)}`;
+    return {
+      ...linearTone(shift, reason),
+      actualLo,
+      blankLo,
+      actualHi,
+      blankHi,
+    };
+  }
+
+  const gain = Math.min(rawGain, TONE_MAX_GAIN);
+  return {
+    mode: 'affine',
+    shift,
+    actualLo,
+    blankLo,
+    actualHi,
+    blankHi,
+    gain,
+    fallback: null,
+    label: `affine(${actualLo.toFixed(0)},${actualHi.toFixed(0)}`
+      + `->${blankLo.toFixed(0)},${blankHi.toFixed(0)}`
+      + `,g=${gain.toFixed(2)}${gain < rawGain ? '!' : ''})`,
+  };
+}
+
+/**
+ * One correction for a whole choice group, pooled over its candidate boxes.
+ *
+ * Measured, and the reason this is not per box: over 120 synthetic groups the
+ * per-box version put boxes of the SAME group on different scales -- one box
+ * mapped at 1.41x while its neighbour fell back to the shift, because the
+ * neighbour's blank cell held too little printed ink to have a dark anchor --
+ * and the winner then changed on 6 of 240 decisions. Every rule above this
+ * compares boxes with each other (`gap`, `relativeContrast`, the band check),
+ * so two boxes measured on different scales is a wrong value waiting to
+ * happen, which `WRONG = 0` does not allow.
+ *
+ * Pooling also makes the dark anchor sturdier: over four or five cells a pen
+ * mark is about 1% of the samples, well under `TONE_LOW_PERCENTILE`, so the
+ * anchor is the printed form rather than the student's answer.
+ *
+ * Returns `undefined` for a scan and for a group the map declined, and both of
+ * those mean the same thing downstream: every box computes its own shift, as
+ * it did before this existed.
+ */
+function createGroupToneCorrection(
+  image: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>,
+  actualRects: PixelRect[],
+  baseline: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>,
+  baselineRects: PixelRect[],
+  photoProvenance: boolean,
+): ToneCorrection | undefined {
+  if (!photoProvenance || actualRects.length === 0 || actualRects.length !== baselineRects.length) {
+    return undefined;
+  }
+  const actual: number[] = [];
+  const blank: number[] = [];
+  for (let index = 0; index < actualRects.length; index++) {
+    const box = sampleRect(image, actualRects[index], TEMPLATE_SAMPLE_WIDTH, TEMPLATE_SAMPLE_HEIGHT);
+    const blankBox = sampleRect(baseline, baselineRects[index], TEMPLATE_SAMPLE_WIDTH, TEMPLATE_SAMPLE_HEIGHT);
+    if (box.length === 0 || blankBox.length === 0) {
+      return undefined;
+    }
+    for (const sample of box) actual.push(sample);
+    for (const sample of blankBox) blank.push(sample);
+  }
+  return createToneCorrection(actual, blank, true);
+}
+
+/**
+ * The correction one cell is measured through.
+ *
+ * A group correction is used only when it resolved to the map. Where it did
+ * not -- a scan, or a group whose pooled anchors were degenerate -- the cell
+ * computes its own shift, which is the arithmetic every cell had before, and
+ * carries the group's reason into its label so the trace still explains it.
+ */
+function resolveTone(
+  actual: number[],
+  blank: number[],
+  groupTone: ToneCorrection | undefined,
+): ToneCorrection {
+  if (groupTone && groupTone.mode === 'affine') {
+    return groupTone;
+  }
+  const shift = percentile(blank, TONE_HIGH_PERCENTILE) - percentile(actual, TONE_HIGH_PERCENTILE);
+  return linearTone(shift, groupTone?.fallback ?? null);
+}
+
+/**
+ * The pure half of the tonal correction, for tests and for any caller that
+ * needs to reproduce what a reading was measured through. Returns the mapped
+ * grey level and the label the trace would carry.
+ */
+export function normalizeTone(
+  actual: number[],
+  blank: number[],
+  photoProvenance: boolean,
+): {
+  apply: (value: number) => number;
+  mode: 'linear' | 'affine';
+  shift: number;
+  gain: number;
+  label: string;
+} {
+  const tone = createToneCorrection(actual, blank, photoProvenance);
+  return {
+    apply: (value: number) => applyTone(tone, value),
+    mode: tone.mode,
+    shift: tone.shift,
+    gain: tone.gain,
+    label: tone.label,
+  };
+}
+
 function calculateTemplateInkFeatures(
   image: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>,
   actualRect: PixelRect,
   baseline: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>,
   baselineRect: PixelRect,
+  // The group's correction, from `analyzeChoiceGroup`. Absent here means the
+  // cell computes its own shift, which is what a scan does and what this
+  // function did for every caller before photographs existed.
+  groupTone?: ToneCorrection,
 ): TemplateInkFeatures {
-  const sampleWidth = 36;
-  const sampleHeight = 28;
+  const sampleWidth = TEMPLATE_SAMPLE_WIDTH;
+  const sampleHeight = TEMPLATE_SAMPLE_HEIGHT;
   const actual = sampleRect(image, actualRect, sampleWidth, sampleHeight);
   const blank = sampleRect(baseline, baselineRect, sampleWidth, sampleHeight);
   if (actual.length === 0 || blank.length === 0) {
@@ -1510,6 +1833,7 @@ function calculateTemplateInkFeatures(
       actualInk: 0,
       baselineInk: 0,
       brightnessOffset: 0,
+      tone: 'linear(0)',
       alignX: 0,
       alignY: 0,
       pagePitchX: 0,
@@ -1527,7 +1851,15 @@ function calculateTemplateInkFeatures(
 
   // Different scanners change the paper's overall brightness. Normalize only
   // the light background before comparing dark ink, keeping local pen strokes.
-  const brightnessOffset = percentile(blank, 0.82) - percentile(actual, 0.82);
+  //
+  // On a scan this is still exactly `percentile(blank, 0.82) - percentile(
+  // actual, 0.82)` applied as a shift. On a photographed sheet it may instead
+  // be the group's two-point map, because a shift large enough to correct a
+  // badly underexposed page carries the marks over the ink threshold with the
+  // paper (§12.2). Every reading below goes through the same `tone`, so the
+  // page and the alignment search cannot be corrected two different ways.
+  const tone = resolveTone(actual, blank, groupTone);
+  const brightnessOffset = tone.shift;
   const pagePitchX = (actualRect.right - actualRect.left) / sampleWidth;
   const pagePitchY = (actualRect.bottom - actualRect.top) / sampleHeight;
   // The reach is set from the page's own pitch, because the registration error
@@ -1544,7 +1876,7 @@ function calculateTemplateInkFeatures(
     blank,
     sampleWidth,
     sampleHeight,
-    brightnessOffset,
+    tone,
     radiusX,
     radiusY,
     stepsX,
@@ -1561,7 +1893,7 @@ function calculateTemplateInkFeatures(
   for (let y = radiusY; y < sampleHeight - radiusY; y++) {
     for (let x = radiusX; x < sampleWidth - radiusX; x++) {
       const index = y * sampleWidth + x;
-      const actualInk = darkness(actual[index] + brightnessOffset);
+      const actualInk = darkness(applyTone(tone, actual[index]));
       const baselineInk = darkness(
         sampleGridAt(blank, sampleWidth, sampleHeight, x + alignment.x, y + alignment.y),
       );
@@ -1585,6 +1917,7 @@ function calculateTemplateInkFeatures(
     actualInk: actualTotal / usablePixels,
     baselineInk: baselineTotal / usablePixels,
     brightnessOffset,
+    tone: tone.label,
     alignX: alignment.x,
     alignY: alignment.y,
     pagePitchX,
@@ -1623,10 +1956,10 @@ function calculateTemplateInkFeatures(
       )
       : undefined,
     probe: isTracing()
-      ? probeAlignment(actual, blank, sampleWidth, sampleHeight, brightnessOffset, alignment.x, alignment.y)
+      ? probeAlignment(actual, blank, sampleWidth, sampleHeight, tone, alignment.x, alignment.y)
       : undefined,
     edges: analyzeResidualEdges(
-      actual, blank, sampleWidth, sampleHeight, brightnessOffset,
+      actual, blank, sampleWidth, sampleHeight, tone,
       alignment.x, alignment.y, radiusX, radiusY,
     ),
     composition: isTracing()
@@ -1635,7 +1968,7 @@ function calculateTemplateInkFeatures(
         blank,
         sampleWidth,
         sampleHeight,
-        brightnessOffset,
+        tone,
         alignment.x,
         alignment.y,
         radiusX,
@@ -1659,7 +1992,7 @@ function analyzeResidualEdges(
   blank: number[],
   width: number,
   height: number,
-  brightnessOffset: number,
+  tone: ToneCorrection,
   offsetX: number,
   offsetY: number,
   radiusX: number,
@@ -1668,7 +2001,7 @@ function analyzeResidualEdges(
   const page = new Float32Array(width * height);
   const base = new Float32Array(width * height);
   for (let index = 0; index < page.length; index++) {
-    page[index] = darkness(actual[index] + brightnessOffset);
+    page[index] = darkness(applyTone(tone, actual[index]));
     base[index] = darkness(blank[index]);
   }
   const at = (grid: Float32Array, x: number, y: number): number => {
@@ -1796,12 +2129,16 @@ function measureBrightnessReference(
   const actualP95 = percentile(actual, 0.95);
   const blankP95 = percentile(blank, 0.95);
   const offset95 = blankP95 - actualP95;
+  // This probe measures the 0.95 reference *as a shift*, which is what it has
+  // always been. It is a comparison against the shift at 0.82, so it must not
+  // acquire the two-point map or the two readings stop being comparable.
+  const tone95 = linearTone(offset95);
   const alignment95 = findBestBaselineAlignment(
     actual,
     blank,
     width,
     height,
-    offset95,
+    tone95,
     radiusX,
     radiusY,
     stepsX,
@@ -1810,7 +2147,7 @@ function measureBrightnessReference(
   let difference = 0;
   for (let y = radiusY; y < height - radiusY; y++) {
     for (let x = radiusX; x < width - radiusX; x++) {
-      const actualInk = darkness(actual[y * width + x] + offset95);
+      const actualInk = darkness(applyTone(tone95, actual[y * width + x]));
       const baselineInk = darkness(
         sampleGridAt(blank, width, height, x + alignment95.x, y + alignment95.y),
       );
@@ -2138,7 +2475,7 @@ function findBestBaselineAlignment(
   baseline: number[],
   width: number,
   height: number,
-  brightnessOffset: number,
+  tone: ToneCorrection,
   radiusX: number,
   radiusY: number,
   stepsX: number,
@@ -2151,7 +2488,7 @@ function findBestBaselineAlignment(
     let score = 0;
     for (let y = radiusY; y < height - radiusY; y++) {
       for (let x = radiusX; x < width - radiusX; x++) {
-        const actualInk = darkness(actual[y * width + x] + brightnessOffset);
+        const actualInk = darkness(applyTone(tone, actual[y * width + x]));
         const baselineInk = darkness(sampleGridAt(baseline, width, height, x + offsetX, y + offsetY));
         score += Math.abs(actualInk - baselineInk);
       }
@@ -2254,7 +2591,7 @@ function analyzeResidualComposition(
   blank: number[],
   width: number,
   height: number,
-  brightnessOffset: number,
+  tone: ToneCorrection,
   offsetX: number,
   offsetY: number,
   radiusX: number,
@@ -2263,7 +2600,7 @@ function analyzeResidualComposition(
   const page = new Float32Array(width * height);
   const base = new Float32Array(width * height);
   for (let index = 0; index < page.length; index++) {
-    page[index] = darkness(actual[index] + brightnessOffset);
+    page[index] = darkness(applyTone(tone, actual[index]));
     base[index] = darkness(blank[index]);
   }
   const softPage = softenSamples(page, width, height);
@@ -2383,7 +2720,7 @@ function probeAlignment(
   baseline: number[],
   width: number,
   height: number,
-  brightnessOffset: number,
+  tone: ToneCorrection,
   chosenX: number,
   chosenY: number,
 ): { x: number; y: number; fit: number; chosenFit: number; radius: number } {
@@ -2393,7 +2730,7 @@ function probeAlignment(
     let compared = 0;
     for (let y = radius; y < height - radius; y++) {
       for (let x = radius; x < width - radius; x++) {
-        const actualInk = darkness(actual[y * width + x] + brightnessOffset);
+        const actualInk = darkness(applyTone(tone, actual[y * width + x]));
         const baselineInk = darkness(baseline[(y + offsetY) * width + (x + offsetX)]);
         score += Math.abs(actualInk - baselineInk);
         compared++;
