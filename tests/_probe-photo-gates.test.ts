@@ -29,7 +29,13 @@ describe.skipIf(!CAGI || !SAT)('photo gate probe', () => {
       (realInfo as (...a: unknown[]) => void)(...args);
     };
     try {
-      await recognizeStudentForms(CAGI!, SAT!);
+      // Provenance on: photo-only paths (the affine tone map, the band rule,
+      // the binary floor) do not engage without it, and a trace taken with it
+      // off is measuring the scan pipeline under a photo's name.
+      await recognizeStudentForms(CAGI!, SAT!, {
+        cagiPhotoProvenance: true,
+        satisfactionPhotoProvenance: true,
+      });
     } finally {
       console.info = realInfo;
     }
