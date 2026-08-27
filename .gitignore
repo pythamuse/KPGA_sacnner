@@ -51,3 +51,6 @@ local-scans/
 
 # Local browser-parity harness only. Student responses -- never commit.
 public/zz-sample/
+
+# Local esbuild bundles for standalone Node checks (scripts/check-orb-align.cjs)
+.tmp/
