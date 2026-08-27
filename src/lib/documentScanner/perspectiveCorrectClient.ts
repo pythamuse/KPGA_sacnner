@@ -1,8 +1,29 @@
+import type { QuadRejection } from './perspectiveCorrect';
+
 export type PerspectiveCorrectionReason =
   | 'no-document'
   | 'low-confidence'
   | 'timeout'
   | 'worker-error';
+
+/**
+ * How the correction registered the sheet, produced on success AND failure
+ * (FEATURE_SPEC_CAPTURE_PIPELINE_2026-08-27.md §F1.2). F2 reads this to ask
+ * for a retake, F3 folds it into the per-sheet verdict.
+ */
+export interface RegistrationMeta {
+  method: 'quad' | 'orb' | 'none';
+  /** Quad confidence; 0 when the registration is ORB-alone. */
+  confidence: number;
+  orbInliers: number;
+  /** inliers / good matches. */
+  orbInlierRatio: number;
+  /** Median quad-H residual over ORB inlier pairs (template-frame px), null when unmeasurable. */
+  quadResidualPx: number | null;
+  rejection: QuadRejection | null;
+  /** Did the adopted homography pass its verification threshold? */
+  verified: boolean;
+}
 
 export interface PerspectiveCorrectionResult {
   status: 'corrected' | 'skipped';
@@ -10,6 +31,7 @@ export interface PerspectiveCorrectionResult {
   confidence: number;
   blob: Blob | null;
   reason?: PerspectiveCorrectionReason;
+  registration: RegistrationMeta;
 }
 
 type WorkerRequest =
@@ -22,6 +44,8 @@ type WorkerRequest =
     outputHeight: number;
     expectedAspectRatio: number;
     minimumConfidence: number;
+    /** Selects the ORB template; omitted by legacy call sites (quad-only behavior). */
+    formType?: 'cagi' | 'satisfaction';
   };
 
 type WorkerResponse =
@@ -33,6 +57,7 @@ type WorkerResponse =
     blob: Blob;
     confidence: number;
     method: 'perspective' | 'deskew';
+    registration: RegistrationMeta;
   }
   | {
     type: 'result';
@@ -40,6 +65,8 @@ type WorkerResponse =
     ok: false;
     confidence: number;
     reason: 'no-document' | 'low-confidence' | 'worker-error';
+    rejection?: QuadRejection | null;
+    registration: RegistrationMeta;
   };
 
 type InFlightRequest = {
@@ -59,6 +86,18 @@ function createRequestId(): string {
 
   requestCounter += 1;
   return `${Date.now()}-${requestCounter}`;
+}
+
+function emptyRegistration(): RegistrationMeta {
+  return {
+    method: 'none',
+    confidence: 0,
+    orbInliers: 0,
+    orbInlierRatio: 0,
+    quadResidualPx: null,
+    rejection: null,
+    verified: false,
+  };
 }
 
 function settleRequest(requestId: string, response: WorkerResponse | null) {
@@ -131,6 +170,7 @@ function requestWorker(
   worker: Worker,
   message: WorkerRequest,
   timeoutMs: number,
+  transfer?: Transferable[],
 ): Promise<WorkerResponse | null> {
   return new Promise((resolve) => {
     const timeoutId = setTimeout(() => {
@@ -144,7 +184,9 @@ function requestWorker(
     });
 
     try {
-      worker.postMessage(message);
+      // The pixel buffer is transferred, not cloned: a full-resolution photo
+      // is ~46MB of RGBA and copying it stalls the main thread.
+      worker.postMessage(message, transfer ?? []);
     } catch {
       terminateWorker(worker);
     }
@@ -175,6 +217,7 @@ export async function correctImageInWorkerDetailed(
   outputHeight: number,
   timeoutMs: number,
   minimumConfidence = 0.58,
+  formType?: 'cagi' | 'satisfaction',
 ): Promise<PerspectiveCorrectionResult> {
   const skipped = (reason: PerspectiveCorrectionReason, confidence = 0): PerspectiveCorrectionResult => ({
     status: 'skipped',
@@ -182,6 +225,7 @@ export async function correctImageInWorkerDetailed(
     confidence,
     blob: null,
     reason,
+    registration: emptyRegistration(),
   });
 
   if (typeof window === 'undefined') {
@@ -213,7 +257,8 @@ export async function correctImageInWorkerDetailed(
     outputHeight,
     expectedAspectRatio: outputHeight / outputWidth,
     minimumConfidence,
-  }, timeoutMs);
+    formType,
+  }, timeoutMs, [imageData.data.buffer]);
 
   if (!response) {
     return skipped('timeout');
@@ -224,7 +269,14 @@ export async function correctImageInWorkerDetailed(
   }
 
   if (!response.ok) {
-    return skipped(response.reason, response.confidence);
+    return {
+      status: 'skipped',
+      method: 'none',
+      confidence: response.confidence,
+      blob: null,
+      reason: response.reason,
+      registration: response.registration ?? emptyRegistration(),
+    };
   }
 
   return {
@@ -232,6 +284,7 @@ export async function correctImageInWorkerDetailed(
     method: response.method,
     confidence: response.confidence,
     blob: response.blob,
+    registration: response.registration ?? emptyRegistration(),
   };
 }
 
@@ -241,6 +294,7 @@ export async function correctImageInWorker(
   outputHeight: number,
   timeoutMs: number,
   minimumConfidence = 0.58,
+  formType?: 'cagi' | 'satisfaction',
 ): Promise<Blob | null> {
   const result = await correctImageInWorkerDetailed(
     bitmapSource,
@@ -248,6 +302,7 @@ export async function correctImageInWorker(
     outputHeight,
     timeoutMs,
     minimumConfidence,
+    formType,
   );
 
   return result.blob;

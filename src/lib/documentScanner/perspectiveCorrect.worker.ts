@@ -1,9 +1,44 @@
 import { orderQuadPoints, type Point, type QuadRejection } from './perspectiveCorrect';
 import { detectDocumentQuadFromMat } from './detectDocumentQuad';
+import {
+  alignToTemplate,
+  composeToFullRes,
+  decideRegistration,
+  multiplyHomographies,
+  type OrbAlignment,
+  type OrbTemplate,
+} from './orbAlign';
+import cagiOrbTemplateJson from './orbTemplate.cagi.json';
+import satisfactionOrbTemplateJson from './orbTemplate.satisfaction.json';
 
 const OPENCV_SCRIPT_URL = 'https://docs.opencv.org/4.9.0/opencv.js';
 
+/**
+ * Long side of the internal detection copy. Detection stays at the scale it
+ * was measured at (the panel used to downscale to 1600 before sending); only
+ * the warp now samples the full-resolution input -- warping from the
+ * downscale is what created 3 new wrong answers on p2
+ * (Task/EXTERNAL_ADOPTION_PLAN_2026-08-27.md §3.3).
+ */
+const DETECTION_LONG_SIDE = 1600;
+
 declare function importScripts(...urls: string[]): void;
+
+const ORB_TEMPLATES: Record<'cagi' | 'satisfaction', OrbTemplate> = {
+  cagi: cagiOrbTemplateJson as unknown as OrbTemplate,
+  satisfaction: satisfactionOrbTemplateJson as unknown as OrbTemplate,
+};
+
+/** Mirrors RegistrationMeta in perspectiveCorrectClient.ts (the exported home of the type). */
+interface RegistrationMeta {
+  method: 'quad' | 'orb' | 'none';
+  confidence: number;
+  orbInliers: number;
+  orbInlierRatio: number;
+  quadResidualPx: number | null;
+  rejection: QuadRejection | null;
+  verified: boolean;
+}
 
 type WorkerRequest =
   | {
@@ -18,6 +53,14 @@ type WorkerRequest =
     outputHeight: number;
     expectedAspectRatio: number;
     minimumConfidence: number;
+    /**
+     * Selects the committed ORB template. Optional for backward
+     * compatibility: without it the ORB route cannot run (there is no
+     * template to align against) and the worker behaves exactly as the
+     * quad-only version did. The call-site upgrade that always sends it is a
+     * later track (spec §5.1 T4).
+     */
+    formType?: 'cagi' | 'satisfaction';
   };
 
 type CorrectResponse =
@@ -29,6 +72,7 @@ type CorrectResponse =
     blob: Blob;
     confidence: number;
     method: 'perspective';
+    registration: RegistrationMeta;
   }
   | {
     type: 'result';
@@ -37,6 +81,7 @@ type CorrectResponse =
     confidence: number;
     reason: 'no-document' | 'low-confidence' | 'worker-error';
     rejection?: QuadRejection | null;
+    registration: RegistrationMeta;
   };
 
 const workerSelf = self as unknown as {
@@ -97,13 +142,28 @@ function loadOpenCvInWorker(): Promise<OpenCvBox> {
   return openCvPromise;
 }
 
-async function warpToBlob(
+function emptyRegistration(): RegistrationMeta {
+  return {
+    method: 'none',
+    confidence: 0,
+    orbInliers: 0,
+    orbInlierRatio: 0,
+    quadResidualPx: null,
+    rejection: null,
+    verified: false,
+  };
+}
+
+/**
+ * Homography (9 numbers, row-major) that maps the ordered quad in the
+ * detection frame onto the outputWidth x outputHeight rectangle.
+ */
+function quadHomography(
   cv: any,
-  source: any,
   quad: Point[],
   outputWidth: number,
   outputHeight: number,
-): Promise<Blob> {
+): number[] {
   const [topLeft, topRight, bottomRight, bottomLeft] = orderQuadPoints(quad);
   const sourcePoints = cv.matFromArray(4, 1, cv.CV_32FC2, [
     topLeft.x,
@@ -126,25 +186,45 @@ async function warpToBlob(
     outputHeight - 1,
   ]);
   const transform = cv.getPerspectiveTransform(sourcePoints, destinationPoints);
+
+  try {
+    return Array.from(transform.data64F.slice(0, 9)) as number[];
+  } finally {
+    transform.delete();
+    destinationPoints.delete();
+    sourcePoints.delete();
+  }
+}
+
+/** Warps the FULL-RESOLUTION source with a homography given as 9 numbers. */
+async function warpWithHomography(
+  cv: any,
+  sourceFull: any,
+  homography: number[],
+  outputWidth: number,
+  outputHeight: number,
+): Promise<Blob> {
+  const transform = cv.matFromArray(3, 3, cv.CV_64F, homography);
   const result = new cv.Mat();
 
   try {
     cv.warpPerspective(
-      source,
+      sourceFull,
       result,
       transform,
       new cv.Size(outputWidth, outputHeight),
       cv.INTER_LINEAR,
       cv.BORDER_CONSTANT,
-      new cv.Scalar(),
+      // White border: the sheet itself is white, and the ORB route can map
+      // regions the photo never covered -- a black fill there would read as
+      // massive ink to every downstream density signal.
+      new cv.Scalar(255, 255, 255, 255),
     );
 
     return await matToBlob(cv, result, outputWidth, outputHeight);
   } finally {
     result.delete();
     transform.delete();
-    destinationPoints.delete();
-    sourcePoints.delete();
   }
 }
 
@@ -179,42 +259,154 @@ async function detectAndWarp(
   outputHeight: number,
   expectedAspectRatio: number,
   minimumConfidence: number,
+  formType: 'cagi' | 'satisfaction' | undefined,
 ): Promise<
-  | { found: true; blob: Blob; confidence: number; method: 'perspective' }
-  | { found: false; confidence: number; reason: 'no-document' | 'low-confidence'; rejection?: QuadRejection | null }
+  | { found: true; blob: Blob; confidence: number; method: 'perspective'; registration: RegistrationMeta }
+  | {
+    found: false;
+    confidence: number;
+    reason: 'no-document' | 'low-confidence';
+    rejection?: QuadRejection | null;
+    registration: RegistrationMeta;
+  }
 > {
-  const source = cv.matFromImageData(imageData);
+  const fullWidth = imageData.width;
+  const fullHeight = imageData.height;
+  // The full-res RGBA Mat is ~46MB at 12MP; it exists exactly as long as the
+  // warp needs it and everything else works on the detection copy.
+  const sourceFull = cv.matFromImageData(imageData);
+
+  let detection = sourceFull;
+  let detectionOwned = false;
+  let detectionWidth = fullWidth;
+  let detectionHeight = fullHeight;
 
   try {
+    const longSide = Math.max(fullWidth, fullHeight);
+    if (longSide > DETECTION_LONG_SIDE) {
+      const scale = DETECTION_LONG_SIDE / longSide;
+      detectionWidth = Math.max(1, Math.round(fullWidth * scale));
+      detectionHeight = Math.max(1, Math.round(fullHeight * scale));
+      detection = new cv.Mat();
+      detectionOwned = true;
+      cv.resize(sourceFull, detection, new cv.Size(detectionWidth, detectionHeight), 0, 0, cv.INTER_AREA);
+    }
+
+    // Route 1: quad detection, at the detection scale it was measured at.
     const { quality, rejection } = detectDocumentQuadFromMat(
       cv,
-      source,
-      imageData.width,
-      imageData.height,
+      detection,
+      detectionWidth,
+      detectionHeight,
       expectedAspectRatio,
     );
-    if (quality && quality.confidence >= minimumConfidence) {
-      return {
-        found: true,
-        confidence: quality.confidence,
-        method: 'perspective',
-        blob: await warpToBlob(cv, source, quality.points, outputWidth, outputHeight),
-      };
+    const quadAccepted = Boolean(quality && quality.confidence >= minimumConfidence);
+
+    // Route 2: ORB registration against the committed blank-template
+    // features. Always runs when a template is known -- as the fallback when
+    // the quad is rejected, and as the verifier when it is not
+    // (spec §F1.2: p14's displaced corner and p10's stretched warp are
+    // invisible to the quad gate but visible to the ORB residual).
+    let alignment: OrbAlignment | null = null;
+    const template = formType ? ORB_TEMPLATES[formType] : null;
+    if (template) {
+      const gray = new cv.Mat();
+      try {
+        cv.cvtColor(detection, gray, cv.COLOR_RGBA2GRAY);
+        alignment = alignToTemplate(cv, gray, template);
+      } finally {
+        gray.delete();
+      }
     }
 
-    // Do not deskew from arbitrary long lines. Form tables have prominent
-    // horizontal edges, and rotating/resizing from those untrusted lines can
-    // turn an inner table into a page-sized image that pollutes form typing.
-    if (!quality) {
-      // `rejection` names what a person can change -- the sheet ran off the
-      // frame, it is too far away, it is not page-shaped. Collapsing all three
-      // into `no-document` is what left the panel with nothing to say.
-      return { found: false, confidence: 0, reason: 'no-document', rejection };
+    // Quad homography into the output frame, and -- for the residual check --
+    // into the template frame the ORB pairs live in. In production the two
+    // frames are identical (output 1422x1968 = template 1422x1968), so the
+    // scaling is an identity; it is kept for callers that request another
+    // output size.
+    let quadToOutput: number[] | null = null;
+    let quadToTemplate: number[] | null = null;
+    if (quadAccepted && quality) {
+      quadToOutput = quadHomography(cv, quality.points, outputWidth, outputHeight);
+      quadToTemplate = template
+        ? multiplyHomographies(
+          [template.width / outputWidth, 0, 0, 0, template.height / outputHeight, 0, 0, 0, 1],
+          quadToOutput,
+        )
+        : null;
     }
 
-    return { found: false, confidence: quality.confidence, reason: 'low-confidence' };
+    const decision = decideRegistration({
+      quadAccepted,
+      quadHomographyToTemplate: quadToTemplate,
+      alignment,
+    });
+
+    const registration: RegistrationMeta = {
+      method: decision.method,
+      // Quad confidence when the quad detector produced one, 0 for orb-alone.
+      confidence: quality?.confidence ?? 0,
+      orbInliers: alignment?.inliers ?? 0,
+      orbInlierRatio: alignment?.inlierRatio ?? 0,
+      quadResidualPx: decision.quadResidualPx,
+      rejection: quality ? null : rejection,
+      verified: decision.verified,
+    };
+
+    if (decision.method === 'none') {
+      if (!quality) {
+        // `rejection` names what a person can change -- the sheet ran off the
+        // frame, it is too far away, it is not page-shaped. Collapsing all
+        // three into `no-document` is what left the panel with nothing to say.
+        return { found: false, confidence: 0, reason: 'no-document', rejection, registration };
+      }
+
+      return { found: false, confidence: quality.confidence, reason: 'low-confidence', registration };
+    }
+
+    let homographyDetectionToOutput: number[];
+    if (decision.method === 'quad') {
+      homographyDetectionToOutput = quadToOutput as number[];
+    } else {
+      // ORB homography maps detection frame -> template frame; rescale into
+      // the requested output frame (identity in production, see above).
+      const orbHomography = (alignment as OrbAlignment).homography as number[];
+      const orbTemplate = template as OrbTemplate;
+      homographyDetectionToOutput = multiplyHomographies(
+        [outputWidth / orbTemplate.width, 0, 0, 0, outputHeight / orbTemplate.height, 0, 0, 0, 1],
+        orbHomography,
+      );
+    }
+
+    // Estimated at detection scale, warped at full resolution: compose with
+    // the downscale factors so the homography accepts full-res coordinates,
+    // then sample the ORIGINAL pixels (spec §F1.2 item 4).
+    const homographyFull = composeToFullRes(
+      homographyDetectionToOutput,
+      detectionWidth / fullWidth,
+      detectionHeight / fullHeight,
+    );
+
+    if (detectionOwned) {
+      // Free the detection copy before the warp allocates the output Mat.
+      detection.delete();
+      detectionOwned = false;
+    }
+
+    const blob = await warpWithHomography(cv, sourceFull, homographyFull, outputWidth, outputHeight);
+
+    return {
+      found: true,
+      blob,
+      confidence: quality?.confidence ?? 0,
+      method: 'perspective',
+      registration,
+    };
   } finally {
-    source.delete();
+    if (detectionOwned) {
+      detection.delete();
+    }
+    sourceFull.delete();
   }
 }
 
@@ -240,6 +432,7 @@ workerSelf.onmessage = (event) => {
         message.outputHeight,
         message.expectedAspectRatio,
         message.minimumConfidence,
+        message.formType,
       );
 
       if (!result.found) {
@@ -250,6 +443,7 @@ workerSelf.onmessage = (event) => {
           confidence: result.confidence,
           reason: result.reason,
           rejection: 'rejection' in result ? result.rejection ?? null : null,
+          registration: result.registration,
         });
         return;
       }
@@ -261,6 +455,7 @@ workerSelf.onmessage = (event) => {
         blob: result.blob,
         confidence: result.confidence,
         method: result.method,
+        registration: result.registration,
       });
     } catch {
       workerSelf.postMessage({
@@ -269,6 +464,7 @@ workerSelf.onmessage = (event) => {
         ok: false,
         confidence: 0,
         reason: 'worker-error',
+        registration: emptyRegistration(),
       });
     }
   })();
