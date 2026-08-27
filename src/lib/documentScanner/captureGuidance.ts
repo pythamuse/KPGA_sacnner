@@ -273,10 +273,16 @@ export function computeQuadGeometry(
  *
  * GUIDANCE, NEVER A VERDICT. Nothing below refuses, blocks or gates anything;
  * it changes one sentence beside the preview. Being wrong here costs one
- * retake, which is why it can ship on lighter evidence than the sheet-quality
+ * retake, which is why it could ship on lighter evidence than the sheet-quality
  * verdict -- and that verdict deliberately does NOT use this signal
  * (FEATURE_SPEC §13.3: the cut is above its shuffled-label control but only by
  * two students out of nineteen, so it stays reporting-only until M6).
+ *
+ * AND THE SENTENCE IS CURRENTLY OFF. CAPTURE_GUIDANCE §13 measured this code on
+ * preview-scale frames and found no signal there at all; the reading survives
+ * as an instrument, the hint does not fire. `LIVE_EXPOSURE_HINT_ENABLED` below
+ * carries the evidence. "Cheaper to be wrong" is a reason to accept a weaker
+ * threshold, not a reason to accept one measured to be absent.
  */
 
 /**
@@ -314,25 +320,75 @@ export const FRAME_EXPOSURE_CEILING_FRACTION = 0.95;
 export const FRAME_EXPOSURE_TARGET_SAMPLES = 20000;
 
 /**
- * PROVISIONAL, AND UNCALIBRATED FOR THIS INPUT.
+ * UNVALIDATED AT PREVIEW SCALE. Kept so the instrument keeps its units; NOT
+ * currently used to say anything to anyone (see `LIVE_EXPOSURE_HINT_ENABLED`).
  *
  * CAPTURE_GUIDANCE §11.3 measured the split on the 19-student set: students who
  * yielded auto-filled cells came in at 155-182, students who yielded nothing at
  * 61-108, best single cut 17/19 against a shuffled-label p95 of 15. 130 is the
  * midpoint of that measured gap (108 -> 155), rounded to a round number.
  *
- * THE REASON IT IS PROVISIONAL, stated plainly because it is not a formality:
- * **those numbers come from WARPED FINAL images, not from live preview frames.**
- * A preview frame is a different exposure, a different raster, a different
- * region, and often a different sensor gain from the still that follows it. The
- * mapping between the two has never been measured, so this threshold is a
- * placeholder with the right units and an unknown offset. A device session
- * calibrates it (§11.4 has the USB port-forwarding route that gets a phone onto
- * a secure context without certificates); this file cannot.
- *
- * It is one named constant so that session can move it in one place.
+ * That split is from WARPED FINAL images. §13 has since measured the same
+ * numbers on 480px preview-scale frames and 130 flags 19 students out of 19
+ * there. Nothing about 130 survived; it is retained only because the device
+ * session needs a named place to put the number it measures, and a constant
+ * with a documented history is a better starting point than a bare 0.
  */
 export const LIVE_DYNAMIC_RANGE_WARN = 130;
+
+/**
+ * The hint is OFF. This is the whole safety story of this module, so it is one
+ * boolean and not a build flag, an env read or a prop.
+ *
+ * CAPTURE_GUIDANCE §13 took the 19 original photos, downscaled them to the live
+ * 480px long side, ran THE SHIPPED detector and THE SHIPPED exposure code over
+ * them (scripts/check-preview-exposure.cjs), and found:
+ *
+ *   - 130 flags 19 of 19 students, including all five whose photos actually
+ *     yield auto-filled cells. A hint that fires on everyone is not guidance,
+ *     it is noise, and it spends the credibility of the geometry hints next to
+ *     it.
+ *   - Moving the number does not rescue it. Under the project's permutation
+ *     discipline preview `dynamicRange` scores 15/19 against a shuffled-label
+ *     p95 of 15: chance. The signal §11.3 found on warped finals DOES NOT
+ *     EXIST at this scale.
+ *   - Mechanism, visible in the residuals: downscaling averages, and
+ *     `dynamicRange` is nothing but the distance between two tails, so a
+ *     well-exposed sheet with real ink detail loses 34-58 points while a dark
+ *     one, having no detail to lose, barely moves. The downscale drags the good
+ *     photos toward the bad ones.
+ *   - A p05 cut scored 17/19 but selects exactly the students whose quad was
+ *     detected -- it reads detection success, not exposure. Same leakage shape
+ *     as FEATURE_SPEC §14.1. Rejected.
+ *
+ * The measurement below it all stays and keeps flowing into
+ * `CaptureGuidanceStatus.exposure`: it is the instrument the device session
+ * reads. What is switched off is the SENTENCE, because no threshold is
+ * justified by this evidence.
+ *
+ * A device session flips this one boolean, once it has a threshold measured on
+ * a real preview raster rather than on a downscaled still (§13.6: the downscale
+ * isolates the raster term alone; a phone's preview has its own gain and white
+ * balance on top).
+ */
+export const LIVE_EXPOSURE_HINT_ENABLED = false;
+
+/**
+ * Below this many samples the two tails are not a measurement.
+ *
+ * Derived, not fitted: p95 is read off the top 5% of the population, so 2000
+ * samples put 100 of them above the cut. Fewer than that and the reading is
+ * noise dressed as a number.
+ *
+ * IT IS NOT A REGION DISCRIMINATOR and must not be read as one. §13's
+ * quad-locked frames gave 7,600-12,500 samples and its guide-region frames gave
+ * 6,392 -- close enough that any count drawn between them would be fitted to
+ * two runs. The `region === 'quad'` test is what keeps desk and floor out; this
+ * floor only rejects a degenerate population (a sliver of a quad, a stride
+ * larger than the region), and at 2000 it sits far below every real quad frame
+ * measured so far, so it should never fire in practice.
+ */
+export const LIVE_EXPOSURE_MIN_SAMPLES = 2000;
 
 /** Which area the samples came from. The two are NOT the same measurement. */
 export type FrameExposureRegion = 'quad' | 'guide';
@@ -607,6 +663,14 @@ export interface CaptureGuidanceInput {
    * than inventing a tone reading.
    */
   exposure?: FrameExposureSample | null;
+  /**
+   * Overrides `LIVE_EXPOSURE_HINT_ENABLED` for this call. Production never
+   * passes it -- the panel calls the reducer without it, so the shipped
+   * behaviour is the constant. It exists so the ON path stays under test while
+   * it is switched off, which is the only way the device session's first flip
+   * is not also the first time that branch has ever run.
+   */
+  exposureHintEnabled?: boolean;
 }
 
 export type CaptureGuidanceLevel = 'searching' | 'adjust' | 'ready';
@@ -667,6 +731,39 @@ function rejectionCode(rejection: QuadRejection): CaptureGuidanceCode {
  */
 export function isLandscapeFrame(frameWidth: number, frameHeight: number): boolean {
   return frameWidth > frameHeight;
+}
+
+/**
+ * Every condition the tone hint has to clear, in one place a test can call.
+ *
+ * Exported separately from the reducer so the ON state is exercisable without
+ * an env read -- this code runs inside a browser worker, where `process.env`
+ * does not exist and a build-time flag would not be inspectable from a unit
+ * test either.
+ *
+ * The three guards, and why each is not redundant:
+ *
+ *   `enabled` -- §13. No threshold is justified by the evidence.
+ *   `region === 'quad'` -- §13.3, and this is the one that was previously left
+ *      to an ordering ARGUMENT rather than a check. The old comment said the
+ *      region is always 'quad' by the time control reaches here, and today it
+ *      is; FEATURE_SPEC §14.2 is what an over-read invariant costs when the
+ *      call order later changes underneath it. The stakes are measured, not
+ *      hypothetical: §13.3 found 14 of 19 frames fell to the guide region, and
+ *      there the reading is not the paper's exposure at all -- one guide frame
+ *      read 143 against 81 for a quad frame that actually yielded cells. It
+ *      reads BACKWARDS, so this is a correctness guard, not belt-and-braces.
+ *   `sampleCount` -- a population too thin for its own tails; see
+ *      LIVE_EXPOSURE_MIN_SAMPLES, which is explicitly NOT a region proxy.
+ */
+export function shouldWarnOnExposure(
+  exposure: FrameExposureSample | null | undefined,
+  enabled: boolean = LIVE_EXPOSURE_HINT_ENABLED,
+): boolean {
+  if (!enabled || !exposure) return false;
+  if (exposure.region !== 'quad') return false;
+  if (exposure.sampleCount < LIVE_EXPOSURE_MIN_SAMPLES) return false;
+  return exposure.dynamicRange < LIVE_DYNAMIC_RANGE_WARN;
 }
 
 export function evaluateCaptureGuidance(input: CaptureGuidanceInput): CaptureGuidanceStatus {
@@ -788,10 +885,12 @@ export function evaluateCaptureGuidance(input: CaptureGuidanceInput): CaptureGui
   // that it is underexposed, but re-aiming is still the nearer fix, and two
   // instructions at once is one instruction too many.
   //
-  // At this point `exposure.region` is always 'quad' when the loop measured
-  // through the same worker response -- the guide-rect fallback only exists for
-  // frames with no quad, which returned above.
-  if (exposure && exposure.dynamicRange < LIVE_DYNAMIC_RANGE_WARN) {
+  // OFF by default (§13). Note where this sits: `nextReadyStreak` resets on any
+  // level that is not 'ready', so a branch taken here does not merely add a
+  // sentence -- it makes 지금 촬영하세요 and the shutter emphasis unreachable on
+  // that frame. With §13's numbers (19/19 flagged) an ungated branch would have
+  // removed the shutter affordance on every sheet, permanently.
+  if (shouldWarnOnExposure(exposure, input.exposureHintEnabled)) {
     return {
       level: 'adjust',
       code: 'exposure',

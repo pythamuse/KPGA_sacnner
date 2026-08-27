@@ -4,13 +4,18 @@ import {
   FRAME_EXPOSURE_FLOOR_FRACTION,
   GUIDE_SHORT_EDGE_FILL,
   LIVE_DYNAMIC_RANGE_WARN,
+  LIVE_EXPOSURE_HINT_ENABLED,
+  LIVE_EXPOSURE_MIN_SAMPLES,
+  READY_STREAK_FOR_SHUTTER,
   buildGrayHistogram,
   computeExposureStride,
   computeGuideRect,
   evaluateCaptureGuidance,
   measureFrameExposure,
   measureFrameExposureInRegion,
+  nextReadyStreak,
   percentileFromHistogram,
+  shouldWarnOnExposure,
   type FrameExposureSample,
 } from '../src/lib/documentScanner/captureGuidance';
 import { SHEET_EXPOSURE_FLOOR_FRACTION } from '../src/lib/recognition/sheetExposure';
@@ -73,13 +78,17 @@ function quality(points: Point[], edgeConsistency = 0.99) {
   return { points, confidence: 0.9, edgeConsistency, aspectRatio: 1.384 };
 }
 
-function sample(dynamicRange: number, region: 'quad' | 'guide' = 'quad'): FrameExposureSample {
+function sample(
+  dynamicRange: number,
+  region: 'quad' | 'guide' = 'quad',
+  sampleCount = 12000,
+): FrameExposureSample {
   return {
     p05: 240 - dynamicRange,
     p95: 240,
     dynamicRange,
     region,
-    sampleCount: 1700,
+    sampleCount,
     stride: 3,
   };
 }
@@ -339,8 +348,102 @@ describe('measureFrameExposureInRegion', () => {
 
 // --- where exposure sits in the order --------------------------------------
 
-describe('evaluateCaptureGuidance with exposure', () => {
+describe('the hint is off (CAPTURE_GUIDANCE §13)', () => {
   const base = { rejection: null, frameWidth: FRAME_W, frameHeight: FRAME_H };
+
+  it('ships off', () => {
+    expect(LIVE_EXPOSURE_HINT_ENABLED).toBe(false);
+  });
+
+  it('leaves a dark, well-framed sheet green -- AND lets it build the streak', () => {
+    // The streak is the part that regressed and the part worth pinning.
+    // `nextReadyStreak` resets on any level that is not 'ready', so an
+    // ungated exposure branch sitting where this one sits does not add a
+    // sentence -- it makes 지금 촬영하세요 and the shutter emphasis unreachable.
+    // §13 measured 130 firing on 19 of 19 students, so that would have been
+    // every sheet, permanently.
+    const status = evaluateCaptureGuidance({
+      ...base,
+      quality: quality(IDEAL_QUAD),
+      exposure: sample(LIVE_DYNAMIC_RANGE_WARN - 60),
+    });
+
+    expect(status.level).toBe('ready');
+    expect(status.code).toBe('ready');
+    expect(status.message).toBe('지금 촬영하세요');
+
+    let streak = 0;
+    for (let frame = 0; frame < READY_STREAK_FOR_SHUTTER; frame++) {
+      streak = nextReadyStreak(streak, status);
+    }
+    expect(streak).toBe(READY_STREAK_FOR_SHUTTER);
+    expect(streak >= READY_STREAK_FOR_SHUTTER).toBe(true);
+  });
+
+  it('still reports the reading, which is the whole point of keeping it', () => {
+    const dark = sample(LIVE_DYNAMIC_RANGE_WARN - 60);
+    const status = evaluateCaptureGuidance({ ...base, quality: quality(IDEAL_QUAD), exposure: dark });
+
+    expect(status.exposure).toBe(dark);
+  });
+
+  it('replays §13: none of the nine quad-locked preview frames is warned about', () => {
+    // The measured preview dynamicRange of every frame where the shipped
+    // detector actually found a quad. All below 130, including the students
+    // whose photos yield auto-filled cells -- which is why the threshold was
+    // switched off rather than moved.
+    for (const dynamicRange of [81, 84, 86, 88, 90, 92, 94, 96, 97]) {
+      const status = evaluateCaptureGuidance({
+        ...base,
+        quality: quality(IDEAL_QUAD),
+        exposure: sample(dynamicRange),
+      });
+
+      expect(status.code).toBe('ready');
+      expect(nextReadyStreak(2, status)).toBe(3);
+    }
+  });
+});
+
+describe('shouldWarnOnExposure', () => {
+  it('needs the flag, the quad region, the sample floor and the range together', () => {
+    const dark = sample(LIVE_DYNAMIC_RANGE_WARN - 60);
+
+    // The flag alone decides the shipped answer.
+    expect(shouldWarnOnExposure(dark)).toBe(false);
+    expect(shouldWarnOnExposure(dark, false)).toBe(false);
+    expect(shouldWarnOnExposure(dark, true)).toBe(true);
+
+    // No reading at all.
+    expect(shouldWarnOnExposure(null, true)).toBe(false);
+    expect(shouldWarnOnExposure(undefined, true)).toBe(false);
+
+    // §13.3: the guide region is not the paper's exposure, and it read
+    // BACKWARDS on the real set -- a guide frame at 143 against a quad frame
+    // at 81 that actually yielded cells. Never warn from it, however dark.
+    expect(shouldWarnOnExposure(sample(1, 'guide'), true)).toBe(false);
+    expect(shouldWarnOnExposure(sample(0, 'guide'), true)).toBe(false);
+
+    // Too thin a population for its own tails.
+    expect(shouldWarnOnExposure(sample(10, 'quad', LIVE_EXPOSURE_MIN_SAMPLES - 1), true)).toBe(false);
+    expect(shouldWarnOnExposure(sample(10, 'quad', LIVE_EXPOSURE_MIN_SAMPLES), true)).toBe(true);
+
+    // And the threshold itself is good enough.
+    expect(shouldWarnOnExposure(sample(LIVE_DYNAMIC_RANGE_WARN), true)).toBe(false);
+    expect(shouldWarnOnExposure(sample(LIVE_DYNAMIC_RANGE_WARN - 1), true)).toBe(true);
+  });
+});
+
+describe('evaluateCaptureGuidance with exposure', () => {
+  const base = {
+    rejection: null,
+    frameWidth: FRAME_W,
+    frameHeight: FRAME_H,
+    // Exercises the branch that §13 switched off, so the device session's
+    // first flip of LIVE_EXPOSURE_HINT_ENABLED is not the first time this path
+    // has ever run. Production never passes this.
+    exposureHintEnabled: true,
+  };
 
   it('asks for light once the framing is otherwise green', () => {
     const status = evaluateCaptureGuidance({
@@ -354,6 +457,8 @@ describe('evaluateCaptureGuidance with exposure', () => {
     expect(status.message).toBe('밝은 곳에서 다시 찍어주세요');
     expect(status.detail).toBe('화면이 어둡습니다 — 그림자를 피해주세요');
     expect(status.geometry).not.toBeNull();
+    // And this is what makes the flag necessary rather than tidy.
+    expect(nextReadyStreak(2, status)).toBe(0);
   });
 
   it('stays green for a well-exposed, well-framed sheet', () => {
@@ -372,6 +477,27 @@ describe('evaluateCaptureGuidance with exposure', () => {
       ...base,
       quality: quality(IDEAL_QUAD),
       exposure: sample(LIVE_DYNAMIC_RANGE_WARN),
+    });
+
+    expect(status.code).toBe('ready');
+  });
+
+  it('never warns from a guide-region reading, however dark', () => {
+    const status = evaluateCaptureGuidance({
+      ...base,
+      quality: quality(IDEAL_QUAD),
+      exposure: sample(1, 'guide'),
+    });
+
+    expect(status.code).toBe('ready');
+    expect(status.exposure!.region).toBe('guide');
+  });
+
+  it('never warns from a population too thin for its own tails', () => {
+    const status = evaluateCaptureGuidance({
+      ...base,
+      quality: quality(IDEAL_QUAD),
+      exposure: sample(1, 'quad', LIVE_EXPOSURE_MIN_SAMPLES - 1),
     });
 
     expect(status.code).toBe('ready');
