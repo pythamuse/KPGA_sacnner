@@ -1973,7 +1973,12 @@ function toPixelRect(
   return { left, top, right, bottom };
 }
 
-function sampleRect(
+/**
+ * Exported only so a measurement outside this file can resample a rectangle
+ * the *same* way the scorer does (sheetExposure.ts). Adding `export` changes
+ * no behaviour here: nothing about the function or its callers moved.
+ */
+export function sampleRect(
   image: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>,
   rect: PixelRect,
   sampleWidth: number,
@@ -2419,7 +2424,12 @@ function darkness(value: number): number {
   return Math.max(0, Math.min(1, (178 - value) / 178));
 }
 
-function percentile(values: number[], fraction: number): number {
+/**
+ * Exported for the same reason as `sampleRect`: the sheet-level exposure
+ * measurement has to be the scorer's percentile, not a second definition of
+ * one. Nothing here changed but the visibility.
+ */
+export function percentile(values: number[], fraction: number): number {
   const sorted = [...values].sort((a, b) => a - b);
   if (sorted.length === 0) {
     return 0;

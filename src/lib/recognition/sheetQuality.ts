@@ -1,4 +1,5 @@
 import { applyTemplateRegistrationFrame, loadImageAnalysisData } from './markDensity';
+import { measureSheetExposureForImage, type SheetExposureMeasurement } from './sheetExposure';
 import { buildCagiGridDetection, buildSatisfactionGridDetection } from './tableGridDetection';
 import { cagiTemplate, satisfactionTemplate, type FormType } from './roiTemplates';
 
@@ -47,6 +48,15 @@ export interface SheetQualitySignals {
   gridFields: number;
   contentBoundsSource: string;
   contentBoundsConfident: boolean;
+  /**
+   * Sheet-level exposure against the blank template (src/lib/recognition/
+   * sheetExposure.ts). Reported only, like everything above it — see the T3
+   * comment block below, and the DISABLED threshold beneath that.
+   *
+   * Null when the blank asset could not be read; a figure with no reference
+   * would be a different measurement wearing this one's name.
+   */
+  exposure: SheetExposureMeasurement | null;
   registration: RegistrationMetaLike | null;
 }
 
@@ -76,11 +86,85 @@ export interface SheetQualityVerdict {
  *                 GOOD batch.
  *
  * Conclusion: sheet-level image signals cannot cut good/retake bands on this
- * sample. gridFields / pageInkRatio / pageIsBinarySource / contentBounds*
- * stay in `signals` as REPORTED VALUES ONLY — measured at chance-level
- * separation (T3 2026-08-27); do not add thresholds on these without new
- * evidence. See spec F3.4.
+ * sample. gridFields / pageInkRatio / pageIsBinarySource / contentBounds* /
+ * exposure stay in `signals` as REPORTED VALUES ONLY — the first four were
+ * measured at chance-level separation (T3 2026-08-27) and the fifth has not
+ * been measured against labels at all yet; do not add thresholds on any of
+ * them without new evidence. See spec F3.4.
+ *
+ * W-B 2026-08-27 — why `exposure` is here and still reported-only.
+ *
+ * `signals.exposure` is a different KIND of signal from the four T3 rejected:
+ * those are computed from the sheet alone, while exposure is a comparison
+ * against the blank TEMPLATE. Spec §12.2 measured its cell-level ancestor
+ * (`brightnessOffset`) reaching 185 on zero-yield sheets against at most 61
+ * among productive ones — a tail that looks like it might forecast, at upload
+ * time, a sheet that will yield nothing.
+ *
+ * "Looks like" is the whole of the evidence so far. The medians nearly touch
+ * (44 vs 39), only the tail separates, and this worktree has no labels. T3 is
+ * the standing warning: pageInkRatio also looked separable and turned out to
+ * be marginal AND inverted. So the measurement ships and the threshold does
+ * not.
  */
+
+// Machine reason code for the DISABLED exposure rule below. Defined next to
+// the rule so an enabled threshold has nothing left to invent.
+const REASON_EXPOSURE_UNDEREXPOSED = 'exposure-underexposed';
+
+/**
+ * PROVISIONAL user-facing hint for the DISABLED exposure rule.
+ *
+ * Not in spec F2.2's wording table, because F2.2's table is what the retake UI
+ * implements and this rule cannot fire. Whoever enables the threshold adds the
+ * row to F2.2 first, so the two features still cannot disagree in wording.
+ */
+const HINT_UNDEREXPOSED = '사진이 어두워 표기가 보이지 않을 수 있습니다. 밝은 곳에서 다시 찍어주세요';
+
+/**
+ * ==== INACTIVE — exposure threshold, deliberately disabled (W-B 2026-08-27) ====
+ *
+ * `null` disables `exposureRetakeReason` outright, so today every verdict is
+ * the registration-only verdict and nothing below this line can change one.
+ * tests/sheet-exposure.test.ts pins both halves of that: the constant is null,
+ * and the verdicts are identical with the exposure signal present.
+ *
+ * THE CENTRAL CHECKOUT ENABLES THIS ONLY IF A SHUFFLED-LABEL CONTROL CLEARS
+ * IT. The procedure is the one that rejected T3's bands (spec F3.4): score the
+ * best single cut of `offset82` over the labelled photo set, compare it with
+ * the p95 of 500 shuffled-label permutations, and set a number here only if
+ * the real cut beats that control. A cut that merely looks good on 19 sheets
+ * is what T3 already caught. Run:
+ *
+ *   node scripts/report-sheet-exposure.cjs <photo-dir>
+ *
+ * Setting a number here can only ever move a sheet from 'good' to
+ * 'retake-suggested' — it admits no value, relaxes no gate, and touches no
+ * recognition threshold (spec F3.3, and the WRONG = 0 ordering).
+ */
+const EXPOSURE_OFFSET82_RETAKE_THRESHOLD: number | null = null;
+
+/**
+ * The inactive rule itself, as a function so it is a real code path rather
+ * than a comment describing one.
+ *
+ * Exported for the test that proves a null threshold silences it whatever the
+ * exposure is.
+ */
+export function exposureRetakeReason(
+  exposure: SheetExposureMeasurement | null,
+  threshold: number | null = EXPOSURE_OFFSET82_RETAKE_THRESHOLD,
+): string | null {
+  if (threshold === null || !exposure) {
+    return null;
+  }
+  return exposure.offset82 >= threshold ? REASON_EXPOSURE_UNDEREXPOSED : null;
+}
+
+/** Read by the test that fails the moment someone enables this locally. */
+export function getExposureRetakeThreshold(): number | null {
+  return EXPOSURE_OFFSET82_RETAKE_THRESHOLD;
+}
 
 // Machine reason codes (spec F3.2: `reasons`).
 const REASON_REGISTRATION_NONE = 'registration-none';
@@ -145,6 +229,9 @@ export async function evaluateSheetQuality(input: SheetQualityInput): Promise<Sh
   const grid = input.formType === 'cagi'
     ? buildCagiGridDetection(image)
     : buildSatisfactionGridDetection(image);
+  // Measured from the image already in hand, against the same blank the
+  // scorer subtracts. Reported only — see the comment block above.
+  const exposure = await measureSheetExposureForImage(image, input.formType);
 
   const registration = input.registration ?? null;
   const signals: SheetQualitySignals = {
@@ -155,6 +242,7 @@ export async function evaluateSheetQuality(input: SheetQualityInput): Promise<Sh
     gridFields: Object.keys(grid.overrides).length,
     contentBoundsSource: image.contentBoundsSource ?? 'none',
     contentBoundsConfident: image.contentBoundsConfident,
+    exposure,
     registration,
   };
 
@@ -190,6 +278,23 @@ export async function evaluateSheetQuality(input: SheetQualityInput): Promise<Sh
       signals,
       reasons: [REASON_UNVERIFIED_WARP],
       hints: [HINT_UNVERIFIED],
+    };
+  }
+
+  // ==== INACTIVE while EXPOSURE_OFFSET82_RETAKE_THRESHOLD is null ====
+  // `exposureRetakeReason` returns null unconditionally today, so this branch
+  // is unreachable and the verdict below is the one this function has always
+  // returned. Placed last on purpose: it can only ever turn a 'good' into a
+  // 'retake-suggested', never soften 'unusable' or 'retake-suggested', and it
+  // sits AFTER the no-registration return above so a scan — which carries no
+  // capture metadata — can never be told to retake (spec F3.2).
+  const exposureReason = exposureRetakeReason(signals.exposure);
+  if (exposureReason) {
+    return {
+      verdict: 'retake-suggested',
+      signals,
+      reasons: [exposureReason],
+      hints: [HINT_UNDEREXPOSED],
     };
   }
 
