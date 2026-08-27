@@ -38,7 +38,7 @@ describe.skipIf(!CAGI || !SAT)('photo gate probe', () => {
     for (const trace of captured) {
       const field = /field=([\w.]+)/.exec(trace)?.[1];
       if (!field || !FIELDS.includes(field)) continue;
-      lines.push(trace.slice(0, 460));
+      lines.push(trace);
       lines.push('');
     }
     const text = lines.join('\n');
