@@ -197,7 +197,9 @@ interface SheetQualityVerdict {
 않는다.
 
 **신규 엔드포인트** `POST /api/uploads/quality`
-`{ jobId, type, imageId, registration? }` → `SheetQualityVerdict`.
+`{ jobId, type, batch, pageNumber, registration? }` → `SheetQualityVerdict` — `/api/upload`이
+저장하고 `/api/recognize`가 읽는 것과 같은 키. (초안의 `imageId` 주소는 실제 업로드 흐름이
+쓰지 않는 디렉터리를 봤다 — 합류 시 수정.)
 업로드 직후 장당 호출 — 종이가 아직 눈앞에 있을 때 판정이 도착한다.
 
 **일관성 요건**: `/api/recognize`도 **같은 `evaluateSheetQuality`를 호출**해 학생 draft에

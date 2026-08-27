@@ -23,6 +23,8 @@ export interface RegistrationMeta {
   rejection: QuadRejection | null;
   /** Did the adopted homography pass its verification threshold? */
   verified: boolean;
+  /** Set by the panel when the user explicitly proceeds past a retake prompt (spec F2.3). */
+  overridden?: boolean;
 }
 
 export interface PerspectiveCorrectionResult {

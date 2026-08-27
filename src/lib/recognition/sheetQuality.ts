@@ -28,6 +28,14 @@ export interface RegistrationMetaLike {
   quadResidualPx: number | null;
   rejection: string | null;
   verified: boolean;
+  /**
+   * The user explicitly chose "use as-is" past a retake prompt (spec F2.3).
+   * Travels into `signals.registration` so the review screen can tell an
+   * overridden sheet from one the pipeline accepted; it never changes the
+   * verdict — an unregistered sheet stays `unusable` whether or not someone
+   * insisted on uploading it.
+   */
+  overridden?: boolean;
 }
 
 export interface SheetQualitySignals {
@@ -115,7 +123,8 @@ export function isRegistrationMetaLike(value: unknown): value is RegistrationMet
     && (candidate.quadResidualPx === null
       || (typeof candidate.quadResidualPx === 'number' && Number.isFinite(candidate.quadResidualPx)))
     && (candidate.rejection === null || typeof candidate.rejection === 'string')
-    && typeof candidate.verified === 'boolean';
+    && typeof candidate.verified === 'boolean'
+    && (candidate.overridden === undefined || typeof candidate.overridden === 'boolean');
 }
 
 /**

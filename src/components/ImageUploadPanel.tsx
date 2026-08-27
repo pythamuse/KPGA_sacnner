@@ -1,9 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { withTimeout } from '@/lib/pdf/withTimeout';
 import {
-  correctImageInWorker,
   correctImageInWorkerDetailed,
   warmupPerspectiveWorker,
+  type RegistrationMeta,
 } from '@/lib/documentScanner/perspectiveCorrectClient';
 import {
   hasBatchPerspectiveCorrectionCandidate,
@@ -45,6 +45,7 @@ type BatchNormalizationResult = {
   corrected: boolean;
   confidence: number;
   reason?: string;
+  registration: RegistrationMeta | null;
 };
 
 type BatchUploadItem = {
@@ -52,8 +53,38 @@ type BatchUploadItem = {
   source: 'image' | 'pdf';
 };
 
+/** A batch page prepared for upload, held back until the F2 review gate. */
+type PreparedBatchPage = {
+  file: File;
+  page: number;
+  filename: string;
+  corrected: boolean;
+  registration: RegistrationMeta | null;
+  /** Correction failed hard enough that F2 asks for a retake before upload. */
+  retake: boolean;
+};
+
+/** F2 retake prompt state: the photo the pipeline refused, and why. */
+type RetakePrompt = {
+  file: File;
+  type: UploadKind;
+  source: 'camera' | 'file';
+  registration: RegistrationMeta | null;
+};
+
+type SheetVerdictSummary = {
+  verdict: 'good' | 'retake-suggested' | 'unusable';
+  hints: string[];
+};
+
 const PERSPECTIVE_CORRECTION_SCALE = 3;
 const MAX_DETECTION_DIMENSION = 1600;
+// The worker downscales internally for detection and samples the warp from the
+// pixels it was given (spec F1.2 item 4), so the client now hands it the
+// original resolution. Warping from a 1600px downscale is what put three wrong
+// values on student 2 in the ORB spike (ADOPTION §3.3). Capped so a 50MP
+// source cannot post a 200MB buffer; past ~3000px the warp gain saturates.
+const FULL_RESOLUTION_DIMENSION = 4096;
 const PERSPECTIVE_CORRECTION_TIMEOUT_MS = 9000;
 const BATCH_DETECTION_DIMENSION = 1100;
 const BATCH_WORKER_WARMUP_TIMEOUT_MS = 9000;
@@ -219,6 +250,19 @@ export default function ImageUploadPanel({
     step: UploadKind;
     previewSrc: string;
     source: 'camera' | 'file';
+    registration: RegistrationMeta | null;
+  } | null>(null);
+  // F2: the retake prompt replaces the old silent original-upload fallback --
+  // the path every wrong value in the raw 19-student photo run came from.
+  const [retakePrompt, setRetakePrompt] = useState<RetakePrompt | null>(null);
+  const [sheetVerdicts, setSheetVerdicts] = useState<Partial<Record<UploadKind, SheetVerdictSummary>>>({});
+  // F2 batch review gate: pages held back before upload because correction
+  // refused them; the user either reselects or explicitly proceeds.
+  const [batchReview, setBatchReview] = useState<{
+    type: UploadKind;
+    batch: UploadBatchReference;
+    pages: PreparedBatchPage[];
+    warnings: BatchCorrectionWarning[];
   } | null>(null);
 
   const cagiInputRef = useRef<HTMLInputElement>(null);
@@ -375,10 +419,12 @@ export default function ImageUploadPanel({
 
   const normalizeBatchFile = async (file: File, type: UploadKind): Promise<BatchNormalizationResult> => {
     if (!PERSPECTIVE_CORRECTION_ENABLED) {
-      return { file, corrected: false, confidence: 0, reason: '보정 기능이 비활성화되어 있습니다.' };
+      return { file, corrected: false, confidence: 0, reason: '보정 기능이 비활성화되어 있습니다.', registration: null };
     }
 
-    const canvas = await createDetectionCanvas(file, BATCH_DETECTION_DIMENSION);
+    // Full resolution: the worker detects on its own downscale and samples the
+    // warp from these pixels (spec F1.2 item 4).
+    const canvas = await createDetectionCanvas(file, FULL_RESOLUTION_DIMENSION);
     const template = type === 'cagi' ? cagiTemplate : satisfactionTemplate;
 
     try {
@@ -388,6 +434,7 @@ export default function ImageUploadPanel({
         template.baseSize.height * PERSPECTIVE_CORRECTION_SCALE,
         BATCH_PAGE_CORRECTION_TIMEOUT_MS,
         BATCH_MIN_CORRECTION_CONFIDENCE,
+        type,
       );
 
       if (result.status === 'corrected' && result.blob) {
@@ -395,6 +442,7 @@ export default function ImageUploadPanel({
           file: new File([result.blob], toJpegFilename(file.name), { type: 'image/jpeg' }),
           corrected: true,
           confidence: result.confidence,
+          registration: result.registration,
         };
       }
 
@@ -403,6 +451,7 @@ export default function ImageUploadPanel({
         corrected: false,
         confidence: result.confidence,
         reason: result.reason,
+        registration: result.registration,
       };
     } finally {
       canvas.width = 1;
@@ -418,6 +467,43 @@ export default function ImageUploadPanel({
     return '보정 결과를 만들지 못해 원본으로 업로드했습니다.';
   };
 
+  // F2.2's rejection -> instruction table, verbatim from the spec (the server
+  // verdict in sheetQuality.ts carries the same strings; the two features must
+  // never disagree in wording).
+  const retakeHintFor = (registration: RegistrationMeta | null): string => {
+    const rejection = registration?.rejection ?? null;
+    if (rejection === 'cropped') return '종이의 네 모서리가 모두 화면 안에 들어오게 찍어주세요';
+    if (rejection === 'too-small') return '종이가 화면을 더 채우도록 가까이서 찍어주세요';
+    if (rejection === 'wrong-shape') return '종이 정면에서, 세로 방향으로 찍어주세요';
+    return '종이가 배경과 구분되도록 어두운 바닥을 피해 다시 찍어주세요';
+  };
+
+  // F3: ask the server for the per-sheet verdict right after an upload, while
+  // the paper is still in front of the user. Fire-and-forget -- a verdict
+  // failure must never block an upload that already succeeded.
+  const requestQualityVerdict = async (
+    type: UploadKind,
+    batch: UploadBatchReference,
+    pageNumber: number,
+    registration: RegistrationMeta | null,
+  ): Promise<SheetVerdictSummary | null> => {
+    try {
+      const res = await fetch('/api/uploads/quality', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jobId, type, batch, pageNumber, registration }),
+      });
+      if (!res.ok) return null;
+      const data = await res.json() as { verdict?: SheetVerdictSummary['verdict']; hints?: string[] };
+      if (data.verdict !== 'good' && data.verdict !== 'retake-suggested' && data.verdict !== 'unusable') {
+        return null;
+      }
+      return { verdict: data.verdict, hints: Array.isArray(data.hints) ? data.hints : [] };
+    } catch {
+      return null;
+    }
+  };
+
   const setSequentialPreview = (file: File, type: UploadKind) => {
     const reader = new FileReader();
     reader.onloadend = () => {
@@ -430,7 +516,11 @@ export default function ImageUploadPanel({
     reader.readAsDataURL(file);
   };
 
-  const uploadSequentialFile = async (file: File, type: UploadKind): Promise<boolean> => {
+  const uploadSequentialFile = async (
+    file: File,
+    type: UploadKind,
+    registration: RegistrationMeta | null = null,
+  ): Promise<boolean> => {
     setSequentialPreview(file, type);
 
     if (type === 'cagi') setIsCagiUploading(true);
@@ -443,6 +533,11 @@ export default function ImageUploadPanel({
       onUploadSuccess(type, data.imageId, data.filename);
       if (type === 'cagi') setCagiCount(1);
       else setSatCount(1);
+
+      // F3: per-sheet verdict, delivered while the paper is still at hand.
+      void requestQualityVerdict(type, batch, 1, registration).then((verdict) => {
+        if (verdict) setSheetVerdicts((previous) => ({ ...previous, [type]: verdict }));
+      });
 
       if (uploadInventoryRef.current.cagi && uploadInventoryRef.current.satisfaction) {
         // One page per side in this flow, so there is no stack to reverse.
@@ -461,34 +556,70 @@ export default function ImageUploadPanel({
   const processSelectedFile = async (file: File, type: UploadKind): Promise<void> => {
     setCameraError('');
     setCorrectionPreview(null);
+    setRetakePrompt(null);
 
-    try {
-      const canvas = await createDetectionCanvas(file, MAX_DETECTION_DIMENSION);
-
-      if (PERSPECTIVE_CORRECTION_ENABLED) {
-        const template = type === 'cagi' ? cagiTemplate : satisfactionTemplate;
-        const correctedBlob = await correctImageInWorker(
-          canvas,
-          template.baseSize.width * PERSPECTIVE_CORRECTION_SCALE,
-          template.baseSize.height * PERSPECTIVE_CORRECTION_SCALE,
-          PERSPECTIVE_CORRECTION_TIMEOUT_MS,
-        );
-
-        if (correctedBlob) {
-          setCorrectionPreview({
-            blob: correctedBlob,
-            step: type,
-            previewSrc: URL.createObjectURL(correctedBlob),
-            source: 'file',
-          });
-          return;
-        }
-      }
-    } catch {
-      // Perspective correction is opportunistic; upload the original file unchanged on any correction failure.
+    if (!PERSPECTIVE_CORRECTION_ENABLED) {
+      await uploadSequentialFile(file, type);
+      return;
     }
 
-    await uploadSequentialFile(file, type);
+    try {
+      // Full resolution to the worker: it detects on an internal downscale and
+      // samples the warp from these pixels (spec F1.2 item 4).
+      const canvas = await createDetectionCanvas(file, FULL_RESOLUTION_DIMENSION);
+      const template = type === 'cagi' ? cagiTemplate : satisfactionTemplate;
+      const result = await correctImageInWorkerDetailed(
+        canvas,
+        template.baseSize.width * PERSPECTIVE_CORRECTION_SCALE,
+        template.baseSize.height * PERSPECTIVE_CORRECTION_SCALE,
+        PERSPECTIVE_CORRECTION_TIMEOUT_MS,
+        undefined,
+        type,
+      );
+
+      if (result.status === 'corrected' && result.blob) {
+        setCorrectionPreview({
+          blob: result.blob,
+          step: type,
+          previewSrc: URL.createObjectURL(result.blob),
+          source: 'file',
+          registration: result.registration,
+        });
+        return;
+      }
+
+      // F2: correction refused this photo. The old code uploaded the original
+      // here without a word -- the path every wrong value in the raw
+      // 19-student run came from. Now the user is asked for a better photo,
+      // and proceeding anyway is an explicit, recorded choice.
+      setRetakePrompt({ file, type, source: 'file', registration: result.registration });
+    } catch {
+      // Even a correction-engine crash is not a silent pass any more.
+      setRetakePrompt({ file, type, source: 'file', registration: null });
+    }
+  };
+
+  const dismissRetakePrompt = () => {
+    setRetakePrompt(null);
+    setCameraError('');
+  };
+
+  const proceedPastRetakePrompt = async () => {
+    if (!retakePrompt) return;
+    const { file, type, source, registration } = retakePrompt;
+    const overridden: RegistrationMeta = registration
+      ? { ...registration, overridden: true }
+      : {
+        method: 'none', confidence: 0, orbInliers: 0, orbInlierRatio: 0,
+        quadResidualPx: null, rejection: null, verified: false, overridden: true,
+      };
+    const uploaded = await uploadSequentialFile(file, type, overridden);
+    if (uploaded) {
+      setRetakePrompt(null);
+      if (source === 'camera') {
+        advanceCameraFlowAfterUpload(type);
+      }
+    }
   };
 
   const handleBatchFileChange = async (e: React.ChangeEvent<HTMLInputElement>, type: UploadKind) => {
@@ -533,6 +664,10 @@ export default function ImageUploadPanel({
       }
       const batch = { batchId: createBatchId(), expectedPageCount: total };
 
+      // Prepare every page first; upload only after the F2 review gate. The
+      // old loop uploaded originals for refused pages in the same breath as
+      // the warning -- a silent pass in batch clothing.
+      const preparedPages: PreparedBatchPage[] = [];
       for (let i = 0; i < total; i++) {
         const { file: sourceFile, source } = filesToUpload[i];
         // PDF.js has already rasterized PDF pages into a flat rectangle. Its
@@ -540,8 +675,14 @@ export default function ImageUploadPanel({
         // running the camera-only OpenCV worker here both adds latency and
         // turns an unavailable Worker into a warning for every PDF page.
         const needsPerspectiveCorrection = shouldCorrectBatchPerspective(source);
-        let fileToUpload = sourceFile;
-        let pageCorrectionWarningAdded = false;
+        let prepared: PreparedBatchPage = {
+          file: sourceFile,
+          page: i + 1,
+          filename: sourceFile.name,
+          corrected: false,
+          registration: null,
+          retake: false,
+        };
 
         if (needsPerspectiveCorrection && PERSPECTIVE_CORRECTION_ENABLED && !correctionEngineUnavailable) {
           if (!correctionEngineReady) {
@@ -555,19 +696,26 @@ export default function ImageUploadPanel({
 
             try {
               const normalized = await normalizeBatchFile(sourceFile, type);
-              fileToUpload = normalized.file;
+              prepared = {
+                ...prepared,
+                file: normalized.file,
+                corrected: normalized.corrected,
+                registration: normalized.registration,
+                // The detector looked and refused: F2 asks for a retake.
+                // Engine trouble (timeout/worker-error) is not the photo's
+                // fault and stays a warning, as before.
+                retake: !normalized.corrected
+                  && normalized.reason !== 'timeout'
+                  && normalized.reason !== 'worker-error',
+              };
 
-              if (!normalized.corrected) {
+              if (normalized.reason === 'timeout' || normalized.reason === 'worker-error') {
                 correctionWarnings.push({
                   type,
                   page: i + 1,
                   filename: sourceFile.name,
                   reason: formatCorrectionWarning(normalized.reason),
                 });
-                pageCorrectionWarningAdded = true;
-              }
-
-              if (normalized.reason === 'timeout' || normalized.reason === 'worker-error') {
                 correctionEngineReady = false;
                 correctionEngineUnavailable = true;
               }
@@ -578,14 +726,15 @@ export default function ImageUploadPanel({
                 filename: sourceFile.name,
                 reason: '페이지 이미지 보정 중 오류가 발생해 원본으로 업로드했습니다.',
               });
-              pageCorrectionWarningAdded = true;
               correctionEngineReady = false;
               correctionEngineUnavailable = true;
             }
           }
         }
 
-        if (needsPerspectiveCorrection && correctionEngineUnavailable && PERSPECTIVE_CORRECTION_ENABLED && !pageCorrectionWarningAdded) {
+        if (needsPerspectiveCorrection && correctionEngineUnavailable && PERSPECTIVE_CORRECTION_ENABLED
+          && !prepared.corrected && !prepared.retake
+          && !correctionWarnings.some((warning) => warning.page === i + 1)) {
           correctionWarnings.push({
             type,
             page: i + 1,
@@ -594,26 +743,93 @@ export default function ImageUploadPanel({
           });
         }
 
-        setBatchStatusMessage(`페이지를 업로드하고 있습니다. (${i + 1}/${total})`);
-        await uploadSingleFile(fileToUpload, type, batch, i + 1);
+        preparedPages.push(prepared);
       }
 
-      uploadInventoryRef.current = { ...uploadInventoryRef.current, [type]: batch };
-      if (type === 'cagi') {
-        setCagiCount(total);
-      } else {
-        setSatCount(total);
+      const retakePages = preparedPages.filter((page) => page.retake);
+      if (retakePages.length > 0) {
+        // F2 batch gate: hold the whole bundle and let the user decide with
+        // the failed pages named, instead of uploading originals silently.
+        setBatchReview({ type, batch, pages: preparedPages, warnings: correctionWarnings });
+        return;
       }
+
+      await uploadPreparedBatch(type, batch, preparedPages, correctionWarnings);
     } catch (err: any) {
       alert(`업로드 처리 중 오류가 발생했습니다: ${err.message}`);
     } finally {
-      setBatchCorrectionWarnings((previous) => [
-        ...previous.filter((warning) => warning.type !== type),
-        ...correctionWarnings,
-      ]);
       setIsBatchProcessing(false);
       setBatchStatusMessage('');
       if (e.target) e.target.value = '';
+    }
+  };
+
+  const uploadPreparedBatch = async (
+    type: UploadKind,
+    batch: UploadBatchReference,
+    pages: PreparedBatchPage[],
+    warnings: BatchCorrectionWarning[],
+  ) => {
+    for (const page of pages) {
+      setBatchStatusMessage(`페이지를 업로드하고 있습니다. (${page.page}/${pages.length})`);
+      await uploadSingleFile(page.file, type, batch, page.page);
+    }
+
+    uploadInventoryRef.current = { ...uploadInventoryRef.current, [type]: batch };
+    if (type === 'cagi') {
+      setCagiCount(pages.length);
+    } else {
+      setSatCount(pages.length);
+    }
+    setBatchCorrectionWarnings((previous) => [
+      ...previous.filter((warning) => warning.type !== type),
+      ...warnings,
+    ]);
+
+    // F3: per-page verdicts, fire-and-forget after the uploads are safe.
+    void Promise.allSettled(pages.map((page) =>
+      requestQualityVerdict(type, batch, page.page, page.registration),
+    ));
+  };
+
+  const cancelBatchReview = () => {
+    setBatchReview(null);
+    setBatchStatusMessage('');
+  };
+
+  const proceedBatchReview = async () => {
+    if (!batchReview) return;
+    const { type, batch, pages, warnings } = batchReview;
+    setBatchReview(null);
+    setIsBatchProcessing(true);
+    try {
+      // Explicit override (F2.3): refused pages upload as originals with the
+      // choice recorded, so the review screen can tell them apart.
+      const overriddenPages = pages.map((page) => page.retake
+        ? {
+          ...page,
+          registration: page.registration
+            ? { ...page.registration, overridden: true }
+            : {
+              method: 'none' as const, confidence: 0, orbInliers: 0, orbInlierRatio: 0,
+              quadResidualPx: null, rejection: null, verified: false, overridden: true,
+            },
+        }
+        : page);
+      const overrideWarnings: BatchCorrectionWarning[] = pages
+        .filter((page) => page.retake)
+        .map((page) => ({
+          type,
+          page: page.page,
+          filename: page.filename,
+          reason: '보정 실패 상태로 사용자가 진행을 선택해 원본으로 업로드했습니다.',
+        }));
+      await uploadPreparedBatch(type, batch, overriddenPages, [...warnings, ...overrideWarnings]);
+    } catch (err: any) {
+      alert(`업로드 처리 중 오류가 발생했습니다: ${err.message}`);
+    } finally {
+      setIsBatchProcessing(false);
+      setBatchStatusMessage('');
     }
   };
 
@@ -697,9 +913,14 @@ export default function ImageUploadPanel({
     }
   };
 
-  const uploadCorrectedBlob = async (blob: Blob, type: UploadKind, source: 'camera' | 'file'): Promise<boolean> => {
+  const uploadCorrectedBlob = async (
+    blob: Blob,
+    type: UploadKind,
+    source: 'camera' | 'file',
+    registration: RegistrationMeta | null,
+  ): Promise<boolean> => {
     const file = new File([blob], `${type}_${Date.now()}.jpg`, { type: 'image/jpeg' });
-    const uploaded = await uploadSequentialFile(file, type);
+    const uploaded = await uploadSequentialFile(file, type, registration);
     if (!uploaded) return false;
 
     if (source === 'camera') {
@@ -716,6 +937,7 @@ export default function ImageUploadPanel({
       correctionPreview.blob,
       correctionPreview.step,
       correctionPreview.source,
+      correctionPreview.registration,
     );
 
     if (uploaded) {
@@ -758,40 +980,67 @@ export default function ImageUploadPanel({
 
       context.drawImage(video, 0, 0, width, height);
 
-      try {
-        if (PERSPECTIVE_CORRECTION_ENABLED) {
+      const captureAsFile = async (): Promise<File | null> => {
+        const blob = await new Promise<Blob | null>((resolve) => {
+          canvas.toBlob(resolve, 'image/jpeg', 0.92);
+        });
+        if (!blob) return null;
+        return new File([blob], `${cameraFlow.step}_${Date.now()}.jpg`, { type: 'image/jpeg' });
+      };
+
+      if (PERSPECTIVE_CORRECTION_ENABLED) {
+        try {
           const template = cameraFlow.step === 'cagi' ? cagiTemplate : satisfactionTemplate;
-          const correctedBlob = await correctImageInWorker(
+          const result = await correctImageInWorkerDetailed(
             canvas,
             template.baseSize.width * PERSPECTIVE_CORRECTION_SCALE,
             template.baseSize.height * PERSPECTIVE_CORRECTION_SCALE,
             PERSPECTIVE_CORRECTION_TIMEOUT_MS,
+            undefined,
+            cameraFlow.step,
           );
 
-          if (correctedBlob) {
+          if (result.status === 'corrected' && result.blob) {
             setCorrectionPreview({
-              blob: correctedBlob,
+              blob: result.blob,
               step: cameraFlow.step,
-              previewSrc: URL.createObjectURL(correctedBlob),
+              previewSrc: URL.createObjectURL(result.blob),
               source: 'camera',
+              registration: result.registration,
             });
             return;
           }
+
+          // F2: the shot did not correct -- ask for a retake instead of
+          // uploading the frame without a word (the old behavior).
+          const refusedFile = await captureAsFile();
+          if (!refusedFile) {
+            setCameraError('촬영 이미지를 저장할 수 없습니다. 다시 시도해주세요.');
+            return;
+          }
+          setRetakePrompt({
+            file: refusedFile,
+            type: cameraFlow.step,
+            source: 'camera',
+            registration: result.registration,
+          });
+          return;
+        } catch {
+          const refusedFile = await captureAsFile();
+          if (!refusedFile) {
+            setCameraError('촬영 이미지를 저장할 수 없습니다. 다시 시도해주세요.');
+            return;
+          }
+          setRetakePrompt({ file: refusedFile, type: cameraFlow.step, source: 'camera', registration: null });
+          return;
         }
-      } catch {
-        // Perspective correction is an opportunistic camera-only enhancement.
       }
 
-      const blob = await new Promise<Blob | null>((resolve) => {
-        canvas.toBlob(resolve, 'image/jpeg', 0.92);
-      });
-
-      if (!blob) {
+      const file = await captureAsFile();
+      if (!file) {
         setCameraError('촬영 이미지를 저장할 수 없습니다. 다시 시도해주세요.');
         return;
       }
-
-      const file = new File([blob], `${cameraFlow.step}_${Date.now()}.jpg`, { type: 'image/jpeg' });
       const uploaded = await uploadSequentialFile(file, cameraFlow.step);
       if (!uploaded) return;
 
@@ -945,6 +1194,80 @@ export default function ImageUploadPanel({
         장수가 다르면 분석을 시작할 수 없습니다.
       </div>
       {cameraError && <div className="error-box">{cameraError}</div>}
+
+      {retakePrompt && (
+        // F2: correction refused this photo. The default path is a retake;
+        // proceeding is an explicit, recorded choice (spec F2.3).
+        <div className="error-box" role="alertdialog" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <strong>
+            {retakePrompt.type === 'cagi' ? '선별검사지' : '만족도조사'} 사진을 보정하지 못했습니다.
+          </strong>
+          <span>{retakeHintFor(retakePrompt.registration)}</span>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+            <button
+              className="btn-primary"
+              type="button"
+              onClick={dismissRetakePrompt}
+              disabled={isCagiUploading || isSatUploading}
+            >
+              {retakePrompt.source === 'camera' ? '다시 촬영' : '다른 파일 선택'}
+            </button>
+            <button
+              className="btn-secondary"
+              type="button"
+              onClick={proceedPastRetakePrompt}
+              disabled={isCagiUploading || isSatUploading}
+            >
+              그대로 사용(정확도 낮음)
+            </button>
+          </div>
+        </div>
+      )}
+
+      {batchReview && (
+        // F2 batch gate: refused pages are named and nothing uploads until the
+        // user reselects or explicitly proceeds.
+        <div className="error-box" role="alertdialog" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <strong>
+            {batchReview.type === 'cagi' ? '선별검사지' : '만족도조사'} {batchReview.pages.length}장 중{' '}
+            {batchReview.pages.filter((page) => page.retake).length}장을 보정하지 못했습니다.
+          </strong>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 14 }}>
+            {batchReview.pages.filter((page) => page.retake).map((page) => (
+              <div key={page.page}>
+                {page.page}페이지 ({page.filename}): {retakeHintFor(page.registration)}
+              </div>
+            ))}
+          </div>
+          <span style={{ fontSize: 14 }}>해당 장을 다시 촬영/스캔해 전체를 다시 올리는 것을 권장합니다.</span>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+            <button className="btn-primary" type="button" onClick={cancelBatchReview} disabled={isBatchProcessing}>
+              다시 선택
+            </button>
+            <button className="btn-secondary" type="button" onClick={proceedBatchReview} disabled={isBatchProcessing}>
+              그대로 진행(정확도 낮음)
+            </button>
+          </div>
+        </div>
+      )}
+
+      {(sheetVerdicts.cagi || sheetVerdicts.satisfaction) && (
+        <div className="notice" role="status" style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 14 }}>
+          {(['cagi', 'satisfaction'] as const).map((kind) => {
+            const verdict = sheetVerdicts[kind];
+            if (!verdict) return null;
+            const label = kind === 'cagi' ? '선별검사지' : '만족도조사';
+            const badge = verdict.verdict === 'good' ? '정상'
+              : verdict.verdict === 'retake-suggested' ? '재촬영 권장' : '인식 불가 우려';
+            return (
+              <div key={kind}>
+                {label} 판정: <strong>{badge}</strong>
+                {verdict.hints.length > 0 ? ` — ${verdict.hints[0]}` : ''}
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {mode === 'sequential' ? (
         cameraFlow.active ? (

@@ -150,7 +150,7 @@ function BrandHeader() {
           whiteSpace: 'nowrap',
         }}
       >
-        테스트 버전 v2026-08-25.1
+        테스트 버전 v2026-08-27.1
       </span>
     </div>
   );
