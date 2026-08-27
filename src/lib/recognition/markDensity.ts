@@ -840,6 +840,11 @@ interface DecisionEvidence {
   mediumScoreThreshold: number;
   mediumGapThreshold: number;
   requireHighVisualConfidence: boolean;
+  /**
+   * Set only when `detectOffRowBand` refused the group, so a decision that this
+   * check never touched reads exactly as it did before.
+   */
+  band?: { inked: number; empty: number; inks: number[] };
 }
 
 /**
@@ -939,6 +944,17 @@ function describeDecision(evidence: DecisionEvidence, outcome: string, refused: 
     }
     parts.push(`med-floor=${ratioOf(best.score, mediumScoreThreshold)}`);
     parts.push(`med-gap=${ratioOf(gap, mediumGapThreshold)}`);
+  }
+
+  // Only present when the band check refused, and it carries the ink readings
+  // the refusal was made on so the box list below does not have to be parsed
+  // to see why.
+  if (evidence.band) {
+    parts.push(
+      `band=refused(inked=${evidence.band.inked},empty=${evidence.band.empty}`
+      + `,high=${BAND_INK_HIGH.toFixed(3)},void=${BAND_INK_EMPTY.toFixed(3)}`
+      + `,ink=${evidence.band.inks.map((ink) => ink.toFixed(3)).join('/')})`,
+    );
   }
 
   const shape = best?.shape;
@@ -1044,6 +1060,67 @@ function ratioOf(have: number, need: number): string {
   const shown = Number.isFinite(ratio) ? `${ratio.toFixed(2)}x` : 'inf';
   const value = Number.isFinite(have) ? have.toFixed(3) : 'inf';
   return `${value}/${need.toFixed(3)}(${shown})`;
+}
+
+/**
+ * PROVISIONAL. Drafted from the re-measured reading in
+ * `Task/FEATURE_SPEC_CAPTURE_PIPELINE_2026-08-27.md` §8 (the version at the end
+ * of that file, which retracts the first reading of the same day), row A'.
+ *
+ * The two photo sheets that read `satisfaction.q10` as 2 instead of 4 show one
+ * signature in the ranked boxes: the box the student actually marked carries
+ * `actualInk 0.000` while the other four all sit at 0.10-0.17, every alignment
+ * pinned at its search radius, and the gate then confirms a wrong column on
+ * margins that look healthy. Horizontal positions match the template; the band
+ * is displaced vertically onto the printed text line below the table's last
+ * row, so letter ink lands evenly in four boxes and only the position past the
+ * table's right edge stays blank.
+ *
+ * These numbers are the ones §8 quotes, not ones fitted here, and the central
+ * checkout is what measures them -- it may retune or reject them.
+ */
+const BAND_INK_HIGH = 0.10;
+const BAND_INK_EMPTY = 0.005;
+const MIN_INKED_BOXES = 3;
+
+/**
+ * Whether a group's per-box template ink reads as a displaced band rather than
+ * an answer row.
+ *
+ * A real mark adds ink to ONE box against a baseline every box shares, so the
+ * boxes differ by the mark and agree elsewhere. Heavy ink spread evenly across
+ * several boxes with one box perfectly void is the opposite arrangement, and it
+ * is what a band lying on a printed text line that ends mid-row produces.
+ *
+ * `inks` is in the order the decision ranks them and `winnerIndex` points at
+ * the box that would be confirmed; the winner has to be one of the inked ones,
+ * because a void winner is a different (and already refused) situation.
+ *
+ * Returns the counts when the arrangement matches, so the refusal can be read
+ * back from the trace, and `null` otherwise. It decides nothing on its own --
+ * the caller only ever turns a `null` return into "carry on".
+ */
+export function detectOffRowBand(
+  inks: number[],
+  winnerIndex: number,
+): { inked: number; empty: number } | null {
+  const winner = inks[winnerIndex];
+  if (typeof winner !== 'number' || !Number.isFinite(winner) || winner < BAND_INK_HIGH) {
+    return null;
+  }
+  let inked = 0;
+  let empty = 0;
+  for (const ink of inks) {
+    if (typeof ink !== 'number' || !Number.isFinite(ink)) {
+      continue;
+    }
+    if (ink >= BAND_INK_HIGH) inked += 1;
+    if (ink <= BAND_INK_EMPTY) empty += 1;
+  }
+  if (inked < MIN_INKED_BOXES || empty < 1) {
+    return null;
+  }
+  return { inked, empty };
 }
 
 export function analyzeChoiceGroup(
@@ -1213,6 +1290,33 @@ export function analyzeChoiceGroup(
   if (!(gap >= highGapThreshold)) refused.push('gap');
   if (!hasStructuredMark) refused.push('mark-shape');
   if (usesBaseline && !(relativeContrast >= HIGH_RELATIVE_CONTRAST)) refused.push('relative-contrast');
+
+  // Ahead of every route that can put a value on the page -- the high
+  // conjunction, the rescue, and the medium path all sit below this -- because
+  // the whole point is that those routes see healthy margins on a band that is
+  // not on the answer row at all. It can only take a value away: nothing below
+  // reads `offRowBand`, no threshold moves, and a group it does not refuse
+  // reaches the same tests with the same numbers it did before.
+  //
+  // Template ink only. The raw-density path has no `actualInk` to read, and a
+  // density reading is not the same measurement, so it is left alone.
+  const bandInks = usesBaseline
+    ? scoredCandidates.map((candidate) => candidate.shape?.actualInk)
+    : [];
+  const offRowBand = usesBaseline && bandInks.every((ink) => typeof ink === 'number')
+    ? detectOffRowBand(bandInks as number[], 0)
+    : null;
+  if (offRowBand) {
+    refused.push('band-structure');
+    evidence.band = { ...offRowBand, inks: bandInks as number[] };
+    return {
+      field: group.field,
+      confidence: 'low',
+      candidates,
+      candidateMeasurements,
+      decision: describeDecision(evidence, 'low', refused),
+    };
+  }
 
   if (
     best.score >= highScoreThreshold
