@@ -521,6 +521,80 @@ select {
   padding-left: 18px;
 }
 
+/*
+ * Device-session diagnostic readout (CAPTURE_GUIDANCE §13.10). Rendered only
+ * under `?diag=1`, in its own row below the preview so it can never cover the
+ * guide rectangle. Tabular numerals because the values change every ~200ms and
+ * digits that shift width are unreadable at a glance.
+ */
+.capture-diagnostics {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-medium);
+  border-radius: var(--radius-sm);
+  background: var(--surface-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.5;
+}
+
+.capture-diagnostics-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  color: var(--text-secondary);
+}
+
+.capture-diagnostics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(168px, 1fr));
+  gap: 2px 14px;
+  margin: 0;
+}
+
+.capture-diagnostics-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  border-bottom: 1px dotted var(--border-subtle);
+  padding: 2px 0;
+}
+
+.capture-diagnostics-row dt {
+  color: var(--text-muted);
+}
+
+.capture-diagnostics-row dd {
+  margin: 0;
+  color: var(--text-primary);
+}
+
+.capture-diagnostics-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  color: var(--text-secondary);
+}
+
+.capture-diagnostics-json {
+  max-height: 240px;
+  overflow: auto;
+  margin: 0;
+  padding: 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-canvas);
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  user-select: all;
+}
+
 .capture-start-panel {
   display: flex;
   justify-content: space-between;

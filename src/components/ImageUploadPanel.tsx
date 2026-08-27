@@ -19,6 +19,15 @@ import {
   type CaptureGuidanceStatus,
   type Rect,
 } from '@/lib/documentScanner/captureGuidance';
+import {
+  attachUploadResult,
+  buildCaptureDiagnosticRecord,
+  buildDiagnosticLines,
+  isDiagnosticsEnabled,
+  serializeCaptureDiagnostics,
+  updateCaptureDiagnosticRecord,
+  type CaptureDiagnosticRecord,
+} from '@/lib/documentScanner/captureDiagnostics';
 import type { Point } from '@/lib/documentScanner/perspectiveCorrect';
 import {
   hasBatchPerspectiveCorrectionCandidate,
@@ -144,6 +153,20 @@ type FrameCallbackVideo = HTMLVideoElement & {
 
 type LiveGuidance = {
   status: CaptureGuidanceStatus;
+  /**
+   * What `nextReadyStreak` had counted after this tick. Held here only so the
+   * diagnostic readout and the capture log can see it; the shutter still reads
+   * `shutterEmphasized`, which is computed from the ref exactly as before.
+   */
+  readyStreak: number;
+  /**
+   * The DETECTION frame the numbers were measured in -- the ~480px downscale,
+   * not the video's native size and not the element's box. The exposure and the
+   * geometry both live in this space, so the diagnostic log has to record it or
+   * the readings cannot be compared across devices.
+   */
+  frameWidth: number;
+  frameHeight: number;
   /** Guide box in display pixels, through the same mapping as the polygon. */
   guide: Rect | null;
   /** Detected quad in display pixels, or null. */
@@ -408,6 +431,27 @@ export default function ImageUploadPanel({
   const [liveGuidance, setLiveGuidance] = useState<LiveGuidance | null>(null);
   const [shutterEmphasized, setShutterEmphasized] = useState<boolean>(false);
 
+  /**
+   * Device-session diagnostics (CAPTURE_GUIDANCE §13.10), off unless `?diag=1`.
+   *
+   * Read in an effect rather than during render so the server-rendered markup
+   * and the first client render are identical to today's whether or not the
+   * parameter is present -- reading `window.location` during render would be a
+   * hydration mismatch, and this must not disturb the ordinary screen at all.
+   */
+  const [diagnosticsEnabled, setDiagnosticsEnabled] = useState<boolean>(false);
+  const [diagnosticRecords, setDiagnosticRecords] = useState<CaptureDiagnosticRecord[]>([]);
+  const [diagnosticExportText, setDiagnosticExportText] = useState<string>('');
+  const [diagnosticExportNote, setDiagnosticExportNote] = useState<string>('');
+  const diagnosticIndexRef = useRef<number>(0);
+  /** Which record the in-flight upload belongs to, so `imageId` lands on it. */
+  const diagnosticPendingRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    setDiagnosticsEnabled(isDiagnosticsEnabled(window.location.search));
+  }, []);
+
   const cagiInputRef = useRef<HTMLInputElement>(null);
   const satInputRef = useRef<HTMLInputElement>(null);
   const cameraVideoRef = useRef<HTMLVideoElement>(null);
@@ -576,7 +620,16 @@ export default function ImageUploadPanel({
 
       liveReadyStreakRef.current = nextReadyStreak(liveReadyStreakRef.current, status);
       setShutterEmphasized(liveReadyStreakRef.current >= READY_STREAK_FOR_SHUTTER);
-      setLiveGuidance({ status, guide, quad, displayWidth, displayHeight });
+      setLiveGuidance({
+        status,
+        readyStreak: liveReadyStreakRef.current,
+        frameWidth,
+        frameHeight,
+        guide,
+        quad,
+        displayWidth,
+        displayHeight,
+      });
     };
 
     // One detection per tick, then re-arm: the loop cannot queue frames
@@ -882,6 +935,18 @@ export default function ImageUploadPanel({
       const data = await uploadSingleFile(file, type, batch, 1, registration);
       uploadInventoryRef.current = { ...uploadInventoryRef.current, [type]: batch };
       onUploadSuccess(type, data.imageId, data.filename);
+
+      // Closes the join (captureDiagnostics.ts): the record written at the
+      // shutter now carries the id recognition will read the image by. Only
+      // ever set by the camera path, and a no-op when nothing is pending.
+      const pendingDiagnostic = diagnosticPendingRef.current;
+      if (pendingDiagnostic !== null) {
+        diagnosticPendingRef.current = null;
+        const uploadedAt = new Date().toISOString();
+        setDiagnosticRecords((previous) =>
+          attachUploadResult(previous, pendingDiagnostic, data.imageId, data.filename, uploadedAt),
+        );
+      }
       if (type === 'cagi') setCagiCount(1);
       else setSatCount(1);
 
@@ -1316,6 +1381,34 @@ export default function ImageUploadPanel({
       return;
     }
 
+    // One record per shutter press, written from the LAST guidance tick --
+    // the reading the person was looking at when they decided to shoot. Nothing
+    // below reads it back; it never touches a guidance or upload decision.
+    let diagnosticIndex: number | null = null;
+    if (diagnosticsEnabled) {
+      diagnosticIndex = diagnosticIndexRef.current + 1;
+      diagnosticIndexRef.current = diagnosticIndex;
+      diagnosticPendingRef.current = diagnosticIndex;
+      const record = buildCaptureDiagnosticRecord({
+        index: diagnosticIndex,
+        capturedAt: new Date().toISOString(),
+        step: cameraFlow.step,
+        status: liveGuidance?.status ?? null,
+        readyStreak: liveGuidance?.readyStreak ?? 0,
+        frameWidth: liveGuidance?.frameWidth ?? 0,
+        frameHeight: liveGuidance?.frameHeight ?? 0,
+      });
+      setDiagnosticRecords((previous) => [...previous, record]);
+    }
+
+    const markDiagnostic = (outcome: CaptureDiagnosticRecord['outcome']) => {
+      if (diagnosticIndex === null) return;
+      diagnosticPendingRef.current = null;
+      setDiagnosticRecords((previous) =>
+        updateCaptureDiagnosticRecord(previous, diagnosticIndex as number, { outcome }),
+      );
+    };
+
     setIsCapturing(true);
     try {
       const width = video.videoWidth || 1280;
@@ -1375,6 +1468,7 @@ export default function ImageUploadPanel({
             source: 'camera',
             registration: result.registration,
           });
+          markDiagnostic('retake-prompted');
           return;
         } catch {
           const refusedFile = await captureAsFile();
@@ -1383,6 +1477,7 @@ export default function ImageUploadPanel({
             return;
           }
           setRetakePrompt({ file: refusedFile, type: cameraFlow.step, source: 'camera', registration: null });
+          markDiagnostic('retake-prompted');
           return;
         }
       }
@@ -1398,8 +1493,40 @@ export default function ImageUploadPanel({
       advanceCameraFlowAfterUpload(cameraFlow.step);
     } catch (err: any) {
       setCameraError(`촬영 중 오류가 발생했습니다. 다시 시도해주세요. (${err?.message || '알 수 없는 오류'})`);
+      markDiagnostic('error');
     } finally {
       setIsCapturing(false);
+    }
+  };
+
+  /**
+   * Clipboard first, a selectable <pre> when it refuses.
+   *
+   * A download would be the obvious thing and is the wrong thing here: on a
+   * phone it lands in a folder the person then has to go find, mid-shoot. The
+   * fallback is not decoration -- `navigator.clipboard` is undefined on plain
+   * HTTP and is routinely denied on Android even inside a click handler, and
+   * the session is being run over USB port forwarding (§11.4) where that is
+   * likely. When it fails, the JSON is still on screen to select and copy.
+   */
+  const exportDiagnostics = async () => {
+    const json = serializeCaptureDiagnostics(
+      diagnosticRecords,
+      new Date().toISOString(),
+      typeof navigator === 'undefined' ? null : navigator.userAgent,
+    );
+
+    try {
+      if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(json);
+        setDiagnosticExportText('');
+        setDiagnosticExportNote(`클립보드에 복사했습니다 (${diagnosticRecords.length}건)`);
+        return;
+      }
+      throw new Error('clipboard unavailable');
+    } catch {
+      setDiagnosticExportText(json);
+      setDiagnosticExportNote('클립보드를 쓸 수 없어 아래에 펼쳤습니다. 길게 눌러 전체 선택 후 복사해주세요.');
     }
   };
 
@@ -1678,6 +1805,49 @@ export default function ImageUploadPanel({
                 <li>그림자와 흔들림을 줄이고 정면에서 촬영합니다.</li>
                 <li>체크 표시가 작게 보이지 않도록 화면을 가득 채웁니다.</li>
               </ul>
+              {/*
+                Diagnostic readout (CAPTURE_GUIDANCE §13.10), only under
+                `?diag=1`. Its own full-width row BELOW the frame, never an
+                overlay: the guide rectangle fills 78% of the short edge and is
+                the thing the user is aiming with, so there is no corner of the
+                preview this could sit in without covering something that
+                matters. Nothing in here feeds a guidance decision.
+              */}
+              {diagnosticsEnabled && (
+                <div className="capture-diagnostics" style={{ gridColumn: '1 / -1' }}>
+                  <div className="capture-diagnostics-head">
+                    <strong>진단 표시</strong>
+                    <span>기록 {diagnosticRecords.length}건</span>
+                  </div>
+                  <dl className="capture-diagnostics-grid">
+                    {buildDiagnosticLines(
+                      liveGuidance?.status ?? null,
+                      liveGuidance?.frameWidth ?? 0,
+                      liveGuidance?.frameHeight ?? 0,
+                      liveGuidance?.readyStreak ?? 0,
+                    ).map((line) => (
+                      <div key={line.label} className="capture-diagnostics-row">
+                        <dt>{line.label}</dt>
+                        <dd>{line.value}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                  <div className="capture-diagnostics-actions">
+                    <button
+                      className="btn-secondary"
+                      type="button"
+                      onClick={() => { void exportDiagnostics(); }}
+                      disabled={diagnosticRecords.length === 0}
+                    >
+                      기록 {diagnosticRecords.length}건 복사
+                    </button>
+                    {diagnosticExportNote && <span>{diagnosticExportNote}</span>}
+                  </div>
+                  {diagnosticExportText && (
+                    <pre className="capture-diagnostics-json">{diagnosticExportText}</pre>
+                  )}
+                </div>
+              )}
             </div>
 
             {cameraCorrectionPreview && (
