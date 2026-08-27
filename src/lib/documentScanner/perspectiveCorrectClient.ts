@@ -1,5 +1,5 @@
 import type { QuadRejection } from './perspectiveCorrect';
-import type { LiveQuadQuality } from './captureGuidance';
+import type { FrameExposureSample, LiveQuadQuality } from './captureGuidance';
 
 export type PerspectiveCorrectionReason =
   | 'no-document'
@@ -67,6 +67,8 @@ type WorkerResponse =
     rejection: QuadRejection | null;
     width: number;
     height: number;
+    /** Optional so a worker build predating the tone pass still parses. */
+    exposure?: FrameExposureSample | null;
   }
   | {
     type: 'result';
@@ -340,6 +342,14 @@ export interface LiveQuadDetection {
   rejection: QuadRejection | null;
   width: number;
   height: number;
+  /**
+   * Tone of the sheet in this frame (CAPTURE_GUIDANCE §11.3), or null when it
+   * could not be measured. Computed inside the worker, on the ImageData this
+   * function transfers there: reading it back out on the main thread would mean
+   * a second full `getImageData` per tick for a pass the worker does in
+   * microseconds while it already holds the pixels.
+   */
+  exposure: FrameExposureSample | null;
 }
 
 /**
@@ -393,6 +403,7 @@ export async function detectQuadInWorker(
     rejection: response.rejection,
     width: response.width,
     height: response.height,
+    exposure: response.exposure ?? null,
   };
 }
 
