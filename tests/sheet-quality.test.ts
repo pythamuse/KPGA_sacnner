@@ -177,18 +177,26 @@ describe('sheet quality evaluator', () => {
 });
 
 describe('POST /api/uploads/quality', () => {
+  // Addressed exactly the way /api/upload stores and /api/recognize reads:
+  // (jobId, type, batch, pageNumber) through the upload store. The route's
+  // first version looked in jobDir/uploads by bare imageId -- a directory the
+  // live upload flow never writes -- so these tests go through the real
+  // upload endpoint to stay honest about the contract.
   const jobId = 'job_1234';
-  const imageId = 'sheetquality0001';
+  const batch = createTestBatch(1);
 
-  beforeAll(() => {
+  beforeAll(async () => {
     createJobSession(jobId);
-    const uploadDir = path.join(getJobDir(jobId), 'uploads');
-    fs.mkdirSync(uploadDir, { recursive: true });
-    fs.copyFileSync(cagiBlankPath, path.join(uploadDir, `${imageId}.png`));
-  });
+    const upload = await uploadTestPage(
+      jobId, 'cagi', batch, 1,
+      fs.readFileSync(cagiBlankPath), 'cagi_page_001.png', 'image/png',
+    );
+    expect(upload.status).toBe(200);
+  }, 120000);
 
   afterAll(() => {
     deleteJobWorkspace(jobId);
+    resetUploadStoreForTests();
   });
 
   function callQuality(body: unknown) {
@@ -200,7 +208,7 @@ describe('POST /api/uploads/quality', () => {
   }
 
   it('returns a verdict for a stored upload', async () => {
-    const response = await callQuality({ jobId, type: 'cagi', imageId });
+    const response = await callQuality({ jobId, type: 'cagi', batch, pageNumber: 1 });
     expect(response.status).toBe(200);
 
     const verdict = await response.json() as SheetQualityVerdict;
@@ -213,7 +221,8 @@ describe('POST /api/uploads/quality', () => {
     const response = await callQuality({
       jobId,
       type: 'cagi',
-      imageId,
+      batch,
+      pageNumber: 1,
       registration: makeRegistration({
         method: 'none',
         confidence: 0,
@@ -229,17 +238,27 @@ describe('POST /api/uploads/quality', () => {
   }, 120000);
 
   it('rejects an invalid job id before touching storage', async () => {
-    const response = await callQuality({ jobId: '../etc', type: 'cagi', imageId });
+    const response = await callQuality({ jobId: '../etc', type: 'cagi', batch, pageNumber: 1 });
     expect(response.status).toBe(400);
   });
 
   it('rejects an invalid upload type', async () => {
-    const response = await callQuality({ jobId, type: 'unknown', imageId });
+    const response = await callQuality({ jobId, type: 'unknown', batch, pageNumber: 1 });
     expect(response.status).toBe(400);
   });
 
-  it('rejects a traversal-shaped image id', async () => {
-    const response = await callQuality({ jobId, type: 'cagi', imageId: '../secret' });
+  it('rejects a malformed batch reference', async () => {
+    const response = await callQuality({
+      jobId,
+      type: 'cagi',
+      batch: { batchId: '../secret', expectedPageCount: 1 },
+      pageNumber: 1,
+    });
+    expect(response.status).toBe(400);
+  });
+
+  it('rejects a page number outside the batch', async () => {
+    const response = await callQuality({ jobId, type: 'cagi', batch, pageNumber: 2 });
     expect(response.status).toBe(400);
   });
 
@@ -247,19 +266,21 @@ describe('POST /api/uploads/quality', () => {
     const response = await callQuality({
       jobId,
       type: 'cagi',
-      imageId,
+      batch,
+      pageNumber: 1,
       registration: { method: 'quad' },
     });
     expect(response.status).toBe(400);
   });
 
   it('returns 404 for a job without a session', async () => {
-    const response = await callQuality({ jobId: 'job_9999', type: 'cagi', imageId });
+    const response = await callQuality({ jobId: 'job_9999', type: 'cagi', batch, pageNumber: 1 });
     expect(response.status).toBe(404);
   });
 
-  it('returns 404 for an image that does not exist', async () => {
-    const response = await callQuality({ jobId, type: 'cagi', imageId: 'missing0001' });
+  it('returns 404 for a page that was never uploaded', async () => {
+    const otherBatch = createTestBatch(1);
+    const response = await callQuality({ jobId, type: 'cagi', batch: otherBatch, pageNumber: 1 });
     expect(response.status).toBe(404);
   });
 });
