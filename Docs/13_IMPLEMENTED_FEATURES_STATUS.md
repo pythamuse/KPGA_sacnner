@@ -302,6 +302,7 @@ npm.cmd run build
 8. **촬영 유도와 원본 평가** — 가이드 테두리, 기울어짐 경고, 어두움 감지, 촬영 직후 인식 가능성 판정 ([설계](../Task/CAPTURE_GUIDANCE_2026-08-27.md))
 9. **외부 기술 도입 계획** — ORB 호모그래피 정합 스파이크(38/38 정합 실측), 두-스트림 기하, 외부 프로젝트 조사와 채택/기각 ([계획](../Task/EXTERNAL_ADOPTION_PLAN_2026-08-27.md))
 10. **촬영 파이프라인 F1/F2/F3** — 이중 경로 보정, 재촬영 요구, 장당 메타 해석 ([기능 정의](../Task/FEATURE_SPEC_CAPTURE_PIPELINE_2026-08-27.md))
+11. **스캐너 기술 지도(비개발자용)** — 기술별 구현 현황·합격 기준·마일스톤 ([14_SCANNER_TECH_MAP.md](14_SCANNER_TECH_MAP.md))
 
 ---
 
