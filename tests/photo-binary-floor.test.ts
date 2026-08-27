@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   analyzeChoiceGroup,
   ImageAnalysisData,
@@ -24,6 +24,16 @@ import { ChoiceGroup } from '../src/lib/recognition/roiTemplates';
  *   1. it applies to two-candidate groups on photo sheets and to nothing else;
  *   2. no route to an automatic value walks under it -- not the high
  *      conjunction, not the rescue, not the medium path.
+ *
+ * SUPERSEDED, NOT DELETED (2026-08-27, spec §14.1). Two-candidate groups on a
+ * photo sheet are now refused outright, before the floor is ever consulted, so
+ * on the default configuration this floor decides nothing. It is kept because
+ * `PHOTO_BINARY_REFUSAL=0` puts it back in charge for a measurement run, and
+ * because a later narrowing of the refusal drops those groups back onto it
+ * rather than onto the base floor. This file therefore runs with the refusal
+ * switched off -- it is the floor's specification, and the floor is only
+ * observable there. The last block below runs on the default instead, so the
+ * file also records that its subject is superseded.
  */
 
 // The constant, restated so a retune has to change this file on purpose.
@@ -160,6 +170,16 @@ function run(
     photoProvenance,
   );
 }
+
+// Everything below reads the floor, and the floor is only reachable with the
+// outright refusal off. Set per test rather than once at module scope so a
+// test that wants the default can take it back by deleting the variable.
+beforeEach(() => {
+  process.env.PHOTO_BINARY_REFUSAL = '0';
+});
+afterEach(() => {
+  delete process.env.PHOTO_BINARY_REFUSAL;
+});
 
 // The three readings the tests below are built on, stated once so a change in
 // the fixture cannot quietly move what is being asked.
@@ -304,5 +324,39 @@ describe('PHOTO_BINARY_FLOOR -- where it cannot reach', () => {
     expect(photo.decision).toBe(scan.decision);
     expect(photo.value).toBe(scan.value);
     expect(photo.confidence).toBe(scan.confidence);
+  });
+});
+
+describe('PHOTO_BINARY_FLOOR -- what supersedes it', () => {
+  /**
+   * On the default configuration the floor never gets asked. Every reading it
+   * would have admitted is refused first, which is the whole of §14.1: the six
+   * wrong binary values were the *other box winning outright*, so no floor can
+   * reach them without also cutting the correct ones.
+   *
+   * Detail covered in `photo-binary-refusal.test.ts`; what belongs here is the
+   * one fact this file would otherwise assert falsely -- that the readings
+   * below reach a value.
+   */
+  it('admits nothing the refusal has already declined', () => {
+    delete process.env.PHOTO_BINARY_REFUSAL;
+
+    for (const samples of [SURVIVING_CORRECT, AT_FLOOR]) {
+      const result = run(samples, 2, true);
+      expect(result.value).toBeUndefined();
+      expect(result.confidence).toBe('low');
+      expect(result.decision).toContain('photo-binary-refused');
+    }
+  });
+
+  it('still refuses on its own where the refusal is switched off', () => {
+    // The floor is not dead: with the refusal off it is what a photo-binary
+    // group answers to, and it is what a narrowed refusal would fall back on.
+    const admitted = run(SURVIVING_CORRECT, 2, true);
+    expect(admitted.value).toBe(1);
+
+    const refused = run(UNDER_FLOOR, 2, true);
+    expect(refused.value).toBeUndefined();
+    expect(refused.decision).toContain('photo-binary-floor');
   });
 });

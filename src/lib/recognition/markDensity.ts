@@ -232,8 +232,43 @@ const HIGH_ABSOLUTE_SIGNAL = 0.021;
  * Photo sheets only, and two candidates only: a binary question has no third
  * option to be outscored, so the relative-contrast test that carries the
  * multi-choice groups has the least to work with exactly here.
+ *
+ * SUPERSEDED, NOT REMOVED (2026-08-27, spec §14.1). The outright refusal below
+ * (`photoBinaryRefusalEnabled`) covers exactly the same set -- photo
+ * provenance, two candidates -- and returns before any route that can produce
+ * a value, so this floor no longer decides anything while the refusal is on.
+ * It is kept for two reasons: `PHOTO_BINARY_REFUSAL=0` puts it straight back
+ * in charge for a measurement run, and if the refusal is ever narrowed (to one
+ * template, to one field, to the affine tone map only) the groups it stops
+ * covering land back on this floor rather than on the base one. The floor
+ * still prints in the decision trace -- `floor=`/`med-floor=` are cut against
+ * it and `photo-binary-floor` is still named when it would have refused -- so
+ * a trace run can still read what it was costing.
  */
 const PHOTO_BINARY_FLOOR = 0.042;
+
+/**
+ * Whether a two-candidate group on a photo sheet is refused outright.
+ *
+ * Default ON. This is a tightening: it can only remove values, never add one,
+ * so the safe state is enabled and the flag exists to take it away, which is
+ * the opposite polarity from `MARK_AFFINE_TONE` (a signal change, default off
+ * until it is shown to pay). Set `PHOTO_BINARY_REFUSAL=0` (or `false`/`off`)
+ * to measure with the binary questions auto-filling as they do today; anything
+ * else, including unset, leaves the refusal armed.
+ *
+ * Central measurement wants the pair: the refusal's cost is the binary cells
+ * it gives up, and that number is only readable by running both ways over the
+ * same sheets. Where `process` does not exist at all the refusal is on --
+ * a missing environment is not a reason to loosen a gate.
+ */
+function photoBinaryRefusalEnabled(): boolean {
+  if (typeof process === 'undefined') return true;
+  const raw = process.env?.PHOTO_BINARY_REFUSAL;
+  if (typeof raw !== 'string') return true;
+  const normalized = raw.trim().toLowerCase();
+  return !(normalized === '0' || normalized === 'false' || normalized === 'off');
+}
 
 /**
  * The shape a residual has to have before it counts as a pen mark rather than
@@ -1209,10 +1244,12 @@ export function analyzeChoiceGroup(
   // 351, WRONG 7 unchanged), so it must not run where the failure mode it
   // detects cannot occur.
   //
-  // Two refusals read it now: the band-structure check below, and the raised
-  // floor a two-candidate group answers to (`PHOTO_BINARY_FLOOR`). Both were
-  // measured on photo sheets alone and neither may touch a scan, which is what
-  // keeps the scan baseline byte-identical.
+  // Three refusals read it now: the band-structure check below, the outright
+  // refusal of two-candidate groups (spec §14.1, which supersedes the floor on
+  // the sheets it covers), and the raised floor those groups otherwise answer
+  // to (`PHOTO_BINARY_FLOOR`). All three were measured on photo sheets alone
+  // and none may touch a scan, which is what keeps the scan baseline
+  // byte-identical.
   photoProvenance = false,
 ): ChoiceGroupResult {
   const usesGridCells = candidatePixelOverrides?.length === group.candidates.length;
@@ -1432,6 +1469,46 @@ export function analyzeChoiceGroup(
   if (offRowBand) {
     refused.push('band-structure');
     evidence.band = { ...offRowBand, inks: bandInks as number[] };
+    return {
+      field: group.field,
+      confidence: 'low',
+      candidates,
+      candidateMeasurements,
+      decision: describeDecision(evidence, 'low', refused),
+    };
+  }
+
+  // A two-candidate group on a photo sheet reaches no automatic value at all.
+  //
+  // Spec §14.1: with the affine tone map armed, the binary questions produced
+  // 27 automatic values over the 19 photo sheets, 21 correct and 6 wrong, and
+  // every wrong one was the *other box winning outright* -- not a weak reading
+  // that a floor could cut away. Three features looked like they separated the
+  // two classes at 26 of 27 (blank ink, edgeFraction, bcoreFill) and all three
+  // turned out to be restatements of which position won: the answer key holds
+  // 26 ones against a single zero, and the blank form's ink is fully determined
+  // by position (pos1 0.079-0.090, pos2 0.057-0.069). The rule they encode is
+  // "always answer 1". So no measured per-box feature discriminates, and the
+  // answer is not a better rule but refusal. `WRONG = 0` outranks correct
+  // count; the price is the 21.
+  //
+  // Placed here on purpose: every route that can put a value on the page sits
+  // below it -- the high conjunction, the rescue, and the medium path -- which
+  // is the same set `PHOTO_BINARY_FLOOR` had to cover (it reached the first
+  // through `highScoreThreshold`, the second through `belowPhotoBinaryFloor`,
+  // and the third through `mediumScoreThreshold`). It sits *after* the
+  // band-structure refusal so a group that check already refuses keeps
+  // reporting that reason, with its ink readings, rather than this one.
+  //
+  // It can only take a value away. Nothing below reads it, no threshold moves,
+  // and a group it does not refuse reaches the same tests with the same
+  // numbers. `refused` already carries whichever high-conjunction tests would
+  // have declined anyway, so a trace run can tell a cell this rule really cost
+  // from one that was never going to be filled.
+  //
+  // Photo sheets only, so a scan takes the byte-identical path it took before.
+  if (photoProvenance && group.candidates.length === 2 && photoBinaryRefusalEnabled()) {
+    refused.push('photo-binary-refused');
     return {
       field: group.field,
       confidence: 'low',
@@ -1759,6 +1836,10 @@ function createToneCorrection(
  * evidence of underexposure, refusing binary groups under it, re-cutting the
  * band and binary constants that were calibrated on linear-corrected ink --
  * without rebuilding it. Set MARK_AFFINE_TONE=1 to measure.
+ *
+ * The second of those is now built, and unconditionally rather than only under
+ * this flag: see `photoBinaryRefusalEnabled` and spec §14.1. A two-candidate
+ * photo group is refused whichever tone map it was measured through.
  */
 function affineToneEnabled(): boolean {
   return typeof process !== 'undefined' && Boolean(process.env?.MARK_AFFINE_TONE);
