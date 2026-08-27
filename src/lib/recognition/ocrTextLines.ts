@@ -68,14 +68,22 @@ const MIN_DIGIT_CONFIDENCE = 60;
  * that clears `MIN_DIGIT_CONFIDENCE` still has to clear this before it may
  * reach the draft.
  *
- * This value is a placeholder, not a measurement. This worktree has no scans,
- * no photos and no answer key, so nothing here could separate the wrong read
- * from the right ones. The central checkout calibrates it on the 19-set from
- * the `ageOcrConfidence=` figures this file now records on every trace.
- * `75` is only "above the existing floor of 60, below tesseract's confident
- * range" -- treat any accuracy claim attached to it as unmade.
+ * Calibrated 2026-08-27 on the 19-student photo set (central checkout, the
+ * only place the answer key lives). Every student's age read, beside the key:
+ *
+ *   correct  88.0, 92.0
+ *   wrong    77.0            <- the one wrong value the photo path still had
+ *   refused  0.0 .. 47.0     <- already blank below the existing floor
+ *
+ * 85 sits in that gap: it refuses the 77 read by 10% and still admits both
+ * correct reads. The margin is deliberately lopsided -- losing a correct read
+ * costs a blank, admitting a wrong one is what this project forbids -- so the
+ * accept-side margin is the thinner of the two: 88 clears by only 3.4%.
+ *
+ * n = 3 accepted reads. Re-derive on the next sample (M6); a floor cut from
+ * three points is a starting position, not a settled one.
  */
-export const AGE_OCR_MIN_CONFIDENCE = 75;
+export const AGE_OCR_MIN_CONFIDENCE = 85;
 const MIN_LINE_HEIGHT = 6;
 const GROUP_DISTANCE_PX = 8;
 // Emergency fix (see Task/OCR_ANCHORED_ROW_DETECTION.md cycle 1 feedback): the original
