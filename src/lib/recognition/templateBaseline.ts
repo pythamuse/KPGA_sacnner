@@ -14,6 +14,7 @@ import {
 import {
   buildCagiGridDetection,
   buildSatisfactionGridDetection,
+  completeOverrideOrNull,
 } from './tableGridDetection';
 import { detectBlankBasicCheckboxes } from './basicCheckboxDetection';
 
@@ -67,9 +68,14 @@ async function createBlankFormBaseline(formType: FormType): Promise<BlankFormBas
   return {
     image,
     fieldRects: grid.fieldRects,
+    // An incomplete grid override is discarded rather than carried: the
+    // scorer pairs baseline rect `i` with page rect `i`, and it silently
+    // abandons the whole baseline comparison when the two sets disagree in
+    // length. See `completeOverrideOrNull`.
     candidateRects: Object.fromEntries(template.choiceGroups.map((group) => [
       group.field,
-      grid.overrides[group.field] || buildTemplateCandidateRects(image, group),
+      completeOverrideOrNull(grid.overrides[group.field], group.candidates.length)
+        || buildTemplateCandidateRects(image, group),
     ])),
     ...(basicCheckboxes ? { basicCheckboxCandidateRects: basicCheckboxes.candidateRects } : {}),
   };

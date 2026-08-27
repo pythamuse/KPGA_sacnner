@@ -21,6 +21,7 @@ import {
 import {
   buildCagiGridDetection,
   buildSatisfactionGridDetection,
+  completeOverrideOrNull,
   type FieldRegistration,
   type GridDetectionResult,
   type RegistrationStatus,
@@ -206,14 +207,20 @@ export async function recognizeStudentForms(
     }
 
     for (const group of cagiTemplate.choiceGroups) {
-      const gridCells = cagiGridOverrides[group.field];
+      // Read once, through the completeness guard, so the crop source, the
+      // scoring geometry and the automatic-value precondition below all see
+      // the same discarded/kept decision.
+      const detectedGridCells = cagiGridOverrides[group.field];
+      const gridCells = completeOverrideOrNull(detectedGridCells, group.candidates.length) ?? undefined;
       const rowOverride = cagiRowOverrides[group.field];
       const registration = cagiGridDetection.registrations[group.field];
       const cropSource = resolveRecognitionCropSource(gridCells, rowOverride, registration);
       recognitionCropSource[group.field] = cropSource;
       const cropDiagnostic = resolveRecognitionCropDiagnostic(
         cropSource,
-        registration?.diagnostic || cagiGridDetection.diagnostics?.[group.field],
+        describeIncompleteGridOverride(detectedGridCells, gridCells, group)
+          || registration?.diagnostic
+          || cagiGridDetection.diagnostics?.[group.field],
         cagiRowDetection.diagnostics?.[group.field],
       );
       if (cropDiagnostic) {
@@ -245,8 +252,10 @@ export async function recognizeStudentForms(
       const displayCells = scoringCells;
       recognitionCandidateRects[group.field] = displayCells;
       recognitionCropRects[group.field] = unionPixelRects(displayCells);
-      if (gridCells && scoringCells !== gridCells) {
-        recognitionRejectedCandidateRects[group.field] = gridCells;
+      // `detectedGridCells`, not `gridCells`: a set discarded for being
+      // incomplete is still evidence worth drawing in the debug overlay.
+      if (detectedGridCells && scoringCells !== detectedGridCells) {
+        recognitionRejectedCandidateRects[group.field] = detectedGridCells;
       }
 
       // A candidate grid may contribute only its observed column positions to
@@ -377,14 +386,18 @@ export async function recognizeStudentForms(
     }
 
     for (const group of satisfactionTemplate.choiceGroups) {
-      const gridCells = satisfactionGridOverrides[group.field];
+      // Same single guarded read as the CAGI loop above.
+      const detectedGridCells = satisfactionGridOverrides[group.field];
+      const gridCells = completeOverrideOrNull(detectedGridCells, group.candidates.length) ?? undefined;
       const rowOverride = satisfactionRowOverrides[group.field];
       const registration = satisfactionGridDetection.registrations[group.field];
       const cropSource = resolveRecognitionCropSource(gridCells, rowOverride, registration);
       recognitionCropSource[group.field] = cropSource;
       const cropDiagnostic = resolveRecognitionCropDiagnostic(
         cropSource,
-        registration?.diagnostic || satisfactionGridDetection.diagnostics?.[group.field],
+        describeIncompleteGridOverride(detectedGridCells, gridCells, group)
+          || registration?.diagnostic
+          || satisfactionGridDetection.diagnostics?.[group.field],
         satisfactionRowDetection.diagnostics?.[group.field],
       );
       if (cropDiagnostic) {
@@ -402,8 +415,9 @@ export async function recognizeStudentForms(
       const displayCells = scoringCells;
       recognitionCandidateRects[group.field] = displayCells;
       recognitionCropRects[group.field] = unionPixelRects(displayCells);
-      if (gridCells && scoringCells !== gridCells) {
-        recognitionRejectedCandidateRects[group.field] = gridCells;
+      // `detectedGridCells`, not `gridCells`: see the CAGI loop above.
+      if (detectedGridCells && scoringCells !== detectedGridCells) {
+        recognitionRejectedCandidateRects[group.field] = detectedGridCells;
       }
 
       const verifiedGridCells = isVerifiedGrid(registration) ? gridCells : undefined;
@@ -640,6 +654,25 @@ export function resolveRecognitionCropSource(
   if (isVerifiedGrid(registration) && gridCells) return 'grid';
   if (rowOverride) return gridCells ? 'row-fallback' : 'row';
   return 'fixed';
+}
+
+/**
+ * Bookkeeping for the completeness guard: says so, in the reviewer's crop
+ * diagnostic, when a grid override was thrown away for holding the wrong
+ * number of cells. Returns undefined when nothing was discarded, so the
+ * existing registration/grid diagnostics keep their place.
+ */
+function describeIncompleteGridOverride(
+  detectedGridCells: PixelRect[] | undefined,
+  keptGridCells: PixelRect[] | undefined,
+  group: ChoiceGroup,
+): string | undefined {
+  if (!detectedGridCells || keptGridCells) {
+    return undefined;
+  }
+
+  return `Grid override discarded: it holds ${detectedGridCells.length} candidate cells for a `
+    + `${group.candidates.length}-choice question, so the measured template coordinates were used instead.`;
 }
 
 export function resolveRecognitionCropDiagnostic(
@@ -960,6 +993,9 @@ function evaluateDirectCheckboxEvidence(
  * Keeps score calculation, inline ROI, and the debug overlay on the same
  * geometry. A rejected grid is evidence only; a detected response row is a
  * better fallback than returning to the full-page normalized template.
+ *
+ * A grid cell set that does not cover the group's choices one-for-one is
+ * treated here as no grid at all -- see `completeOverrideOrNull`.
  */
 export function resolveScoringCells(
   image: Pick<ImageAnalysisData, 'width' | 'height' | 'contentBounds'>,
@@ -968,7 +1004,8 @@ export function resolveScoringCells(
   rowOverride?: { top: number; bottom: number },
   registration?: FieldRegistration,
 ): PixelRect[] {
-  if (isVerifiedGrid(registration) && gridCells) return gridCells;
+  const completeGridCells = completeOverrideOrNull(gridCells, group.candidates.length);
+  if (isVerifiedGrid(registration) && completeGridCells) return completeGridCells;
   if (rowOverride) return buildRowFallbackCandidateRects(image, group, rowOverride);
   return buildFixedTemplateCandidateRects(image, group);
 }
