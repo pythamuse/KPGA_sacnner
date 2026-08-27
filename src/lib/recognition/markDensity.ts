@@ -1740,6 +1740,30 @@ function createToneCorrection(
  * those mean the same thing downstream: every box computes its own shift, as
  * it did before this existed.
  */
+/**
+ * Off by default -- the affine map is measured, kept, and NOT shipped.
+ *
+ * On the 19-student photo set it recovered a great deal of signal that the
+ * linear shift was destroying (auto-filled correct cells 59 -> 122, blanks
+ * 392 -> 322), which is the direction §12.2 predicted. It also produced eight
+ * wrong values where there had been none, and those cannot be gated away with
+ * what the scorer currently measures: six are binary questions where the wrong
+ * box simply won (got 0, key says 1) with scores 0.044-0.154 fully interleaved
+ * with the correct reads' 0.043-0.226, and one fills `p3 basic.gender`, a cell
+ * the key marks blank -- the failure CLAUDE.md §3 puts above every other
+ * number. §5.4 rejects a change that raises wrong values however far correct
+ * ones rise, so the shipped path stays on the linear shift.
+ *
+ * The code stays behind this flag as a neutral instrument (CLAUDE.md §1.4's
+ * second exception) so the next cycle can measure variants -- gating the map on
+ * evidence of underexposure, refusing binary groups under it, re-cutting the
+ * band and binary constants that were calibrated on linear-corrected ink --
+ * without rebuilding it. Set MARK_AFFINE_TONE=1 to measure.
+ */
+function affineToneEnabled(): boolean {
+  return typeof process !== 'undefined' && Boolean(process.env?.MARK_AFFINE_TONE);
+}
+
 function createGroupToneCorrection(
   image: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>,
   actualRects: PixelRect[],
@@ -1747,6 +1771,9 @@ function createGroupToneCorrection(
   baselineRects: PixelRect[],
   photoProvenance: boolean,
 ): ToneCorrection | undefined {
+  if (!affineToneEnabled()) {
+    return undefined;
+  }
   if (!photoProvenance || actualRects.length === 0 || actualRects.length !== baselineRects.length) {
     return undefined;
   }

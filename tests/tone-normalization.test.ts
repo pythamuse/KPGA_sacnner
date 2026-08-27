@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import {
   analyzeChoiceGroup,
   ImageAnalysisData,
@@ -366,6 +366,14 @@ function analyzeUnderexposedSheet(photoProvenance: boolean, printColumns = boxes
 }
 
 describe('analyzeChoiceGroup -- the correction where it is actually applied', () => {
+  // The affine map is measured but not shipped: it recovered 59 -> 122 correct
+  // cells on the 19-student photo set and produced eight wrong values where
+  // there had been none, so §5.4 keeps it off the shipped path (see the flag's
+  // comment in markDensity.ts). These cases exercise the instrument, so they
+  // arm it explicitly rather than depending on a default that must stay off.
+  beforeEach(() => { process.env.MARK_AFFINE_TONE = '1'; });
+  afterEach(() => { delete process.env.MARK_AFFINE_TONE; });
+
   it('recovers the mark on a photo sheet the shift reads as empty', () => {
     const result = analyzeUnderexposedSheet(true);
 
