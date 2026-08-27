@@ -1,4 +1,5 @@
-import { evaluateQuad, orderQuadPoints, type Point, type QuadQuality } from './perspectiveCorrect';
+import { orderQuadPoints, type Point, type QuadRejection } from './perspectiveCorrect';
+import { detectDocumentQuadFromMat } from './detectDocumentQuad';
 
 const OPENCV_SCRIPT_URL = 'https://docs.opencv.org/4.9.0/opencv.js';
 
@@ -35,6 +36,7 @@ type CorrectResponse =
     ok: false;
     confidence: number;
     reason: 'no-document' | 'low-confidence' | 'worker-error';
+    rejection?: QuadRejection | null;
   };
 
 const workerSelf = self as unknown as {
@@ -93,123 +95,6 @@ function loadOpenCvInWorker(): Promise<OpenCvBox> {
   });
 
   return openCvPromise;
-}
-
-function detectDocumentQuadFromMat(
-  cv: any,
-  source: any,
-  imageWidth: number,
-  imageHeight: number,
-  expectedAspectRatio: number,
-): QuadQuality | null {
-  const gray = new cv.Mat();
-  const blurred = new cv.Mat();
-  const detectionMaps: any[] = [];
-
-  try {
-    cv.cvtColor(source, gray, cv.COLOR_RGBA2GRAY);
-    cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
-
-    for (const thresholds of [[50, 150], [85, 220]]) {
-      const edges = new cv.Mat();
-      cv.Canny(blurred, edges, thresholds[0], thresholds[1]);
-      detectionMaps.push(edges);
-    }
-
-    try {
-      const adaptive = new cv.Mat();
-      cv.adaptiveThreshold(
-        gray,
-        adaptive,
-        255,
-        cv.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv.THRESH_BINARY_INV,
-        31,
-        11,
-      );
-      detectionMaps.push(adaptive);
-    } catch {
-      // Older OpenCV.js builds may not expose adaptiveThreshold in the Worker.
-    }
-
-    let best: QuadQuality | null = null;
-    for (const detectionMap of detectionMaps) {
-      const candidate = findBestQuadFromMap(
-        cv,
-        detectionMap,
-        imageWidth,
-        imageHeight,
-        expectedAspectRatio,
-      );
-
-      if (!best || (candidate && candidate.confidence > best.confidence)) {
-        best = candidate;
-      }
-    }
-
-    return best;
-  } finally {
-    detectionMaps.forEach((detectionMap) => detectionMap.delete());
-    blurred.delete();
-    gray.delete();
-  }
-}
-
-function findBestQuadFromMap(
-  cv: any,
-  detectionMap: any,
-  imageWidth: number,
-  imageHeight: number,
-  expectedAspectRatio: number,
-): QuadQuality | null {
-  const contours = new cv.MatVector();
-  const hierarchy = new cv.Mat();
-  let best: QuadQuality | null = null;
-
-  try {
-    cv.findContours(detectionMap, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
-
-    for (let i = 0; i < contours.size(); i++) {
-      const contour = contours.get(i);
-
-      try {
-        const perimeter = cv.arcLength(contour, true);
-        for (const epsilonRatio of [0.015, 0.02, 0.03]) {
-          const approx = new cv.Mat();
-
-          try {
-            cv.approxPolyDP(contour, approx, perimeter * epsilonRatio, true);
-
-            if (approx.rows !== 4 || !cv.isContourConvex(approx)) {
-              continue;
-            }
-
-            const points: Point[] = [];
-            for (let pointIndex = 0; pointIndex < 4; pointIndex++) {
-              points.push({
-                x: approx.data32S[pointIndex * 2],
-                y: approx.data32S[pointIndex * 2 + 1],
-              });
-            }
-
-            const quality = evaluateQuad(points, imageWidth, imageHeight, expectedAspectRatio);
-            if (quality && (!best || quality.confidence > best.confidence)) {
-              best = quality;
-            }
-          } finally {
-            approx.delete();
-          }
-        }
-      } finally {
-        contour.delete();
-      }
-    }
-
-    return best;
-  } finally {
-    hierarchy.delete();
-    contours.delete();
-  }
 }
 
 async function warpToBlob(
@@ -296,12 +181,12 @@ async function detectAndWarp(
   minimumConfidence: number,
 ): Promise<
   | { found: true; blob: Blob; confidence: number; method: 'perspective' }
-  | { found: false; confidence: number; reason: 'no-document' | 'low-confidence' }
+  | { found: false; confidence: number; reason: 'no-document' | 'low-confidence'; rejection?: QuadRejection | null }
 > {
   const source = cv.matFromImageData(imageData);
 
   try {
-    const quality = detectDocumentQuadFromMat(
+    const { quality, rejection } = detectDocumentQuadFromMat(
       cv,
       source,
       imageData.width,
@@ -321,7 +206,10 @@ async function detectAndWarp(
     // horizontal edges, and rotating/resizing from those untrusted lines can
     // turn an inner table into a page-sized image that pollutes form typing.
     if (!quality) {
-      return { found: false, confidence: 0, reason: 'no-document' };
+      // `rejection` names what a person can change -- the sheet ran off the
+      // frame, it is too far away, it is not page-shaped. Collapsing all three
+      // into `no-document` is what left the panel with nothing to say.
+      return { found: false, confidence: 0, reason: 'no-document', rejection };
     }
 
     return { found: false, confidence: quality.confidence, reason: 'low-confidence' };
@@ -361,6 +249,7 @@ workerSelf.onmessage = (event) => {
           ok: false,
           confidence: result.confidence,
           reason: result.reason,
+          rejection: 'rejection' in result ? result.rejection ?? null : null,
         });
         return;
       }

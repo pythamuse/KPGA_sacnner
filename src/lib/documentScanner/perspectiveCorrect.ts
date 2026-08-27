@@ -113,19 +113,41 @@ const PAGE_ASPECT_TOLERANCE = 1.25;
 // anyway.
 const MIN_FRAME_MARGIN = 0.02;
 
-export function evaluateQuad(
+// Nearly 3x above the largest printed cluster that shares the page aspect.
+const MIN_PAGE_COVERAGE = 0.6;
+
+/**
+ * Why a candidate was refused, when it was.
+ *
+ * The detector used to collapse every refusal into one `no-document`, which is
+ * true and useless: it cannot tell someone holding a phone whether to step
+ * closer, straighten up, or fit the whole sheet in. These are ordered by how
+ * actionable they are, and the detector keeps the most actionable one it saw.
+ */
+export type QuadRejection =
+  | 'not-a-quad'
+  | 'cropped'
+  | 'too-small'
+  | 'wrong-shape';
+
+export interface QuadEvaluation {
+  quality: QuadQuality | null;
+  rejection: QuadRejection | null;
+}
+
+export function evaluateQuadDetailed(
   points: Point[],
   imageWidth: number,
   imageHeight: number,
   expectedAspectRatio: number,
-): QuadQuality | null {
+): QuadEvaluation {
   if (points.length !== 4 || imageWidth <= 0 || imageHeight <= 0 || expectedAspectRatio <= 0) {
-    return null;
+    return { quality: null, rejection: 'not-a-quad' };
   }
 
   const ordered = orderQuadPoints(points);
   if (!isConvexQuad(ordered)) {
-    return null;
+    return { quality: null, rejection: 'not-a-quad' };
   }
 
   const [topLeft, topRight, bottomRight, bottomLeft] = ordered;
@@ -137,19 +159,16 @@ export function evaluateQuad(
   const averageHeight = (leftHeight + rightHeight) / 2;
 
   if (averageWidth <= 0 || averageHeight <= 0) {
-    return null;
+    return { quality: null, rejection: 'not-a-quad' };
   }
 
-  // A form table can also produce a clean convex quadrilateral. It must be
-  // large enough to plausibly be the page before it is allowed to drive a
-  // perspective warp. Otherwise an inner table may be stretched into a
-  // page-sized image and later confuse the server-side form classifier.
   const left = Math.min(...ordered.map((point) => point.x));
   const right = Math.max(...ordered.map((point) => point.x));
   const top = Math.min(...ordered.map((point) => point.y));
   const bottom = Math.max(...ordered.map((point) => point.y));
   const widthCoverage = (right - left) / imageWidth;
   const heightCoverage = (bottom - top) / imageHeight;
+  const aspectRatio = averageHeight / averageWidth;
 
   // What this gate is for: a printed table inside the form can also produce a
   // clean convex quadrilateral, and warping one into a page-sized image would
@@ -157,32 +176,39 @@ export function evaluateQuad(
   //
   // It used to do that with size alone, at 0.70 wide by 0.78 tall. Measured
   // against the forms themselves, that was about three times stricter than the
-  // job needs on one axis -- and it was rejecting real pages. On ten sample photos the
+  // job needs -- and it was rejecting real pages. On ten sample photos the
   // largest printed cluster that shares the page's aspect is the CAGI answer
   // column at 0.21 x 0.21, while the page quads the detector actually found
   // ranged from 0.60 x 0.58 to 0.84 x 0.88. Five of ten pages failed the old
   // floor and were reported `no-document`; the panel then uploaded the
   // unrectified photo, which scored CORRECT 8 / WRONG 13 against the key.
   //
-  // So the floor moves down to where it still clears the largest same-aspect
-  // table by nearly 3x, and the shape test the old rule lacked is added
-  // beside it: the quad must also be page-shaped. That pair excludes every
-  // printed cluster on both forms -- the CAGI answer column on size, the CAGI
-  // basic block (aspect 0.19) and the satisfaction answer block (aspect 2.10)
-  // on shape. Nine of the ten photos now rectify; the tenth fills only 58% of
-  // the frame height, which is a capture problem and stays refused.
-  const aspectRatio = averageHeight / averageWidth;
+  // So the floor sits where it still clears the largest same-aspect table by
+  // nearly 3x, and the shape test the old rule lacked is added beside it: the
+  // quad must also be page-shaped. That pair excludes every printed cluster on
+  // both forms -- the CAGI answer column on size, the CAGI basic block
+  // (aspect 0.19) and the satisfaction answer block (aspect 2.10) on shape.
+  //
+  // A quad flush against the frame edge is checked first, because it is the one
+  // a person can act on without ambiguity: the sheet ran off the photo.
   if (
-    widthCoverage < 0.6 ||
-    heightCoverage < 0.6 ||
     left < imageWidth * MIN_FRAME_MARGIN ||
     right > imageWidth * (1 - MIN_FRAME_MARGIN) ||
     top < imageHeight * MIN_FRAME_MARGIN ||
-    bottom > imageHeight * (1 - MIN_FRAME_MARGIN) ||
+    bottom > imageHeight * (1 - MIN_FRAME_MARGIN)
+  ) {
+    return { quality: null, rejection: 'cropped' };
+  }
+
+  if (widthCoverage < MIN_PAGE_COVERAGE || heightCoverage < MIN_PAGE_COVERAGE) {
+    return { quality: null, rejection: 'too-small' };
+  }
+
+  if (
     aspectRatio < expectedAspectRatio / PAGE_ASPECT_TOLERANCE ||
     aspectRatio > expectedAspectRatio * PAGE_ASPECT_TOLERANCE
   ) {
-    return null;
+    return { quality: null, rejection: 'wrong-shape' };
   }
 
   const areaRatio = polygonArea(ordered) / (imageWidth * imageHeight);
@@ -218,13 +244,25 @@ export function evaluateQuad(
   );
 
   return {
-    points: ordered,
-    areaRatio,
-    aspectRatio,
-    confidence,
-    angleScore,
-    edgeConsistency,
+    quality: {
+      points: ordered,
+      areaRatio,
+      aspectRatio,
+      confidence,
+      angleScore,
+      edgeConsistency,
+    },
+    rejection: null,
   };
+}
+
+export function evaluateQuad(
+  points: Point[],
+  imageWidth: number,
+  imageHeight: number,
+  expectedAspectRatio: number,
+): QuadQuality | null {
+  return evaluateQuadDetailed(points, imageWidth, imageHeight, expectedAspectRatio).quality;
 }
 
 function isConvexQuad(points: Point[]): boolean {

@@ -29,9 +29,12 @@ const OUT = process.env.PROBE_OUT || path.join(os.tmpdir(), 'photo-accuracy.txt'
 const KEY_PATH = process.env.REAL_SCAN_ANSWER_KEY
   || path.join(process.cwd(), 'local-scans', 'answer-key.json');
 
+// Numeric, not lexicographic. A plain sort puts p10 second and p2 twelfth, so
+// every student is scored against the wrong key row -- the run still prints a
+// tidy table and every number in it is wrong.
 const listImages = (dir: string) => fs.readdirSync(dir)
   .filter((f) => /\.(jpe?g|png)$/i.test(f))
-  .sort();
+  .sort((a, b) => Number(/([0-9]+)/.exec(a)?.[1] ?? 0) - Number(/([0-9]+)/.exec(b)?.[1] ?? 0));
 
 describe.skipIf(!CAGI_DIR || !SAT_DIR)('photo accuracy probe', () => {
   it('scores recognised photo values against the answer key', async () => {
