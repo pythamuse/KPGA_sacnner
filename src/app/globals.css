@@ -408,20 +408,106 @@ select {
   height: 100%;
   min-height: 320px;
   display: block;
-  object-fit: cover;
+  /*
+   * `contain`, not `cover`. Coverage and margin are judged against the video
+   * FRAME, so under `cover` the gate reads strips of the frame the user cannot
+   * see and refuses shots that look perfectly framed on screen. Letterboxing
+   * is the price of "what you see is what is detected"
+   * (Task/CAPTURE_GUIDANCE_2026-08-27.md §4.2). The live overlay's coordinate
+   * mapping is passed 'contain' to match; the two must be changed together.
+   */
+  object-fit: contain;
+  background: #111111;
 }
 
-.camera-live-overlay {
+.capture-guide-svg {
   position: absolute;
-  inset: 18px;
-  border: 2px dashed rgba(255, 255, 255, 0.86);
-  display: grid;
-  place-items: center;
-  color: #ffffff;
-  font-size: 18px;
-  font-weight: 800;
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.55);
+  inset: 0;
+  width: 100%;
+  height: 100%;
   pointer-events: none;
+}
+
+.capture-status {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  border: 2px solid rgba(156, 163, 175, 0.9);
+  background: rgba(17, 17, 17, 0.78);
+  color: #ffffff;
+  pointer-events: none;
+}
+
+.capture-status-mark {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #9ca3af;
+}
+
+.capture-status-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.capture-status-body strong {
+  font-size: 15px;
+  font-weight: 800;
+  line-height: 1.35;
+}
+
+.capture-status-body em {
+  font-style: normal;
+  font-size: 12px;
+  line-height: 1.4;
+  color: rgba(255, 255, 255, 0.78);
+}
+
+/* Never colour alone: the border weight and the mark's shape change too. */
+.capture-status-adjust {
+  border-color: #f59e0b;
+  border-width: 3px;
+}
+
+.capture-status-adjust .capture-status-mark {
+  background: #f59e0b;
+  border-radius: 2px;
+}
+
+.capture-status-ready {
+  border-color: #22c55e;
+  border-width: 4px;
+}
+
+.capture-status-ready .capture-status-mark {
+  background: #22c55e;
+  border-radius: 2px;
+  transform: rotate(45deg);
+}
+
+.capture-action-ready {
+  box-shadow: 0 0 0 4px rgba(34, 197, 94, 0.35);
+  animation: capture-ready-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes capture-ready-pulse {
+  0%, 100% { box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.28); }
+  50% { box-shadow: 0 0 0 8px rgba(34, 197, 94, 0.12); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .capture-action-ready {
+    animation: none;
+  }
 }
 
 .camera-live-layout ul {

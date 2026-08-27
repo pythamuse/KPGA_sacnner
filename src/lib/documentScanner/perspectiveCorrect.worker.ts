@@ -61,10 +61,40 @@ type WorkerRequest =
      * later track (spec §5.1 T4).
      */
     formType?: 'cagi' | 'satisfaction';
+  }
+  | {
+    /**
+     * Live capture guidance (CAPTURE_GUIDANCE §7). Deliberately the cheapest
+     * thing this worker can do: quad detection on an already-small frame and
+     * nothing else -- no ORB (~150ms at detection scale), no warp, no blob,
+     * no full-resolution Mat. The client sends a frame whose long side is
+     * already the live budget, so this handler never resizes either.
+     */
+    type: 'detect';
+    requestId: string;
+    imageData: ImageData;
+    expectedAspectRatio: number;
   };
+
+/** The subset of QuadQuality the live overlay needs; see the client's mirror. */
+interface LiveQuadQuality {
+  points: Point[];
+  confidence: number;
+  edgeConsistency: number;
+  aspectRatio: number;
+}
 
 type CorrectResponse =
   | { type: 'ready'; requestId: string }
+  | {
+    type: 'detect-result';
+    requestId: string;
+    quality: LiveQuadQuality | null;
+    rejection: QuadRejection | null;
+    /** Dimensions the points are expressed in -- the frame as received. */
+    width: number;
+    height: number;
+  }
   | {
     type: 'result';
     requestId: string;
@@ -410,9 +440,46 @@ async function detectAndWarp(
   }
 }
 
+/** Quad detection only, on the frame exactly as received. */
+function detectOnly(
+  cv: any,
+  imageData: ImageData,
+  expectedAspectRatio: number,
+): { quality: LiveQuadQuality | null; rejection: QuadRejection | null } {
+  const source = cv.matFromImageData(imageData);
+
+  try {
+    const { quality, rejection } = detectDocumentQuadFromMat(
+      cv,
+      source,
+      imageData.width,
+      imageData.height,
+      expectedAspectRatio,
+    );
+
+    if (!quality) {
+      return { quality: null, rejection };
+    }
+
+    // Only the four fields the overlay reads cross the wire; `areaRatio` and
+    // `angleScore` would just be copied 5x a second for nobody.
+    return {
+      quality: {
+        points: quality.points,
+        confidence: quality.confidence,
+        edgeConsistency: quality.edgeConsistency,
+        aspectRatio: quality.aspectRatio,
+      },
+      rejection: null,
+    };
+  } finally {
+    source.delete();
+  }
+}
+
 workerSelf.onmessage = (event) => {
   const message = event.data;
-  if (!message || (message.type !== 'correct' && message.type !== 'warmup')) {
+  if (!message || (message.type !== 'correct' && message.type !== 'warmup' && message.type !== 'detect')) {
     return;
   }
 
@@ -422,6 +489,19 @@ workerSelf.onmessage = (event) => {
 
       if (message.type === 'warmup') {
         workerSelf.postMessage({ type: 'ready', requestId: message.requestId });
+        return;
+      }
+
+      if (message.type === 'detect') {
+        const detection = detectOnly(cv, message.imageData, message.expectedAspectRatio);
+        workerSelf.postMessage({
+          type: 'detect-result',
+          requestId: message.requestId,
+          quality: detection.quality,
+          rejection: detection.rejection,
+          width: message.imageData.width,
+          height: message.imageData.height,
+        });
         return;
       }
 
@@ -458,6 +538,20 @@ workerSelf.onmessage = (event) => {
         registration: result.registration,
       });
     } catch {
+      if (message.type === 'detect') {
+        // A failed live frame is not an error the user should see: report
+        // "nothing found" and let the next frame try again.
+        workerSelf.postMessage({
+          type: 'detect-result',
+          requestId: message.requestId,
+          quality: null,
+          rejection: null,
+          width: 0,
+          height: 0,
+        });
+        return;
+      }
+
       workerSelf.postMessage({
         type: 'result',
         requestId: message.requestId,
