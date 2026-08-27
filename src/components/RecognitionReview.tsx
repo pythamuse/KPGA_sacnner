@@ -1,5 +1,9 @@
 import React from 'react';
 import { RecognitionDraft, type RecognitionValueSource } from '../lib/recognition/detectCheckmarks';
+import {
+  buildSheetQualityBadges,
+  type SheetQualityLevel,
+} from '../lib/recognition/sheetQualityDisplay';
 import { ValidationError } from '../lib/validation/types';
 
 interface RecognitionReviewProps {
@@ -28,6 +32,16 @@ const confidenceRank = {
   high: 0,
   medium: 1,
   low: 2,
+};
+
+/**
+ * Same three-step palette the confidence badges use, so a capture verdict and
+ * a field confidence read on the same scale (spec F3 — reviewer signal only).
+ */
+const sheetQualityBadgeStyle: Record<SheetQualityLevel, { border: string; text: string; bg: string }> = {
+  good: { border: '#bfe3d2', text: 'var(--success)', bg: 'var(--success-bg)' },
+  'retake-suggested': { border: '#f5d29a', text: 'var(--warning)', bg: 'var(--warning-bg)' },
+  unusable: { border: '#f0b7b2', text: 'var(--error)', bg: 'var(--error-bg)' },
 };
 
 const cropSourceLabel = {
@@ -787,6 +801,90 @@ export default function RecognitionReview({
     );
   };
 
+  /**
+   * Per-sheet capture verdict strip (spec F3).
+   *
+   * The reviewer's first question about a wrong-looking student is whether the
+   * photo was any good, and until now the answer only existed at upload time,
+   * on a screen they had already left. This shows the same verdict the upload
+   * panel showed, in the same words, next to the values it produced -- and it
+   * marks a sheet the user pushed past a retake prompt (F2.3), because that is
+   * the sheet whose values deserve a second look.
+   *
+   * Display only. It reads the draft's attachment and nothing else; no value,
+   * gate, or threshold is touched.
+   */
+  const renderSheetQuality = () => {
+    const badges = buildSheetQualityBadges(draft.sheetQuality);
+    // Nothing measured -- an old draft, or a scan that carries no capture
+    // metadata. An empty strip is the honest rendering: absence must not read
+    // as a passing verdict.
+    if (badges.length === 0) return null;
+
+    const worst = badges.some((badge) => badge.level === 'unusable') ? 'unusable'
+      : badges.some((badge) => badge.level === 'retake-suggested') ? 'retake-suggested'
+        : 'good';
+
+    // `notice` is amber and `error-box` is red, and on this screen both mean
+    // "there is something here for you". An all-clear verdict in an amber box
+    // would say the opposite of what it means, so it gets the same neutral
+    // surface a settled field card uses.
+    const neutralBox: React.CSSProperties = {
+      border: '1px solid var(--border-subtle)',
+      background: 'var(--surface-muted)',
+      borderRadius: 8,
+      padding: '14px 16px',
+      fontSize: 14,
+      lineHeight: 1.55,
+    };
+
+    return (
+      <div
+        className={worst === 'unusable' ? 'error-box' : worst === 'retake-suggested' ? 'notice' : undefined}
+        role="status"
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 8,
+          ...(worst === 'good' ? neutralBox : {}),
+        }}
+      >
+        <strong>촬영 상태 판정</strong>
+        {badges.map((badge) => {
+          const style = sheetQualityBadgeStyle[badge.level];
+          return (
+            <div
+              key={badge.side}
+              style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}
+            >
+              <span style={{ fontWeight: 700, whiteSpace: 'nowrap' }}>{badge.sideLabel}</span>
+              <span
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  minHeight: 24,
+                  padding: '2px 8px',
+                  borderRadius: 999,
+                  border: `1px solid ${style.border}`,
+                  color: style.text,
+                  background: style.bg,
+                  fontSize: 12,
+                  fontWeight: 700,
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {badge.label}
+              </span>
+              {badge.hint && (
+                <span style={{ color: 'var(--text-muted)', fontSize: 13 }}>{badge.hint}</span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
   const formatPercent = (value?: number) => value === undefined
     ? '-'
     : `${value >= 0 ? '+' : ''}${Math.round(value * 100)}%`;
@@ -952,6 +1050,8 @@ export default function RecognitionReview({
           </span>
         </div>
       )}
+
+      {renderSheetQuality()}
 
       {attentionFields.length > 0 && (
         <div
