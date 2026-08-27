@@ -1,4 +1,5 @@
 import type { QuadRejection } from './perspectiveCorrect';
+import type { LiveQuadQuality } from './captureGuidance';
 
 export type PerspectiveCorrectionReason =
   | 'no-document'
@@ -48,10 +49,25 @@ type WorkerRequest =
     minimumConfidence: number;
     /** Selects the ORB template; omitted by legacy call sites (quad-only behavior). */
     formType?: 'cagi' | 'satisfaction';
+  }
+  | {
+    /** Live guidance frame: quad detection only (CAPTURE_GUIDANCE §7). */
+    type: 'detect';
+    requestId: string;
+    imageData: ImageData;
+    expectedAspectRatio: number;
   };
 
 type WorkerResponse =
   | { type: 'ready'; requestId: string }
+  | {
+    type: 'detect-result';
+    requestId: string;
+    quality: LiveQuadQuality | null;
+    rejection: QuadRejection | null;
+    width: number;
+    height: number;
+  }
   | {
     type: 'result';
     requestId: string;
@@ -153,7 +169,10 @@ function getWorker(): Worker | null {
 
   worker.addEventListener('message', (event: MessageEvent<WorkerResponse>) => {
     const message = event.data;
-    if (!message || (message.type !== 'ready' && message.type !== 'result')) {
+    if (
+      !message ||
+      (message.type !== 'ready' && message.type !== 'result' && message.type !== 'detect-result')
+    ) {
       return;
     }
 
@@ -168,14 +187,39 @@ function getWorker(): Worker | null {
   return worker;
 }
 
+/**
+ * What a timeout means.
+ *
+ * `terminate` is the original behavior and stays the default: a correction
+ * that never came back has left the worker in an unknown state, and the panel
+ * is about to show a retake prompt anyway.
+ *
+ * `abandon` exists for the live guidance loop. Killing the shared worker
+ * because one preview frame ran long would also kill an in-flight correction
+ * and force the next frame to re-import the 10MB OpenCV build -- a stall that
+ * is far worse than the dropped frame it was reacting to. The request is
+ * simply forgotten; a late reply finds no entry and is ignored.
+ */
+type TimeoutPolicy = 'terminate' | 'abandon';
+
 function requestWorker(
   worker: Worker,
   message: WorkerRequest,
   timeoutMs: number,
   transfer?: Transferable[],
+  onTimeout: TimeoutPolicy = 'terminate',
 ): Promise<WorkerResponse | null> {
   return new Promise((resolve) => {
     const timeoutId = setTimeout(() => {
+      if (onTimeout === 'abandon') {
+        const request = inFlightRequests.get(message.requestId);
+        if (request) {
+          inFlightRequests.delete(message.requestId);
+          request.resolve(null);
+        }
+        return;
+      }
+
       terminateWorker(worker);
     }, timeoutMs);
 
@@ -287,6 +331,68 @@ export async function correctImageInWorkerDetailed(
     confidence: response.confidence,
     blob: response.blob,
     registration: response.registration ?? emptyRegistration(),
+  };
+}
+
+/** Reply shape of a live guidance frame; points are in `width` x `height`. */
+export interface LiveQuadDetection {
+  quality: LiveQuadQuality | null;
+  rejection: QuadRejection | null;
+  width: number;
+  height: number;
+}
+
+/**
+ * One live guidance frame (CAPTURE_GUIDANCE §7).
+ *
+ * `source` must ALREADY be the small detection frame -- the worker does not
+ * resize for this path, and the whole point of the live budget is that the
+ * pixels never get large. Returns null when the worker is unavailable, the
+ * frame is unreadable, or the request timed out; the caller drops that frame
+ * and asks again rather than showing an error.
+ */
+export async function detectQuadInWorker(
+  source: HTMLCanvasElement,
+  expectedAspectRatio: number,
+  timeoutMs = 1200,
+): Promise<LiveQuadDetection | null> {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+
+  const worker = getWorker();
+  if (!worker) {
+    return null;
+  }
+
+  const context = source.getContext('2d');
+  if (!context || source.width <= 0 || source.height <= 0) {
+    return null;
+  }
+
+  let imageData: ImageData;
+  try {
+    imageData = context.getImageData(0, 0, source.width, source.height);
+  } catch {
+    return null;
+  }
+
+  const response = await requestWorker(worker, {
+    type: 'detect',
+    requestId: createRequestId(),
+    imageData,
+    expectedAspectRatio,
+  }, timeoutMs, [imageData.data.buffer], 'abandon');
+
+  if (!response || response.type !== 'detect-result') {
+    return null;
+  }
+
+  return {
+    quality: response.quality,
+    rejection: response.rejection,
+    width: response.width,
+    height: response.height,
   };
 }
 

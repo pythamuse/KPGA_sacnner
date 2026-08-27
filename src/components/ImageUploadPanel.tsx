@@ -2,9 +2,24 @@ import React, { useEffect, useRef, useState } from 'react';
 import { withTimeout } from '@/lib/pdf/withTimeout';
 import {
   correctImageInWorkerDetailed,
+  detectQuadInWorker,
   warmupPerspectiveWorker,
   type RegistrationMeta,
 } from '@/lib/documentScanner/perspectiveCorrectClient';
+import {
+  READY_STREAK_FOR_SHUTTER,
+  computeGuideRect,
+  computeVideoBoxMapping,
+  evaluateCaptureGuidance,
+  mapQuadToDisplay,
+  mapRectToDisplay,
+  nextReadyStreak,
+  rejectionHint,
+  type CaptureGuidanceLevel,
+  type CaptureGuidanceStatus,
+  type Rect,
+} from '@/lib/documentScanner/captureGuidance';
+import type { Point } from '@/lib/documentScanner/perspectiveCorrect';
 import {
   hasBatchPerspectiveCorrectionCandidate,
   shouldCorrectBatchPerspective,
@@ -97,6 +112,130 @@ const BATCH_MIN_CORRECTION_CONFIDENCE = 0.62;
 // withTimeout-only approach, which could not protect against a genuine main-thread block.
 // See Task/MOBILE_CAPTURE_PERSPECTIVE_CORRECTION.md.
 const PERSPECTIVE_CORRECTION_ENABLED = true;
+
+/**
+ * Live capture guidance budget (CAPTURE_GUIDANCE §7). ALL THREE ARE
+ * PROVISIONAL -- §7 says so itself: "480px and 4 fps are targets, not
+ * measurements". `scripts/check-live-detect-cost.cjs` is the §8-1 measurement
+ * of what one detection at this size actually costs.
+ */
+const LIVE_DETECT_LONG_SIDE = 480;
+/** ~5 detections/s if the worker keeps up; §7 asks for at least 4. */
+const LIVE_DETECT_INTERVAL_MS = 200;
+/**
+ * A live frame that runs this long is stale; drop it and grab a new one. On
+ * timeout the shared worker is ABANDONED, not terminated -- see the client.
+ */
+const LIVE_DETECT_TIMEOUT_MS = 1200;
+/**
+ * `requestVideoFrameCallback` gives us a freshly presented frame, but like
+ * `requestAnimationFrame` it does not fire when nothing is being presented --
+ * a hidden tab, a paused element. CLAUDE.md §4 is about exactly this failure:
+ * the loop does not error, it silently stops. This timer is the watchdog that
+ * makes it impossible.
+ */
+const LIVE_RVFC_WATCHDOG_MS = 250;
+
+/** `requestVideoFrameCallback` is not in lib.dom for this TypeScript version. */
+type FrameCallbackVideo = HTMLVideoElement & {
+  requestVideoFrameCallback?: (callback: (now: number) => void) => number;
+  cancelVideoFrameCallback?: (handle: number) => void;
+};
+
+type LiveGuidance = {
+  status: CaptureGuidanceStatus;
+  /** Guide box in display pixels, through the same mapping as the polygon. */
+  guide: Rect | null;
+  /** Detected quad in display pixels, or null. */
+  quad: Point[] | null;
+  /** The video element's box the two above are drawn in. */
+  displayWidth: number;
+  displayHeight: number;
+};
+
+/**
+ * Colour is never the only signal (CAPTURE_GUIDANCE §4.2): the border weight
+ * and the dash pattern change with it, and the message text is always shown.
+ */
+const GUIDE_STYLE: Record<CaptureGuidanceLevel, { color: string; width: number; dash?: string }> = {
+  searching: { color: '#9ca3af', width: 2, dash: '10 10' },
+  adjust: { color: '#f59e0b', width: 3, dash: '20 10' },
+  ready: { color: '#22c55e', width: 5 },
+};
+
+function cornerTickPath(rect: Rect): string {
+  const length = Math.min(rect.width, rect.height) * 0.12;
+  const left = rect.left;
+  const top = rect.top;
+  const right = rect.left + rect.width;
+  const bottom = rect.top + rect.height;
+
+  return [
+    `M ${left} ${top + length} L ${left} ${top} L ${left + length} ${top}`,
+    `M ${right - length} ${top} L ${right} ${top} L ${right} ${top + length}`,
+    `M ${right} ${bottom - length} L ${right} ${bottom} L ${right - length} ${bottom}`,
+    `M ${left + length} ${bottom} L ${left} ${bottom} L ${left} ${bottom - length}`,
+  ].join(' ');
+}
+
+/**
+ * Guide box and detected polygon, both already in display pixels because the
+ * loop pushed them through the one `VideoBoxMapping` (§4.2). This component
+ * does no coordinate arithmetic of its own -- that is the point.
+ */
+function CaptureGuideOverlay({ guidance }: { guidance: LiveGuidance }) {
+  const { guide, quad, displayWidth, displayHeight } = guidance;
+  if (displayWidth <= 0 || displayHeight <= 0) {
+    return null;
+  }
+
+  const style = GUIDE_STYLE[guidance.status.level];
+  const frame = `M 0 0 H ${displayWidth} V ${displayHeight} H 0 Z`;
+  const hole = guide
+    ? `M ${guide.left} ${guide.top} H ${guide.left + guide.width} V ${guide.top + guide.height} H ${guide.left} Z`
+    : '';
+
+  return (
+    <svg
+      className="capture-guide-svg"
+      viewBox={`0 0 ${displayWidth} ${displayHeight}`}
+      preserveAspectRatio="none"
+      aria-hidden="true"
+    >
+      <path d={`${frame} ${hole}`} fillRule="evenodd" fill="rgba(0, 0, 0, 0.45)" />
+      {guide && (
+        <>
+          <rect
+            x={guide.left}
+            y={guide.top}
+            width={guide.width}
+            height={guide.height}
+            fill="none"
+            stroke={style.color}
+            strokeWidth={style.width}
+            strokeDasharray={style.dash}
+          />
+          <path
+            d={cornerTickPath(guide)}
+            fill="none"
+            stroke={style.color}
+            strokeWidth={style.width + 2}
+            strokeLinecap="square"
+          />
+        </>
+      )}
+      {quad && quad.length === 4 && (
+        <polygon
+          points={quad.map((point) => `${point.x},${point.y}`).join(' ')}
+          fill={guidance.status.level === 'ready' ? 'rgba(34, 197, 94, 0.16)' : 'rgba(245, 158, 11, 0.12)'}
+          stroke={style.color}
+          strokeWidth={2}
+          strokeDasharray={guidance.status.level === 'ready' ? undefined : '6 5'}
+        />
+      )}
+    </svg>
+  );
+}
 
 const createBatchId = () => (
   globalThis.crypto?.randomUUID?.()
@@ -265,12 +404,31 @@ export default function ImageUploadPanel({
     warnings: BatchCorrectionWarning[];
   } | null>(null);
 
+  // Live capture guidance (CAPTURE_GUIDANCE §9 stages 1-3).
+  const [liveGuidance, setLiveGuidance] = useState<LiveGuidance | null>(null);
+  const [shutterEmphasized, setShutterEmphasized] = useState<boolean>(false);
+
   const cagiInputRef = useRef<HTMLInputElement>(null);
   const satInputRef = useRef<HTMLInputElement>(null);
   const cameraVideoRef = useRef<HTMLVideoElement>(null);
   const cameraCanvasRef = useRef<HTMLCanvasElement>(null);
   const cameraStreamRef = useRef<MediaStream | null>(null);
   const uploadInventoryRef = useRef<UploadInventory>({ cagi: null, satisfaction: null });
+  /** Detection scratch canvas -- never the capture canvas, which holds a shot. */
+  const liveFrameCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const liveLoopActiveRef = useRef<boolean>(false);
+  /**
+   * Which run of the effect owns the loop. A detection can still be in flight
+   * when the effect re-runs (the step advances while a frame is out), and
+   * without this the stale promise's re-arm would start a SECOND loop beside
+   * the new one -- two timers, two workers' worth of frames, forever.
+   */
+  const liveEpochRef = useRef<number>(0);
+  const liveInFlightRef = useRef<boolean>(false);
+  const liveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const liveWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const liveFrameHandleRef = useRef<number | null>(null);
+  const liveReadyStreakRef = useRef<number>(0);
 
   useEffect(() => {
     onUploadProgressChange?.(isBatchProcessing || isCagiUploading || isSatUploading || isCameraStarting || isCapturing);
@@ -284,6 +442,185 @@ export default function ImageUploadPanel({
       });
     }
   }, [cameraFlow.active]);
+
+  // --- live capture guidance (CAPTURE_GUIDANCE §9 stages 1-3) ----------------
+  //
+  // Runs only while the preview is the thing on screen. A correction preview,
+  // a retake prompt or an in-flight capture all mean the user is looking at a
+  // still, and the worker is either busy with the real correction or about to
+  // be -- a guidance frame queued behind a 12MP warp helps nobody.
+  const liveGuidanceActive = cameraFlow.active
+    && !correctionPreview
+    && !retakePrompt
+    && !isCapturing
+    && !isCagiUploading
+    && !isSatUploading;
+
+  useEffect(() => {
+    if (!liveGuidanceActive || !PERSPECTIVE_CORRECTION_ENABLED) {
+      return undefined;
+    }
+
+    const template = cameraFlow.step === 'cagi' ? cagiTemplate : satisfactionTemplate;
+    const expectedAspectRatio = template.baseSize.height / template.baseSize.width;
+
+    liveEpochRef.current += 1;
+    const epoch = liveEpochRef.current;
+    const isCurrentLoop = () => liveLoopActiveRef.current && liveEpochRef.current === epoch;
+
+    liveLoopActiveRef.current = true;
+    liveInFlightRef.current = false;
+    liveReadyStreakRef.current = 0;
+
+    const clearPending = () => {
+      if (liveTimerRef.current !== null) {
+        clearTimeout(liveTimerRef.current);
+        liveTimerRef.current = null;
+      }
+      if (liveWatchdogRef.current !== null) {
+        clearTimeout(liveWatchdogRef.current);
+        liveWatchdogRef.current = null;
+      }
+      if (liveFrameHandleRef.current !== null) {
+        const video = cameraVideoRef.current as FrameCallbackVideo | null;
+        video?.cancelVideoFrameCallback?.(liveFrameHandleRef.current);
+        liveFrameHandleRef.current = null;
+      }
+    };
+
+    /** Downscaled copy of the current video frame, at the §7 live budget. */
+    const grabFrame = (video: HTMLVideoElement): HTMLCanvasElement | null => {
+      const frameWidth = video.videoWidth;
+      const frameHeight = video.videoHeight;
+      if (!frameWidth || !frameHeight) return null;
+
+      if (!liveFrameCanvasRef.current) {
+        liveFrameCanvasRef.current = document.createElement('canvas');
+      }
+      const canvas = liveFrameCanvasRef.current;
+      const scale = Math.min(1, LIVE_DETECT_LONG_SIDE / Math.max(frameWidth, frameHeight));
+      const width = Math.max(1, Math.round(frameWidth * scale));
+      const height = Math.max(1, Math.round(frameHeight * scale));
+
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+      }
+
+      const context = canvas.getContext('2d', { willReadFrequently: true });
+      if (!context) return null;
+      context.drawImage(video, 0, 0, width, height);
+      return canvas;
+    };
+
+    const runDetection = async () => {
+      const video = cameraVideoRef.current;
+      if (!isCurrentLoop() || !video) return;
+      if (liveInFlightRef.current) return;
+      if (video.readyState < 2) return;
+
+      const frame = grabFrame(video);
+      if (!frame) return;
+
+      liveInFlightRef.current = true;
+      let detection = null;
+      try {
+        detection = await detectQuadInWorker(frame, expectedAspectRatio, LIVE_DETECT_TIMEOUT_MS);
+      } catch {
+        detection = null;
+      } finally {
+        liveInFlightRef.current = false;
+      }
+
+      if (!isCurrentLoop()) return;
+
+      // THE mapping (CAPTURE_GUIDANCE §4.2). Built from the dimensions the
+      // worker actually measured in and the element's own displayed box, then
+      // used for BOTH the guide rectangle and the detected polygon. Nothing
+      // else in this component converts between the two spaces.
+      const frameWidth = detection?.width || frame.width;
+      const frameHeight = detection?.height || frame.height;
+      const displayWidth = video.clientWidth;
+      const displayHeight = video.clientHeight;
+      const mapping = computeVideoBoxMapping(
+        frameWidth,
+        frameHeight,
+        displayWidth,
+        displayHeight,
+        // Matches `object-fit` on .camera-live-video. `contain` is what makes
+        // "what you see" equal "what the detector reads" -- under `cover` the
+        // margin gate judges strips of frame the user cannot see.
+        'contain',
+      );
+
+      const status = evaluateCaptureGuidance({
+        quality: detection?.quality ?? null,
+        rejection: detection?.rejection ?? null,
+        frameWidth,
+        frameHeight,
+      });
+
+      const guideInFrame = computeGuideRect(frameWidth, frameHeight);
+      const guide = mapping && guideInFrame ? mapRectToDisplay(mapping, guideInFrame) : null;
+      const quad = mapping && detection?.quality
+        ? mapQuadToDisplay(mapping, detection.quality.points)
+        : null;
+
+      liveReadyStreakRef.current = nextReadyStreak(liveReadyStreakRef.current, status);
+      setShutterEmphasized(liveReadyStreakRef.current >= READY_STREAK_FOR_SHUTTER);
+      setLiveGuidance({ status, guide, quad, displayWidth, displayHeight });
+    };
+
+    // One detection per tick, then re-arm: the loop cannot queue frames
+    // because it never schedules the next one until this one is done (§7).
+    const tick = () => {
+      clearPending();
+      void runDetection().finally(() => {
+        if (isCurrentLoop()) arm();
+      });
+    };
+
+    /**
+     * Wait out the interval, then take the NEXT presented frame. rVFC is the
+     * freshness signal; the watchdog is what keeps the loop alive when the
+     * tab is hidden and no frame is ever presented (CLAUDE.md §4 -- rAF is
+     * never used here for that reason).
+     */
+    const arm = () => {
+      if (!isCurrentLoop()) return;
+      clearPending();
+
+      liveTimerRef.current = setTimeout(() => {
+        liveTimerRef.current = null;
+        if (!isCurrentLoop()) return;
+
+        const video = cameraVideoRef.current as FrameCallbackVideo | null;
+        if (video && typeof video.requestVideoFrameCallback === 'function') {
+          liveFrameHandleRef.current = video.requestVideoFrameCallback(() => {
+            liveFrameHandleRef.current = null;
+            tick();
+          });
+          liveWatchdogRef.current = setTimeout(() => {
+            liveWatchdogRef.current = null;
+            tick();
+          }, LIVE_RVFC_WATCHDOG_MS);
+          return;
+        }
+
+        tick();
+      }, LIVE_DETECT_INTERVAL_MS);
+    };
+
+    arm();
+
+    return () => {
+      liveLoopActiveRef.current = false;
+      clearPending();
+      liveReadyStreakRef.current = 0;
+      setShutterEmphasized(false);
+      setLiveGuidance(null);
+    };
+  }, [liveGuidanceActive, cameraFlow.step]);
 
   const renderPdfPageToFile = async (page: any, type: UploadKind, pageNumber: number): Promise<File> => {
     let fallbackBlob: Blob | null = null;
@@ -470,13 +807,11 @@ export default function ImageUploadPanel({
   // F2.2's rejection -> instruction table, verbatim from the spec (the server
   // verdict in sheetQuality.ts carries the same strings; the two features must
   // never disagree in wording).
-  const retakeHintFor = (registration: RegistrationMeta | null): string => {
-    const rejection = registration?.rejection ?? null;
-    if (rejection === 'cropped') return '종이의 네 모서리가 모두 화면 안에 들어오게 찍어주세요';
-    if (rejection === 'too-small') return '종이가 화면을 더 채우도록 가까이서 찍어주세요';
-    if (rejection === 'wrong-shape') return '종이 정면에서, 세로 방향으로 찍어주세요';
-    return '종이가 배경과 구분되도록 어두운 바닥을 피해 다시 찍어주세요';
-  };
+  // The table itself now lives in captureGuidance.ts, so live guidance and the
+  // post-capture prompt cannot drift into wording the same fault two ways.
+  const retakeHintFor = (registration: RegistrationMeta | null): string => (
+    rejectionHint(registration?.rejection ?? null)
+  );
 
   // F3: ask the server for the per-sheet verdict right after an upload, while
   // the paper is still in front of the user. Fire-and-forget -- a verdict
@@ -1308,8 +1643,17 @@ export default function ImageUploadPanel({
                   className="camera-live-video"
                   aria-label="카메라 미리보기"
                 />
-                <div className="camera-live-overlay" aria-hidden="true">
-                  <span>{cameraStepLabel}</span>
+                {liveGuidance && <CaptureGuideOverlay guidance={liveGuidance} />}
+                <div
+                  className={`capture-status capture-status-${liveGuidance?.status.level ?? 'searching'}`}
+                  role="status"
+                  aria-live="polite"
+                >
+                  <span className="capture-status-mark" aria-hidden="true" />
+                  <span className="capture-status-body">
+                    <strong>{liveGuidance?.status.message ?? '카메라 화면을 준비하는 중'}</strong>
+                    {liveGuidance?.status.detail && <em>{liveGuidance.status.detail}</em>}
+                  </span>
                 </div>
               </div>
               <canvas ref={cameraCanvasRef} style={{ display: 'none' }} />
@@ -1350,8 +1694,14 @@ export default function ImageUploadPanel({
               >
                 촬영 취소
               </button>
+              {/*
+                Soft gating only. The shutter is emphasised after three green
+                detections in a row, and is NEVER disabled for a bad reading --
+                the detector can be wrong, and a hard block would strand a user
+                whose sheet it refuses to see.
+              */}
               <button
-                className="btn-primary capture-action-button"
+                className={`btn-primary capture-action-button${shutterEmphasized ? ' capture-action-ready' : ''}`}
                 type="button"
                 onClick={captureCurrentFrame}
                 disabled={isCapturing || isCagiUploading || isSatUploading}
@@ -1360,7 +1710,9 @@ export default function ImageUploadPanel({
                   ? '업로드 중'
                   : isCapturing
                     ? '처리 중'
-                    : `${cameraStepLabel}하기`}
+                    : shutterEmphasized
+                      ? '지금 촬영하세요'
+                      : `${cameraStepLabel}하기`}
               </button>
             </div>
           </div>
