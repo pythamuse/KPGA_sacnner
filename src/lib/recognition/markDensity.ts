@@ -1343,8 +1343,14 @@ export function analyzeChoiceGroup(
         candidateIndex: index,
         atX: ((rect.left + rect.right) / 2 - contentLeft) / contentWidth,
         value: candidate.value,
-        // The total-ink invariant, applied where both quantities exist.
-        score: templateEvidence?.inkInvariantZeroed ? 0 : residualScore,
+        // The total-ink guard, applied where both quantities exist and only on
+        // photo sheets -- see the scoping note at `bestInkInvariantZeroed`: on
+        // scans the aggregate comparison is confounded by how the two rasters
+        // render the printed circle, and enforcing it there cost 21 correct
+        // cells.
+        score: affineToneEnabled() && photoProvenance && templateEvidence?.inkInvariantZeroed
+          ? 0
+          : residualScore,
         residualScore,
         shape: templateEvidence,
       };
@@ -1492,7 +1498,28 @@ export function analyzeChoiceGroup(
   // otherwise lands: those are different facts. `absolute-floor` says the
   // signal was too weak to trust; this says there was no added ink to measure
   // at all, and only the second is an invariant.
-  const bestInkInvariantZeroed = best.shape?.inkInvariantZeroed === true;
+  // Photo sheets only, and the measurement is why. Enforced on every path, the
+  // invariant cost the scan set 21 correct cells (node 355 -> 334) while
+  // removing 2 wrong ones -- so on scans `actualInk <= baselineInk` does NOT
+  // mean "nothing was added". A thin tick adds ink in a handful of samples
+  // while the box as a whole still reads lighter than the blank asset's
+  // printed circle, because the two rasters render that circle at different
+  // weights. The aggregate comparison is confounded by the printed content,
+  // and §14.2 over-read it as an invariant of the differential itself.
+  //
+  // Measured again on photos with the linear path: the same guard cost 33
+  // correct cells there too (59 -> 26), so the confound is the raster pair, not
+  // the scanner. The guard belongs to the affine package alone.
+  //
+  // What the measurement does support is the narrower claim: under the affine
+  // tone map, stretching the photo's darkest tone onto the blank's manufactures
+  // per-sample residual in a box nothing was added to -- that is how
+  // `p3 basic.gender`, a cell the key marks blank, came to be filled from a box
+  // measuring 0.099 against the blank's 0.112. Photo provenance is exactly the
+  // condition under which that stretch happens, so the guard is scoped to it
+  // and the scan path keeps the behaviour its baseline was measured on.
+  const bestInkInvariantZeroed = affineToneEnabled() && photoProvenance
+    && best.shape?.inkInvariantZeroed === true;
   if (bestInkInvariantZeroed) refused.push('ink-invariant');
   if (!(best.score >= highScoreThreshold)) refused.push('absolute-floor');
   if (!(gap >= highGapThreshold)) refused.push('gap');
@@ -1566,7 +1593,15 @@ export function analyzeChoiceGroup(
   // from one that was never going to be filled.
   //
   // Photo sheets only, so a scan takes the byte-identical path it took before.
-  if (photoProvenance && group.candidates.length === 2 && photoBinaryRefusalEnabled()) {
+  //
+  // And only while the affine tone map is armed, which is the measurement it
+  // was commissioned from: §14.1's six wrong binary reads all appear under that
+  // map. On the shipped linear path the same questions auto-fill with the
+  // measured floor and produced no wrong value at all, and refusing them there
+  // cost 36 correct cells on the 19-student set (59 -> 23) for nothing. A
+  // refusal is still a cost, and it is only worth paying where the failure it
+  // prevents actually occurs.
+  if (photoProvenance && affineToneEnabled() && group.candidates.length === 2 && photoBinaryRefusalEnabled()) {
     refused.push('photo-binary-refused');
     return {
       field: group.field,
