@@ -257,14 +257,14 @@
   </div>
 
   <div class="card part">
-    <header><h3>라이브 촬영 유도</h3><span class="chip part">구현 완료 · 검증 남음</span></header>
+    <header><h3>라이브 촬영 유도</h3><span class="chip part">기하만 구현 · 밝기 안내 진행 중</span></header>
     <p class="muted">가이드 테두리, 실시간 종이 인식(회색→주황→초록), 기울기·거리 <b>방향付き</b> 안내, 3회 연속 합격 시 촬영 버튼 강조.</p>
-    <div class="spec"><b>남은 검증</b> ① 실기기 카메라 확인 ② 기울기 문턱(4°, 7%)의 실측 검증 — 현재 잠정치 명시 · <b>합격</b> 초록 상태로 찍은 사진의 보정 성공률이 안내 없이 찍은 것보다 유의하게 높을 것</div>
+    <div class="spec"><b>기능 공백</b> 지금 안내는 <b>기하만</b> 잽니다(사각형·기울기·거리). 밝기는 한 줄도 재지 않는데, 기하는 이미 해결됐고(38/38) 남은 문제는 밝기입니다 — 풀린 문제를 안내하고 안 풀린 문제에는 침묵. 밝기 안내 작업 진행 중 · <b>남은 검증</b> ① 실기기 카메라 확인 ② 기울기 문턱(4°, 7°) 실측 — 현재 잠정치</div>
     <div class="kv"><span>검출 <b>37 ms</b>/회</span><span>문턱 <b>잠정</b></span></div>
   </div>
 
   <div class="card part">
-    <header><h3>인식(채점) 엔진</h3><span class="chip part">사진 오답 5건</span></header>
+    <header><h3>인식(채점) 엔진</h3><span class="chip done">사진 오답 0</span></header>
     <p class="muted">차분 채점 + 4중 관문. 이번에 사진 전용 안전장치 추가 — "한 칸만 비고 나머지가 온통 잉크"인 비정상 행 거절. 스캔에 켰더니 스캔 정답 4칸이 깎이는 것이 측정되어 <b>사진에만</b> 적용(출처로 구분).</p>
     <div class="spec"><b>합격(전체)</b> 오답 0 (절대) → 그 다음 검수자 몫 최소화 · <b>현재</b> 사진 11→5, 스캔 기준선(355/7) 바이트 단위 복원 확인 — <b>합격선 미달</b></div>
     <div class="kv"><span>사진 오답 <b>11→5</b></span><span>스캔 회귀 <b>0</b> ✓</span></div>
@@ -281,7 +281,7 @@
     <tr><td class="num">1</td><td>나이 숫자</td><td>손글씨 OCR이 15를 17로 읽음</td><td>숫자 인식 별도 트랙</td></tr>
   </table></div>
   <p style="margin-top:18px"><b>어두운 바닥 묶음 문제.</b> 일부러 섞은 불량 샘플 학생들은 보정이 완벽해도 자동 입력이 거의 0칸 — 종이가 어둡게 찍혀 채점기가 신호를 못 믿기 때문(정상 스캔 대비 잉크 비율 4–7배). 밝기 보정 실험 결과 표 구조 찾기엔 도움(102→131 필드)이지만 6개 페이지에선 역효과 — 그래서 "항상 보정"이 아니라 <b>페이지별 선택</b> 설계가 다음 마일스톤에 있습니다. 채점은 항상 원본 화소로만 합니다(보정본 채점은 정답까지 지움을 측정으로 확인).</p>
-  <p class="muted">그 밖에: 검수자 몫 427칸(오답 0 원칙 아래 다음으로 줄일 숫자), 표본 19명(새 표본 도착 시 재측정).</p>
+  <p class="muted">그 밖에: 검수자 몫 392칸(오답 0 원칙 아래 다음으로 줄일 숫자), 표본 19명(새 표본 도착 시 재측정).</p>
 </section>
 
 <section>
@@ -292,14 +292,14 @@
       <div class="m-pass">정답표 대조 체계 구축, 보정이 실제로 돌게 수리(치명 버그 3건), 이중 정합 — <b>38장 전수 측정 가능</b></div></li>
     <li class="done"><div class="m-h"><span class="m-id">M2</span><h3>보정·판정·재촬영 파이프라인</h3><span class="chip done">완료</span></div>
       <div class="m-pass">기능 카드 전부 + 병렬 구현(7개 작업 동시 진행으로 하루에 완료) — <b>오답 11→5</b></div></li>
-    <li class="next"><div class="m-h"><span class="m-id">M3</span><h3>남은 오답 5건 제거</h3><span class="chip part">다음</span></div>
-      <div class="m-pass">밴드 문턱 재조정 · 예/아니오 문턱 상향 · 나이 OCR — 합격: <b>19명 전수 오답 0</b> + 스캔 무회귀</div></li>
-    <li><div class="m-h"><span class="m-id">M4</span><h3>검수자 몫 축소</h3><span class="chip todo">계획</span></div>
-      <div class="m-pass">페이지별 밝기 보정 선택(구조 찾기 전용) · 상대 비교 채점 — 합격: <b>오답 0 유지</b> + 빈칸 427 유의미 감소</div></li>
-    <li><div class="m-h"><span class="m-id">M5</span><h3>라이브 유도 완성</h3><span class="chip todo">계획</span></div>
-      <div class="m-pass">실기기 검증 · 문턱 실측 · 성능 — 합격: 유도된 촬영의 보정 성공률 우위</div></li>
-    <li><div class="m-h"><span class="m-id">M6</span><h3>확대 검증</h3><span class="chip todo">계획</span></div>
-      <div class="m-pass">새 표본(19명 이상) 전수 재측정 — 합격: <b>새 표본에서도 오답 0</b></div></li>
+    <li class="done"><div class="m-h"><span class="m-id">M3</span><h3>남은 오답 5건 제거</h3><span class="chip done">완료</span></div>
+      <div class="m-pass">밴드 문턱 재조정 · 예/아니오 문턱 상향 · 나이 OCR — 달성: <b>사진 오답 0 · 자동 정답 59칸</b>, 스캔 기준선은 바이트 단위로 동일</div></li>
+    <li class="next"><div class="m-h"><span class="m-id">M4</span><h3>검수자 몫 축소</h3><span class="chip part">진행 중 · 2회 기각</span></div>
+      <div class="m-pass">밝기 보정은 정답을 59→122로 올렸지만 <b>오답도 8건</b> 만들어 규칙대로 기각(플래그 뒤 보존). 안전장치를 덧댄 2회차도 오답 1건으로 기각 — 합격: <b>오답 0 유지</b> + 빈칸 392 유의미 감소</div></li>
+    <li class="next"><div class="m-h"><span class="m-id">M5</span><h3>라이브 유도 완성</h3><span class="chip part">진행 중</span></div>
+      <div class="m-pass"><b>밝기 안내 추가</b>(지금 안내는 기하만 잽니다 — 기하는 이미 해결됐고 남은 문제는 밝기) · 실기기 검증 · 문턱 실측 — 합격 기준 교체: 원래 기준(보정 성공률 비교)은 <b>38/38 포화로 측정 불가</b>가 되어 폐기, 새 기준은 <b>안내받고 찍은 사진이 자동 입력 칸을 더 많이 내는가</b></div></li>
+    <li><div class="m-h"><span class="m-id">M6</span><h3>확대 검증</h3><span class="chip todo">사용자 촬영 대기</span></div>
+      <div class="m-pass"><b>같은 19장을 3~5세트 재촬영</b>(새 정답표가 아니라 정답표 재사용 — 촬영 조건만 바꿔 상수들을 재도출) — 합격: <b>새 표본에서도 오답 0</b></div></li>
   </ol>
 </section>
 
