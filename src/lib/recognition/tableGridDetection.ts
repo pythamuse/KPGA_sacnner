@@ -209,13 +209,43 @@ function buildBasicRowCellOverrides(
   }));
 }
 
+/**
+ * Structural completeness check for a grid-derived candidate rect set.
+ *
+ * Every consumer downstream indexes such a set positionally: rect `i` is
+ * choice `i`. A set shorter than the question's choice list therefore re-maps
+ * values onto the wrong choices, and it also leaves the surviving cells free
+ * to be mixed with template fallbacks so the alignment search can slide a box
+ * into a neighbouring column's ink. Scans almost never fragment the grid, so
+ * the hole stayed invisible until the photo path; central measurement on the
+ * 19-student photo set attributed five of the six residual wrong values to it
+ * (Task/FEATURE_SPEC_CAPTURE_PIPELINE_2026-08-27.md §8).
+ *
+ * Returns the rects only when the set is whole. A short (or long) set is
+ * discarded so the caller falls back to the template rects exactly as if the
+ * grid had found nothing for that field. This only removes a way to be wrong:
+ * it loosens no gate, no threshold and no ordering.
+ */
+export function completeOverrideOrNull(
+  rects: PixelRect[] | undefined,
+  expectedCount: number,
+): PixelRect[] | null {
+  if (!rects || rects.length !== expectedCount) {
+    return null;
+  }
+
+  return rects;
+}
+
 function buildBasicRowRegistrations(
   groups: ChoiceGroup[],
   overrides: FieldCellOverrides,
   rowDetection: RowDetectionResult,
 ): Record<string, FieldRegistration> {
   return Object.fromEntries(groups.map((group) => {
-    const hasCandidateCells = Boolean(overrides[group.field]);
+    const hasCandidateCells = Boolean(
+      completeOverrideOrNull(overrides[group.field], group.candidates.length),
+    );
     const rowDiagnostic = rowDetection.diagnostics?.[group.field];
     return [group.field, {
       tableId: 'cagi.basic',
