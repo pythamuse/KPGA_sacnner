@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { isSafeJobId, isUploadBatchReference, isUploadKind } from '../../../lib/uploadInventory';
-import { storeUploadPage, UploadStorageError } from '../../../lib/storage/uploadStore';
+import {
+  storeUploadPage,
+  storeUploadPageMeta,
+  UploadStorageError,
+} from '../../../lib/storage/uploadStore';
+import { isRegistrationMetaLike } from '../../../lib/recognition/sheetQuality';
 
 export async function POST(req: NextRequest) {
   try {
@@ -31,6 +36,20 @@ export async function POST(req: NextRequest) {
       contentType: file.type || 'application/octet-stream',
     });
 
+    // F1 capture metadata (spec F1.2), best-effort and strictly after the page
+    // bytes are safe. It is optional by design: the PDF/scan path has none, and
+    // a page that arrives without it must still upload. An unparseable or
+    // structurally wrong value stores nothing rather than storing a lie the
+    // review screen would later present as a verdict.
+    const registration = parseRegistrationField(formData.get('registration'));
+    if (registration) {
+      try {
+        await storeUploadPageMeta({ jobId, type, batch, pageNumber, registration });
+      } catch (metaError) {
+        console.error('Unable to store upload page registration meta', metaError);
+      }
+    }
+
     return NextResponse.json({
       imageId: stored.pathname,
       filename: `${type}_page_${String(pageNumber).padStart(3, '0')}.jpg`,
@@ -45,4 +64,20 @@ export async function POST(req: NextRequest) {
     const message = err instanceof Error ? err.message : '알 수 없는 오류';
     return NextResponse.json({ error: `이미지 업로드 실패: ${message}` }, { status: 500 });
   }
+}
+
+/** Stringified RegistrationMeta from the client, or null if it is absent or malformed. */
+function parseRegistrationField(value: FormDataEntryValue | null): unknown | null {
+  if (typeof value !== 'string' || value.length === 0) {
+    return null;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return null;
+  }
+
+  return isRegistrationMetaLike(parsed) ? parsed : null;
 }

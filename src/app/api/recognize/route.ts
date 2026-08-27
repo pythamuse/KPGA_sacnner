@@ -12,7 +12,12 @@ import {
 import { matchBatch, isStackOrder } from '../../../lib/recognition/batchMatcher';
 import { detectCagiEarlyIntervention } from '../../../lib/recognition/cagiEarlyIntervention';
 import { buildSourcePreview } from '../../../lib/recognition/buildSourcePreview';
-import { evaluateSheetQuality, type SheetQualityVerdict } from '../../../lib/recognition/sheetQuality';
+import {
+  evaluateSheetQuality,
+  isRegistrationMetaLike,
+  type RegistrationMetaLike,
+  type SheetQualityVerdict,
+} from '../../../lib/recognition/sheetQuality';
 import { storeRecognitionMeasurements } from '../../../lib/labelExport/labelStore';
 import {
   isSafeJobId,
@@ -24,6 +29,7 @@ import {
 import {
   deleteUploadBatches,
   readUploadPage,
+  readUploadPageMeta,
   UploadStorageError,
 } from '../../../lib/storage/uploadStore';
 
@@ -73,6 +79,7 @@ export async function POST(req: Request) {
     const cagiFiles = await materializeUploadBatch(requestScratchDir, jobId, 'cagi', inventory.cagi);
     const satisfactionFiles = await materializeUploadBatch(requestScratchDir, jobId, 'satisfaction', inventory.satisfaction);
     const integrityFailure = cagiFiles.failure || satisfactionFiles.failure;
+    const uploadOrigins = buildUploadOriginIndex(cagiFiles, satisfactionFiles);
 
     if (integrityFailure) {
       return NextResponse.json({
@@ -235,11 +242,17 @@ export async function POST(req: Request) {
 
       // Same evaluator as POST /api/uploads/quality (spec F3.2 consistency
       // requirement) — two different judges would let "it said fine at upload"
-      // disagree with the review screen. The scan path carries no F1
-      // registration meta, so the verdict here reads as provenance-unknown
-      // ('good' with reason no-registration-meta) and the image measurements
-      // ride along for the reviewer.
-      const sheetQuality = await buildSheetQualityAttachment(pair.cagiPath, pair.satisfactionPath);
+      // disagree with the review screen. Whatever F1 meta the client stored
+      // with these two pages is read back by path, so a photographed sheet can
+      // reach the review screen as retake/unusable/overridden; the scan path
+      // carries no meta and stays provenance-unknown ('good' with reason
+      // no-registration-meta).
+      const sheetQuality = await buildSheetQualityAttachment(
+        jobId,
+        pair.cagiPath,
+        pair.satisfactionPath,
+        uploadOrigins,
+      );
 
       studentDrafts.push({
         ...recognizedDraft,
@@ -299,8 +312,10 @@ export async function POST(req: Request) {
  * save, like the other review-only draft fields.
  */
 async function buildSheetQualityAttachment(
+  jobId: string,
   cagiPath: string,
   satisfactionPath: string,
+  origins: Map<string, UploadPageOrigin>,
 ): Promise<{ cagi?: SheetQualityVerdict; satisfaction?: SheetQualityVerdict } | null> {
   const attachment: { cagi?: SheetQualityVerdict; satisfaction?: SheetQualityVerdict } = {};
 
@@ -308,7 +323,7 @@ async function buildSheetQualityAttachment(
     attachment.cagi = await evaluateSheetQuality({
       imagePath: cagiPath,
       formType: 'cagi',
-      registration: null,
+      registration: await readRegistrationForPath(jobId, cagiPath, origins),
     });
   } catch (error) {
     console.error('cagi sheet-quality evaluation failed', error);
@@ -318,7 +333,7 @@ async function buildSheetQualityAttachment(
     attachment.satisfaction = await evaluateSheetQuality({
       imagePath: satisfactionPath,
       formType: 'satisfaction',
-      registration: null,
+      registration: await readRegistrationForPath(jobId, satisfactionPath, origins),
     });
   } catch (error) {
     console.error('satisfaction sheet-quality evaluation failed', error);
@@ -351,7 +366,72 @@ async function materializeUploadBatch(
     filePaths: result.flatMap((page) => page.filePath ? [page.filePath] : []),
     availablePageNumbers: result.flatMap((page) => page.filePath ? [page.pageNumber] : []),
     failure: result.some((page) => !page.filePath),
+    // Where each scratch file came from. Written here — the only place that
+    // knows — so nothing downstream has to re-derive a page number from a
+    // filename or from a student's position in the matched list.
+    origins: result.flatMap((page) => page.filePath
+      ? [{ filePath: page.filePath, type, batch, pageNumber: page.pageNumber }]
+      : []),
   };
+}
+
+/**
+ * Scratch file path -> the stored upload page it was written from.
+ *
+ * Keyed by PATH, not by student index, and that is the whole point. The
+ * satisfaction stack can be paired in reverse (`satisfactionOrder:
+ * 'reversed'`), in which case `matchBatch` hands student 0 the LAST
+ * satisfaction file; classification can also move a file between the two
+ * lists. Both operate on paths and never rewrite them, so looking the path up
+ * here always returns the physical page whose bytes the quality evaluator is
+ * about to measure.
+ */
+type UploadPageOrigin = {
+  type: UploadKind;
+  batch: UploadBatchReference;
+  pageNumber: number;
+};
+
+function buildUploadOriginIndex(
+  ...batches: Array<{ origins: Array<{ filePath: string } & UploadPageOrigin> }>
+): Map<string, UploadPageOrigin> {
+  const index = new Map<string, UploadPageOrigin>();
+  for (const materialized of batches) {
+    for (const origin of materialized.origins) {
+      index.set(origin.filePath, {
+        type: origin.type,
+        batch: origin.batch,
+        pageNumber: origin.pageNumber,
+      });
+    }
+  }
+  return index;
+}
+
+/**
+ * Capture metadata for one materialized sheet, or null when it carries none.
+ *
+ * Never throws: a missing, malformed or unreadable sidecar reads as null, and
+ * the evaluator treats null as provenance-unknown ('good' /
+ * `no-registration-meta`) — the reading the scan path depends on.
+ */
+async function readRegistrationForPath(
+  jobId: string,
+  filePath: string,
+  origins: Map<string, UploadPageOrigin>,
+): Promise<RegistrationMetaLike | null> {
+  const origin = origins.get(filePath);
+  if (!origin) {
+    return null;
+  }
+
+  try {
+    const stored = await readUploadPageMeta(jobId, origin.type, origin.batch, origin.pageNumber);
+    return isRegistrationMetaLike(stored) ? stored : null;
+  } catch (error) {
+    console.error('Unable to read registration meta for recognized page', filePath, error);
+    return null;
+  }
 }
 
 function getUploadedFormType(filename: string): UploadKind | undefined {
