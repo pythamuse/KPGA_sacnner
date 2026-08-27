@@ -35,6 +35,7 @@ import {
   type BasicCheckboxGridDetection,
 } from './basicCheckboxDetection';
 import { recognizeDigitsInRegionDetailed } from './ocrTextLines';
+import { buildFlattenedGeometryImage } from './illuminationFlatten';
 import { loadBlankFormBaseline } from './templateBaseline';
 import fs from 'fs/promises';
 
@@ -158,10 +159,21 @@ export async function recognizeStudentForms(
       loadImageAnalysisData(cagiPath),
       loadBlankFormBaseline('cagi'),
     ]);
-    const cagiImage = applyTemplateRegistrationFrame(cagiImageData, cagiTemplate.registrationFrame);
+    const cagiRegisteredImage = applyTemplateRegistrationFrame(cagiImageData, cagiTemplate.registrationFrame);
     const cagiImageBuffer = await fs.readFile(cagiPath);
-    const canAutoRecognizeCagi = hasUsableFormBounds(cagiImage);
-    const cagiGridBaseDetection = buildCagiGridDetection(cagiImage);
+    const canAutoRecognizeCagi = hasUsableFormBounds(cagiRegisteredImage);
+    const cagiGridStream = await selectGridDetectionStream(
+      cagiRegisteredImage,
+      buildCagiGridDetection,
+      options.cagiPhotoProvenance ?? false,
+    );
+    if (cagiGridStream.note) {
+      recognitionCropDiagnostic[GRID_STREAM_DIAGNOSTIC_KEY.cagi] = cagiGridStream.note;
+    }
+    // Grid geometry may have come from the flattened copy; every ink
+    // measurement below reads this, and this is always the raw image.
+    const cagiImage = cagiGridStream.scoringImage;
+    const cagiGridBaseDetection = cagiGridStream.detection;
     const basicGroups = cagiTemplate.choiceGroups.filter((group) => group.field.startsWith('basic.'));
     const basicCheckboxDetection = cagiBaseline?.basicCheckboxCandidateRects
       ? matchBasicCheckboxes(
@@ -383,14 +395,27 @@ export async function recognizeStudentForms(
       loadImageAnalysisData(satisfactionPath),
       loadBlankFormBaseline('satisfaction'),
     ]);
-    const satisfactionImage = applyTemplateRegistrationFrame(satisfactionImageData, satisfactionTemplate.registrationFrame);
+    const satisfactionRegisteredImage = applyTemplateRegistrationFrame(satisfactionImageData, satisfactionTemplate.registrationFrame);
     const satisfactionImageBuffer = await fs.readFile(satisfactionPath);
-    const canAutoRecognizeSatisfaction = hasUsableFormBounds(satisfactionImage);
+    const canAutoRecognizeSatisfaction = hasUsableFormBounds(satisfactionRegisteredImage);
+    // Row detection stays ahead of the stream selection: it owns the shared
+    // OCR worker and runs against a deadline, so the flatten must not be
+    // inserted in front of it.
     const satisfactionRowDetection: RowDetectionResult = canAutoRecognizeSatisfaction
-      ? await buildSatisfactionRowDetection(satisfactionImage, satisfactionImageBuffer, toOcrOptions(options))
+      ? await buildSatisfactionRowDetection(satisfactionRegisteredImage, satisfactionImageBuffer, toOcrOptions(options))
       : { overrides: {} };
     const satisfactionRowOverrides = satisfactionRowDetection.overrides;
-    const satisfactionGridDetection = buildSatisfactionGridDetection(satisfactionImage);
+    const satisfactionGridStream = await selectGridDetectionStream(
+      satisfactionRegisteredImage,
+      buildSatisfactionGridDetection,
+      options.satisfactionPhotoProvenance ?? false,
+    );
+    if (satisfactionGridStream.note) {
+      recognitionCropDiagnostic[GRID_STREAM_DIAGNOSTIC_KEY.satisfaction] = satisfactionGridStream.note;
+    }
+    // See the CAGI block: geometry may be flattened, ink scoring never is.
+    const satisfactionImage = satisfactionGridStream.scoringImage;
+    const satisfactionGridDetection = satisfactionGridStream.detection;
     const satisfactionGridOverrides = satisfactionGridDetection.overrides;
 
     if (!canAutoRecognizeSatisfaction) {
@@ -643,6 +668,107 @@ function unionPixelRects(rects: PixelRect[]): PixelRect {
     right: Math.max(...rects.map((rect) => rect.right)),
     bottom: Math.max(...rects.map((rect) => rect.bottom)),
   };
+}
+
+/**
+ * Where the per-sheet grid-stream note is filed in `recognitionCropDiagnostic`.
+ *
+ * The record is otherwise keyed by recognition field. These two keys are not
+ * fields, so the review screen — which only ever looks a field up by name —
+ * never renders them, while central measurement reading the draft can
+ * attribute a change to the stream that produced the geometry. Only written
+ * for photo-provenance sheets, so a scan's draft is unchanged down to the
+ * key set.
+ */
+export const GRID_STREAM_DIAGNOSTIC_KEY = {
+  cagi: 'sheet.cagi',
+  satisfaction: 'sheet.satisfaction',
+} as const;
+
+export interface GridStreamDependencies {
+  /**
+   * Seam. Production passes nothing and gets the sharp-backed flattener; the
+   * unit tests pass a stub so "was flatten computed at all?" is observable
+   * without reaching into the module graph.
+   */
+  buildFlattenedImage?: (image: ImageAnalysisData) => Promise<ImageAnalysisData>;
+}
+
+export interface GridStreamSelection {
+  /** The chosen geometry. Rects only — the pixels it was measured on do not travel with it. */
+  detection: GridDetectionResult;
+  /**
+   * The image every downstream ink measurement must read: always the raw
+   * object that came in. Returned rather than assumed so that "geometry may
+   * be flattened, scoring never is" is a checkable postcondition of this
+   * function instead of a comment at the call site.
+   */
+  scoringImage: ImageAnalysisData;
+  stream: 'raw' | 'flattened';
+  /** `grid-stream: flattened(9->13)`. Absent when no flattening was attempted. */
+  note?: string;
+}
+
+/**
+ * Two-stream geometry (spec §9.2 row V-C).
+ *
+ * On a photographed sheet, run grid detection on the raw pixels and on an
+ * illumination-flattened copy, and keep whichever resolved more fields. On the
+ * 19 ORB-registered photo sheets, flattening raised the total from 102 fields
+ * to 131 but *hurt* six pages (9->2, 11->4, ...), so neither stream wins
+ * globally and the choice has to be made per sheet
+ * (Task/EXTERNAL_ADOPTION_PLAN_2026-08-27.md §3.4).
+ *
+ * A tie keeps the raw stream: equal evidence is not a reason to move off the
+ * pixels the scorer reads.
+ *
+ * Scans (`photoProvenance === false`) take exactly the call they took before
+ * this function existed — one raw detection, no flatten computed, no note
+ * recorded — so the scan measurement cannot move.
+ */
+export async function selectGridDetectionStream(
+  image: ImageAnalysisData,
+  buildDetection: (candidate: ImageAnalysisData) => GridDetectionResult,
+  photoProvenance: boolean,
+  dependencies: GridStreamDependencies = {},
+): Promise<GridStreamSelection> {
+  // Outside the try below on purpose: a raw-stream failure has to keep
+  // propagating to the caller's existing handler exactly as it did before.
+  const rawDetection = buildDetection(image);
+
+  if (!photoProvenance) {
+    return { detection: rawDetection, scoringImage: image, stream: 'raw' };
+  }
+
+  const rawFields = countGridFields(rawDetection);
+  const buildFlattenedImage = dependencies.buildFlattenedImage || buildFlattenedGeometryImage;
+  let flattenedDetection: GridDetectionResult;
+  try {
+    flattenedDetection = buildDetection(await buildFlattenedImage(image));
+  } catch {
+    // The second stream is an addition. If it cannot be computed, the sheet
+    // gets the geometry it would have had anyway.
+    return {
+      detection: rawDetection,
+      scoringImage: image,
+      stream: 'raw',
+      note: `grid-stream: raw(${rawFields}->failed)`,
+    };
+  }
+
+  const flattenedFields = countGridFields(flattenedDetection);
+  const useFlattened = flattenedFields > rawFields;
+
+  return {
+    detection: useFlattened ? flattenedDetection : rawDetection,
+    scoringImage: image,
+    stream: useFlattened ? 'flattened' : 'raw',
+    note: `grid-stream: ${useFlattened ? 'flattened' : 'raw'}(${rawFields}->${flattenedFields})`,
+  };
+}
+
+function countGridFields(detection: GridDetectionResult): number {
+  return Object.keys(detection.overrides).length;
 }
 
 export function getAgeDigitsRect(rect: PixelRect): PixelRect {
