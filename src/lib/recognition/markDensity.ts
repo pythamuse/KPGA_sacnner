@@ -201,6 +201,32 @@ const HIGH_RELATIVE_CONTRAST = 1.25;
 const HIGH_ABSOLUTE_SIGNAL = 0.021;
 
 /**
+ * PROVISIONAL, and cut through a mixed distribution. The same minimum for a
+ * two-candidate group on a sheet that came in as a photo.
+ *
+ * `Task/FEATURE_SPEC_CAPTURE_PIPELINE_2026-08-27.md` §9.1(b) read every
+ * automatic acceptance the binary questions (q02-q06) produced over the 19
+ * photo sheets. There were six, and their winning scores interleave:
+ *
+ *     CORRECT: 0.029 / 0.035 / 0.067
+ *     WRONG:   0.025 / 0.027 / 0.032
+ *
+ * There is no clean cut. 0.042 buys all three wrong values -- 1.3x clear of the
+ * highest of them -- at the price of the 0.029 and 0.035 correct ones, keeping
+ * only 0.067. `WRONG = 0` outranking correct count is what justifies that
+ * trade, not the separation, because there is none.
+ *
+ * n = 6. That is too few to fit a threshold on and this one is not fitted; it
+ * is placed between the highest wrong reading and the surviving correct one.
+ * Re-examine it on the next sample (M6) rather than treating it as settled.
+ *
+ * Photo sheets only, and two candidates only: a binary question has no third
+ * option to be outscored, so the relative-contrast test that carries the
+ * multi-choice groups has the least to work with exactly here.
+ */
+const PHOTO_BINARY_FLOOR = 0.042;
+
+/**
  * The shape a residual has to have before it counts as a pen mark rather than
  * leftover print. Hoisted from `hasStructuredTemplateMark` so the decision
  * trace can report each sub-test against the value it was actually compared
@@ -844,7 +870,7 @@ interface DecisionEvidence {
    * Set only when `detectOffRowBand` refused the group, so a decision that this
    * check never touched reads exactly as it did before.
    */
-  band?: { inked: number; empty: number; inks: number[] };
+  band?: { nonVoid: number; empty: number; minNonVoid: number; inks: number[] };
 }
 
 /**
@@ -951,8 +977,9 @@ function describeDecision(evidence: DecisionEvidence, outcome: string, refused: 
   // to see why.
   if (evidence.band) {
     parts.push(
-      `band=refused(inked=${evidence.band.inked},empty=${evidence.band.empty}`
-      + `,high=${BAND_INK_HIGH.toFixed(3)},void=${BAND_INK_EMPTY.toFixed(3)}`
+      `band=refused(nonvoid=${evidence.band.nonVoid},empty=${evidence.band.empty}`
+      + `,min=${ratioOf(evidence.band.minNonVoid, BAND_INK_ALL_MIN)}`
+      + `,void=${BAND_INK_EMPTY.toFixed(3)}`
       + `,ink=${evidence.band.inks.map((ink) => ink.toFixed(3)).join('/')})`,
     );
   }
@@ -1063,64 +1090,94 @@ function ratioOf(have: number, need: number): string {
 }
 
 /**
- * PROVISIONAL. Drafted from the re-measured reading in
- * `Task/FEATURE_SPEC_CAPTURE_PIPELINE_2026-08-27.md` §8 (the version at the end
- * of that file, which retracts the first reading of the same day), row A'.
+ * PROVISIONAL. The signature comes from
+ * `Task/FEATURE_SPEC_CAPTURE_PIPELINE_2026-08-27.md` §9.1(a), which re-measured
+ * the draft rule §8 row A' had proposed and replaced it.
  *
  * The two photo sheets that read `satisfaction.q10` as 2 instead of 4 show one
- * signature in the ranked boxes: the box the student actually marked carries
- * `actualInk 0.000` while the other four all sit at 0.10-0.17, every alignment
- * pinned at its search radius, and the gate then confirms a wrong column on
- * margins that look healthy. Horizontal positions match the template; the band
- * is displaced vertically onto the printed text line below the table's last
- * row, so letter ink lands evenly in four boxes and only the position past the
+ * arrangement in the ranked boxes: the box the student actually marked carries
+ * `actualInk 0.000` while every other box carries ink, every alignment pinned
+ * at its search radius, and the gate then confirms a wrong column on margins
+ * that look healthy. Horizontal positions match the template; the band is
+ * displaced vertically onto the printed text line below the table's last row,
+ * so letter ink lands evenly across the boxes and only the position past the
  * table's right edge stays blank.
  *
- * These numbers are the ones §8 quotes, not ones fitted here, and the central
- * checkout is what measures them -- it may retune or reject them.
+ * The draft rule (>=3 boxes at >=0.10, plus >=1 void) covered the first sheet
+ * and missed the second, whose inks are `0.103/0.077/0.070/0.046/0.000` -- the
+ * same arrangement at a lower level. §9.1(a) re-measured the alternative over
+ * all fifteen accepted multi-choice photo rows:
+ *
+ *     signature fires on a legitimate row at t=0.030: 1   t=0.040: 1
+ *                                             t=0.045: 1   t=0.060: 0
+ *     (the one at t<=0.045 is p5 q10 itself, i.e. a wrong value, not a cost)
+ *     highest minNonVoid over the legitimate rows: 0.017 (p1 q07)
+ *
+ * So `>=1 void AND every non-void box >= 0.040` fires on exactly the two
+ * off-row bands and on none of the legitimate rows, with 2.3x of margin
+ * (0.040 / 0.017) against the closest one.
+ *
+ * Sample size is fifteen rows. That is small, and 0.040 is a cut through it,
+ * not a boundary the paper knows about; the central checkout is what measures
+ * this and may retune or reject it.
+ *
+ * One consequence worth stating, because the sample cannot speak to it: with
+ * the inked-count condition gone, this rule can now also fire on 2- and
+ * 3-candidate groups, which the fifteen measured rows do not include. It only
+ * ever removes a value, so it cannot create a wrong answer, but it may cost a
+ * correct one somewhere the measurement did not look.
  */
-const BAND_INK_HIGH = 0.10;
 const BAND_INK_EMPTY = 0.005;
-const MIN_INKED_BOXES = 3;
+const BAND_INK_ALL_MIN = 0.040;
 
 /**
  * Whether a group's per-box template ink reads as a displaced band rather than
  * an answer row.
  *
  * A real mark adds ink to ONE box against a baseline every box shares, so the
- * boxes differ by the mark and agree elsewhere. Heavy ink spread evenly across
- * several boxes with one box perfectly void is the opposite arrangement, and it
- * is what a band lying on a printed text line that ends mid-row produces.
+ * boxes differ by the mark and agree elsewhere. Ink in every box but one, with
+ * that one perfectly void, is the opposite arrangement, and it is what a band
+ * lying on a printed text line that ends mid-row produces.
  *
  * `inks` is in the order the decision ranks them and `winnerIndex` points at
- * the box that would be confirmed; the winner has to be one of the inked ones,
- * because a void winner is a different (and already refused) situation.
+ * the box that would be confirmed; the winner has to be one of the non-void
+ * ones, because a void winner is a different (and already refused) situation.
  *
- * Returns the counts when the arrangement matches, so the refusal can be read
- * back from the trace, and `null` otherwise. It decides nothing on its own --
- * the caller only ever turns a `null` return into "carry on".
+ * Returns what the refusal was made on -- how many boxes carried ink, how many
+ * were void, and the smallest of the inked readings, which is the number the
+ * rule actually turns on -- so it can be read back from the trace, and `null`
+ * otherwise. It decides nothing on its own: the caller only ever turns a `null`
+ * return into "carry on".
  */
 export function detectOffRowBand(
   inks: number[],
   winnerIndex: number,
-): { inked: number; empty: number } | null {
+): { nonVoid: number; empty: number; minNonVoid: number } | null {
   const winner = inks[winnerIndex];
-  if (typeof winner !== 'number' || !Number.isFinite(winner) || winner < BAND_INK_HIGH) {
+  // A void winner, or one that cannot be read, is not this rule's case.
+  if (typeof winner !== 'number' || !Number.isFinite(winner) || winner <= BAND_INK_EMPTY) {
     return null;
   }
-  let inked = 0;
+  let nonVoid = 0;
   let empty = 0;
+  let minNonVoid = Number.POSITIVE_INFINITY;
   for (const ink of inks) {
+    // An unreadable box says nothing either way, so it is skipped rather than
+    // counted as void or as ink.
     if (typeof ink !== 'number' || !Number.isFinite(ink)) {
       continue;
     }
-    if (ink >= BAND_INK_HIGH) inked += 1;
-    if (ink <= BAND_INK_EMPTY) empty += 1;
+    if (ink <= BAND_INK_EMPTY) {
+      empty += 1;
+      continue;
+    }
+    nonVoid += 1;
+    minNonVoid = Math.min(minNonVoid, ink);
   }
-  if (inked < MIN_INKED_BOXES || empty < 1) {
+  if (empty < 1 || minNonVoid < BAND_INK_ALL_MIN) {
     return null;
   }
-  return { inked, empty };
+  return { nonVoid, empty, minNonVoid };
 }
 
 export function analyzeChoiceGroup(
@@ -1137,6 +1194,11 @@ export function analyzeChoiceGroup(
   // value on the photo set but cost the scan set 4 correct cells (node 355->
   // 351, WRONG 7 unchanged), so it must not run where the failure mode it
   // detects cannot occur.
+  //
+  // Two refusals read it now: the band-structure check below, and the raised
+  // floor a two-candidate group answers to (`PHOTO_BINARY_FLOOR`). Both were
+  // measured on photo sheets alone and neither may touch a scan, which is what
+  // keeps the scan baseline byte-identical.
   photoProvenance = false,
 ): ChoiceGroupResult {
   const usesGridCells = candidatePixelOverrides?.length === group.candidates.length;
@@ -1253,10 +1315,22 @@ export function analyzeChoiceGroup(
   // elsewhere), the printed residue at 0.020 outscored the real mark, and the
   // 1.8x ratio confirmed it as a wrong answer. A floor keeps that comparison
   // from running at all until there is a real signal to compare.
-  const highScoreThreshold = usesBaseline ? HIGH_ABSOLUTE_SIGNAL : 0.35;
+  const baseHighScoreThreshold = usesBaseline ? HIGH_ABSOLUTE_SIGNAL : 0.35;
+  const baseMediumScoreThreshold = usesBaseline ? 0.007 : 0.1;
+  // A two-candidate group on a photo sheet answers to a higher minimum. Applied
+  // as a maximum against the thresholds that already exist so it can only ever
+  // raise one: on the raw-density path both are already above it and nothing
+  // moves at all.
+  const photoBinaryFloor = photoProvenance && scoredCandidates.length === 2
+    ? PHOTO_BINARY_FLOOR
+    : 0;
+  const highScoreThreshold = Math.max(baseHighScoreThreshold, photoBinaryFloor);
   const highGapThreshold = usesBaseline ? 0.004 : 0.12;
-  const mediumScoreThreshold = usesBaseline ? 0.007 : 0.1;
+  const mediumScoreThreshold = Math.max(baseMediumScoreThreshold, photoBinaryFloor);
   const mediumGapThreshold = usesBaseline ? 0.003 : 0.025;
+  // The rescue route below reads no floor of its own, so the raised one has to
+  // be handed to it separately or a binary group would walk under it there.
+  const belowPhotoBinaryFloor = photoBinaryFloor > 0 && !(best.score >= photoBinaryFloor);
 
   evidence.gap = gap;
   evidence.relativeContrast = relativeContrast;
@@ -1297,6 +1371,13 @@ export function analyzeChoiceGroup(
   if (!(gap >= highGapThreshold)) refused.push('gap');
   if (!hasStructuredMark) refused.push('mark-shape');
   if (usesBaseline && !(relativeContrast >= HIGH_RELATIVE_CONTRAST)) refused.push('relative-contrast');
+  // Named separately, and only where it changed the answer: the base floor
+  // would have admitted this score and the photo-binary one did not. That makes
+  // a trace run count exactly what this constant costs, rather than leaving it
+  // inside `absolute-floor` with every other refusal.
+  if (belowPhotoBinaryFloor && best.score >= baseHighScoreThreshold) {
+    refused.push('photo-binary-floor');
+  }
 
   // Ahead of every route that can put a value on the page -- the high
   // conjunction, the rescue, and the medium path all sit below this -- because
@@ -1349,7 +1430,13 @@ export function analyzeChoiceGroup(
   // on their own. It never overrides a decision -- it only runs after the
   // conjunction above has already declined -- so nothing the gate accepts today
   // can change, and only refused cells can move.
-  if (usesBaseline && rescue !== null && rescue >= RESCUE_THRESHOLD) {
+  //
+  // `belowPhotoBinaryFloor` is the one thing it is not allowed to overrule.
+  // Its weights read shape and fit, not signal strength, so a two-candidate
+  // photo group under the raised floor is precisely the case it would rescue
+  // -- and the floor exists because those readings were wrong as often as they
+  // were right.
+  if (usesBaseline && !belowPhotoBinaryFloor && rescue !== null && rescue >= RESCUE_THRESHOLD) {
     refused.push(`rescued:${rescue.toFixed(2)}`);
     return {
       field: group.field,
@@ -1363,7 +1450,9 @@ export function analyzeChoiceGroup(
 
   // A verified table cell lets us use a lower medium threshold for a clear
   // hand-drawn ring. Sensitive fields can opt out and remain manual unless
-  // the stricter high-confidence rule above is met.
+  // the stricter high-confidence rule above is met. `mediumScoreThreshold`
+  // already carries the photo-binary floor where it applies, so this path
+  // cannot admit a score the high one refused for being under it.
   if (!requireHighVisualConfidence && best.score >= mediumScoreThreshold && gap >= mediumGapThreshold) {
     return {
       field: group.field,
