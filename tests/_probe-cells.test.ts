@@ -3,7 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import sharp from 'sharp';
 import { loadImageAnalysisData } from '../src/lib/recognition/markDensity';
-import { satisfactionTemplate } from '../src/lib/recognition/roiTemplates';
+import { cagiTemplate, satisfactionTemplate } from '../src/lib/recognition/roiTemplates';
 import { recognizeStudentForms } from '../src/lib/recognition/detectCheckmarks';
 import { PDF_RENDER_OPTIONS } from '../src/lib/pdf/pdfRenderConfig';
 
@@ -29,12 +29,14 @@ const PRODUCTION_RENDER = PDF_RENDER_OPTIONS[0];
  * boolean as a count, and §13.8 had two synthetics disagreeing about a case the
  * photographs settled.
  *
- *   SAT_PDF="<path>" OUT="<dir>" npx vitest run tests/_probe-p16-cells.test.ts
+ *   PDF="<path>" TEMPLATE=cagi|sat PAGE=3 FIELDS=gender \
+ *     OUT="<dir>" npx vitest run tests/_probe-cells.test.ts
  */
 
-const SAT_PDF = process.env.SAT_PDF;
+const PDF = process.env.PDF || process.env.SAT_PDF;
 const OUT = process.env.OUT;
 const PAGE = Number(process.env.PAGE || 16);
+const TEMPLATE = (process.env.TEMPLATE || 'sat').toLowerCase();
 const FIELDS = (process.env.FIELDS || 'q02,q03,q04,q05,q06').split(',');
 
 async function renderPage(pdfPath: string, pageNo: number, out: string) {
@@ -71,13 +73,13 @@ async function renderPage(pdfPath: string, pageNo: number, out: string) {
   return out;
 }
 
-const run = SAT_PDF && OUT ? describe : describe.skip;
+const run = PDF && OUT ? describe : describe.skip;
 
 run('p16 cells', () => {
   it('writes crops of the disputed fields', async () => {
     fs.mkdirSync(OUT!, { recursive: true });
-    const pagePath = path.join(OUT!, `sat-p${PAGE}.jpg`);
-    await renderPage(SAT_PDF!, PAGE, pagePath);
+    const pagePath = path.join(OUT!, `${TEMPLATE}-p${PAGE}.jpg`);
+    await renderPage(PDF!, PAGE, pagePath);
 
     const img = await loadImageAnalysisData(pagePath);
     const b = img.contentBounds!;
@@ -85,7 +87,8 @@ run('p16 cells', () => {
     const H = b.bottom - b.top;
     console.info(`page ${img.width}x${img.height}  content ${b.left},${b.top}..${b.right},${b.bottom}`);
 
-    const groups = satisfactionTemplate.choiceGroups as Array<{
+    const tmpl = TEMPLATE === 'cagi' ? cagiTemplate : satisfactionTemplate;
+    const groups = tmpl.choiceGroups as Array<{
       id?: string; field?: string; candidates: Array<{ rect: { x: number; y: number; width: number; height: number } }>;
     }>;
     console.info(`group ids: ${groups.map((g) => g.id ?? g.field).join(' ')}`);
