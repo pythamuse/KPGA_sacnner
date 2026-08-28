@@ -135,7 +135,7 @@ run('runner-up distribution', () => {
       }
 
       const values = (draft.values ?? draft) as Record<string, unknown>;
-      for (const [field, t] of byField) {
+      for (const [field, t] of Array.from(byField.entries())) {
         if (!t || t.n !== 2) continue;      // binary groups only
         const want = keyRow[field.replace(/^satisfaction\./, 'satisfaction.')] as unknown;
         const got = values?.[field] ?? (values as Record<string, Record<string, unknown>>)?.[field.split('.')[0]]?.[field.split('.')[1]];

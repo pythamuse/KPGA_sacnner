@@ -63,6 +63,14 @@ const RENDER_QUALITY = Number(process.env.REAL_SCAN_RENDER_QUALITY || PRODUCTION
 // This exists to measure whether losslessness is worth anything; it is not a
 // way to make a number look better, and parity below still reports the truth.
 const RENDER_FORMAT = (process.env.REAL_SCAN_RENDER_FORMAT || 'jpeg').toLowerCase();
+/**
+ * Sample set 3 stacks its satisfaction sheets back to front -- page 1 is
+ * student 19 -- while its CAGI stack stays in student order. Set this when
+ * measuring it. Without it every student is scored against someone else's
+ * second sheet, and the totals read as a recognition collapse rather than the
+ * bookkeeping one it is. See CLAUDE.md §3.1 for the sample inventory.
+ */
+const SAT_REVERSED = Boolean(process.env.REAL_SCAN_SAT_REVERSED);
 const renderLog: string[] = [];
 const KEY_PATH = process.env.REAL_SCAN_ANSWER_KEY
   || path.join(process.cwd(), 'local-scans', 'answer-key.json');
@@ -176,7 +184,13 @@ describe.skipIf(!CAGI_PDF || !SAT_PDF)('real scan measurement', () => {
     const answerKey = loadAnswerKey();
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kpga-scan-'));
     const cagiPngs = await renderPdfPages(CAGI_PDF!, PAGES, tmp, 'cagi');
-    const satPngs = await renderPdfPages(SAT_PDF!, PAGES, tmp, 'sat');
+    const satPngsRaw = await renderPdfPages(SAT_PDF!, PAGES, tmp, 'sat');
+    // Reversing here keeps sat[i] the sheet that belongs to cagi[i], so the
+    // answer key -- which is per student, not per page -- still applies.
+    const satPngs = SAT_REVERSED ? [...satPngsRaw].reverse() : satPngsRaw;
+    if (SAT_REVERSED) {
+      renderLog.push('  satisfaction stack REVERSED for pairing (set 3)');
+    }
 
     const report: string[] = ['\n================ REAL SCAN MEASUREMENT ================'];
     const parity = RENDER_SCALE === PRODUCTION_RENDER.scale
