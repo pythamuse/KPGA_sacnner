@@ -8,7 +8,11 @@ import { PDF_RENDER_OPTIONS } from '../src/lib/pdf/pdfRenderConfig';
 /**
  * ONE-OFF PROBE -- delete after the round.
  *
- * FIELD_TEST §25.4: scan set 2 fills three cells the form leaves unmarked, two
+ * Dumps the RAW decision trace per group, joined to the key, so any feature the
+ * trace carries can be scored offline without re-running recognition. Built for
+ * the §28.5 follow-up: does any SHAPE term (size/compact/diag, per-box edge/
+ * bal/inner/bcore/mscore) separate the union's wrong cells from correct fills
+ * under a permutation control -- FIELD_TEST §25.4: scan set 2 fills three cells the form leaves unmarked, two
  * of them on CLAUDE.md §3's must-be-blank list. Inventing a value is the worst
  * failure this project has.
  *
@@ -84,34 +88,18 @@ async function renderPdfPages(pdfPath: string, pages: number, outDir: string, la
   return out;
 }
 
-interface Box { rank: number; scr: number; page: number; blank: number; zeroed: boolean }
-
 function parseTrace(line: string) {
   const field = /field=([\w.]+)/.exec(line)?.[1];
   const outcome = /outcome=(\w+)/.exec(line)?.[1];
   if (!field || !outcome) return null;
-  const refused = /refused=([\w,-]+)/.exec(line)?.[1] ?? 'none';
-  const floorRatio = Number(/floor=[0-9.]+\/[0-9.]+\(([0-9.]+)x\)/.exec(line)?.[1] ?? 'NaN');
-  const boxesRaw = /boxes=\[(.*)\] pitch=/.exec(line)?.[1] ?? '';
-  const boxes: Box[] = boxesRaw.split(' | ').map((seg) => {
-    const rank = Number(/^(\d+)@/.exec(seg.trim())?.[1] ?? '0');
-    const num = (k: string) => Number(new RegExp(`\\b${k}=(-?[0-9.]+)`).exec(seg)?.[1] ?? 'NaN');
-    return {
-      rank,
-      scr: num('scr'),
-      page: num('page'),
-      blank: num('blank'),
-      zeroed: /inkInvariant=zeroed/.test(seg),
-    };
-  }).filter((b) => Number.isFinite(b.scr));
-  return { field, outcome, refused, floorRatio, boxes };
+  return { field, outcome, line };
 }
 
 const ready = CAGI_PDF && SAT_PDF && OUT && fs.existsSync(KEY_PATH);
 const run = ready ? describe : describe.skip;
 
-run('ink-invariant groups', () => {
-  it('dumps every group with its per-box ink, joined to the key', async () => {
+run('trace dump', () => {
+  it('dumps every group with its raw decision trace, joined to the key', async () => {
     const key = JSON.parse(fs.readFileSync(KEY_PATH, 'utf8')) as { pages: Array<Record<string, unknown>> };
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kpga-ink-'));
     const cagi = await renderPdfPages(CAGI_PDF!, PAGES, tmp, 'cagi');
@@ -158,7 +146,7 @@ run('ink-invariant groups', () => {
       };
 
       for (const [field, t] of Array.from(byField.entries())) {
-        if (!t || t.boxes.length === 0) continue;
+        if (!t) continue;
         const got = values[field];
         const want = keyRow[field];
         rows.push({
@@ -166,16 +154,10 @@ run('ink-invariant groups', () => {
           page,
           field,
           outcome: t.outcome,
-          refused: t.refused,
-          floorRatio: t.floorRatio,
-          allZeroed: t.boxes.every((b) => b.zeroed),
-          anyZeroed: t.boxes.some((b) => b.zeroed),
-          winnerZeroed: t.boxes.find((b) => b.rank === 1)?.zeroed
-            ?? t.boxes[0].zeroed,
-          boxes: t.boxes,
           want: want === undefined ? null : want,
           got: got === undefined || got === null || got === '' ? null : got,
           keyHasNull: Object.prototype.hasOwnProperty.call(keyRow, field) && keyRow[field] === null,
+          trace: t.line,
         });
       }
       realInfo(`set${SET} p${page} groups=${byField.size}`);
