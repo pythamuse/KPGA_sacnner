@@ -6,6 +6,8 @@ import {
   analyzeChoiceGroup,
   calculateDarkPixelDensity,
   calculateTemplateInkDifference,
+  isContestedRunnerUp,
+  CONTESTED_RUNNERUP_MSCORE,
   detectContentBounds,
   detectPaperBounds,
   hasUsableFormBounds,
@@ -37,6 +39,27 @@ function makeTestImage(): ImageAnalysisData {
 }
 
 describe('마킹 밀도 기반 선택지 분석', () => {
+  it('marks only a high-confidence runner-up at or above the measured boundary', () => {
+    expect(isContestedRunnerUp('high', CONTESTED_RUNNERUP_MSCORE - 0.0001, true)).toBe(false);
+    expect(isContestedRunnerUp('high', CONTESTED_RUNNERUP_MSCORE, true)).toBe(true);
+    expect(isContestedRunnerUp('medium', CONTESTED_RUNNERUP_MSCORE, true)).toBe(false);
+    expect(isContestedRunnerUp('low', CONTESTED_RUNNERUP_MSCORE + 0.01, true)).toBe(false);
+    expect(isContestedRunnerUp('high', CONTESTED_RUNNERUP_MSCORE + 0.01, false)).toBe(false);
+    expect(isContestedRunnerUp('high', undefined, true)).toBe(false);
+  });
+
+  it('keeps a single-candidate high-confidence result uncontested', () => {
+    const result = analyzeChoiceGroup(makeTestImage(), {
+      field: 'cagi.q01',
+      candidates: [
+        { value: 0, rect: { x: 0.1, y: 0.1, width: 0.3, height: 0.3 } },
+      ],
+    });
+
+    expect(result.confidence).toBe('high');
+    expect(result.contested).toBe(false);
+  });
+
   it('ROI 안의 어두운 픽셀 비율을 계산한다', () => {
     const image = makeTestImage();
 

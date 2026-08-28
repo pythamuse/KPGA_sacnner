@@ -542,6 +542,7 @@ export default function RecognitionReview({
 
   const renderValueSourceBadge = (key: string) => {
     const source = draft.source?.recognitionValueSource?.[key] || 'unresolved';
+    const contested = source === 'auto' && draft.source?.recognitionContested?.[key] === true;
     const manualEditedAt = draft.source?.recognitionManualEditedAt?.[key];
     const styleMap: Record<string, { border: string; text: string; bg: string; label: string }> = {
       auto: { border: '#9fdfc5', text: '#177245', bg: '#eefaf3', label: '자동 인식' },
@@ -563,25 +564,48 @@ export default function RecognitionReview({
           : '자동 인식값이 확정되지 않아 검수가 필요합니다.';
 
     return (
-      <span
-        title={title}
-        style={{
-          display: 'inline-flex',
-          alignItems: 'center',
-          minHeight: 24,
-          padding: '2px 8px',
-          borderRadius: 999,
-          border: `1px solid ${style.border}`,
-          color: style.text,
-          background: style.bg,
-          fontSize: 12,
-          fontWeight: 700,
-          marginLeft: 6,
-          whiteSpace: 'nowrap',
-        }}
-      >
-        {style.label}
-      </span>
+      <>
+        <span
+          title={title}
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            minHeight: 24,
+            padding: '2px 8px',
+            borderRadius: 999,
+            border: `1px solid ${style.border}`,
+            color: style.text,
+            background: style.bg,
+            fontSize: 12,
+            fontWeight: 700,
+            marginLeft: 6,
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {style.label}
+        </span>
+        {contested && (
+          <span
+            title="다른 칸에도 표시 흔적이 있습니다 — 지운 표시인지 확인해주세요"
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              minHeight: 24,
+              padding: '2px 8px',
+              borderRadius: 999,
+              border: '1px solid #f5d29a',
+              color: 'var(--warning)',
+              background: 'var(--warning-bg)',
+              fontSize: 12,
+              fontWeight: 700,
+              marginLeft: 6,
+              whiteSpace: 'nowrap',
+            }}
+          >
+            경합
+          </span>
+        )}
+      </>
     );
   };
 

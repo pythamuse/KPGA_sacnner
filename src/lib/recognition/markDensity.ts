@@ -70,6 +70,7 @@ export interface ChoiceGroupResult {
   field: string;
   value?: number | string;
   confidence: 'high' | 'medium' | 'low';
+  contested: boolean;
   candidates: CandidateScore[];
   /** Internal measurement outlet; removed before the API response is built. */
   candidateMeasurements?: CandidateMeasurement[];
@@ -79,6 +80,27 @@ export interface ChoiceGroupResult {
    * except scores, so a student's answers cannot travel through it.
    */
   decision: string;
+}
+
+/** 근거: FIELD_TEST §29 (2026-08-29). 세 세트 1,053칸에서 배지 137개로 오답 12/18
+ * 커버(무작위 p99=6). 취소 X 오답 10/10 포함. 값·신뢰도·빈칸 수는 절대 바꾸지 않는다. */
+export const CONTESTED_RUNNERUP_MSCORE = 0.01;
+
+/**
+ * A contested badge is possible only for a confirmed high-confidence group
+ * with an actual runner-up score. Missing and non-finite measurements are
+ * treated as no signal.
+ */
+export function isContestedRunnerUp(
+  confidence: ChoiceGroupResult['confidence'],
+  matchedScore: number | undefined,
+  hasRunnerUp: boolean,
+): boolean {
+  return confidence === 'high'
+    && hasRunnerUp
+    && matchedScore !== undefined
+    && Number.isFinite(matchedScore)
+    && matchedScore >= CONTESTED_RUNNERUP_MSCORE;
 }
 
 export interface ChoiceGroupBaseline {
@@ -175,6 +197,12 @@ interface TemplateInkFeatures extends TemplateInkShape {
   probe?: { x: number; y: number; fit: number; chosenFit: number; radius: number };
   /** What the leftover disagreement is made of. Only measured while tracing. */
   composition?: ResidualComposition;
+  /**
+   * Lazy input for the one runner-up matched-score measurement. Keeping the
+   * input here lets ranking finish before this expensive signal is requested,
+   * while the trace and badge still share the same calculation helper.
+   */
+  matchedScoreInput?: MatchedScoreInput;
   /**
    * Where the *printed* ink sits inside this cell on the blank form. Only
    * measured while tracing.
@@ -1018,7 +1046,12 @@ function rescueConfidence(
     + RESCUE_BIAS;
 }
 
-function describeDecision(evidence: DecisionEvidence, outcome: string, refused: string[]): string {
+function describeDecision(
+  evidence: DecisionEvidence,
+  outcome: string,
+  refused: string[],
+  contested = false,
+): string {
   const {
     field, usesBaseline, usesGridCells, scores, best, gap, relativeContrast,
     highScoreThreshold, highGapThreshold, mediumScoreThreshold, mediumGapThreshold,
@@ -1034,6 +1067,10 @@ function describeDecision(evidence: DecisionEvidence, outcome: string, refused: 
     `base=${usesBaseline ? 1 : 0} cells=${usesGridCells ? 1 : 0} n=${scores.length}`,
     `scores=${scores.map((score) => score.toFixed(3)).join('/')}`,
   ];
+
+  if (contested) {
+    parts.push('contested=1');
+  }
 
   if (best) {
     parts.push(`floor=${ratioOf(best.score, highScoreThreshold)}`);
@@ -1156,6 +1193,28 @@ function describeDecision(evidence: DecisionEvidence, outcome: string, refused: 
  */
 function isTracing(): boolean {
   return typeof process !== 'undefined' && Boolean(process.env?.MARK_DECISION_TRACE);
+}
+
+/**
+ * Reads the runner-up signal only after the group has earned high confidence.
+ * Traced groups already carry the exact value from `analyzeResidualComposition`;
+ * normal production groups use the lazy input and calculate it once here.
+ */
+function getRunnerUpMatchedScore(candidate: ScoredCandidate | undefined): number | undefined {
+  const tracedScore = candidate?.shape?.composition?.matchedScore;
+  if (typeof tracedScore === 'number') {
+    return tracedScore;
+  }
+  const input = candidate?.shape?.matchedScoreInput;
+  return input ? calculateMatchedScore(input) : undefined;
+}
+
+function isContestedHighConfidenceRunnerUp(candidate: ScoredCandidate | undefined): boolean {
+  return isContestedRunnerUp(
+    'high',
+    getRunnerUpMatchedScore(candidate),
+    Boolean(candidate),
+  );
 }
 
 function emitDecisionTrace(trace: string): void {
@@ -1401,6 +1460,7 @@ export function analyzeChoiceGroup(
     return {
       field: group.field,
       confidence: 'low',
+      contested: false,
       candidates,
       candidateMeasurements,
       decision: describeDecision(evidence, 'low', ['no-candidates']),
@@ -1476,6 +1536,7 @@ export function analyzeChoiceGroup(
     return {
       field: group.field,
       confidence: 'low',
+      contested: false,
       candidates,
       candidateMeasurements,
       decision: describeDecision(
@@ -1558,6 +1619,7 @@ export function analyzeChoiceGroup(
     return {
       field: group.field,
       confidence: 'low',
+      contested: false,
       candidates,
       candidateMeasurements,
       decision: describeDecision(evidence, 'low', refused),
@@ -1606,6 +1668,7 @@ export function analyzeChoiceGroup(
     return {
       field: group.field,
       confidence: 'low',
+      contested: false,
       candidates,
       candidateMeasurements,
       decision: describeDecision(evidence, 'low', refused),
@@ -1618,13 +1681,15 @@ export function analyzeChoiceGroup(
     && hasStructuredMark
     && (!usesBaseline || relativeContrast >= HIGH_RELATIVE_CONTRAST)
   ) {
+    const contested = isContestedHighConfidenceRunnerUp(second);
     return {
       field: group.field,
       value: best.value,
       confidence: 'high',
+      contested,
       candidates,
       candidateMeasurements,
-      decision: describeDecision(evidence, 'high', refused),
+      decision: describeDecision(evidence, 'high', refused, contested),
     };
   }
 
@@ -1651,13 +1716,15 @@ export function analyzeChoiceGroup(
     && rescue >= RESCUE_THRESHOLD
   ) {
     refused.push(`rescued:${rescue.toFixed(2)}`);
+    const contested = isContestedHighConfidenceRunnerUp(second);
     return {
       field: group.field,
       value: best.value,
       confidence: 'high',
+      contested,
       candidates,
       candidateMeasurements,
-      decision: describeDecision(evidence, 'high', refused),
+      decision: describeDecision(evidence, 'high', refused, contested),
     };
   }
 
@@ -1671,6 +1738,7 @@ export function analyzeChoiceGroup(
       field: group.field,
       value: best.value,
       confidence: 'medium',
+      contested: false,
       candidates,
       candidateMeasurements,
       decision: describeDecision(evidence, 'medium', refused),
@@ -1684,6 +1752,7 @@ export function analyzeChoiceGroup(
   return {
     field: group.field,
     confidence: 'low',
+    contested: false,
     candidates,
     candidateMeasurements,
     decision: describeDecision(evidence, 'low', refused),
@@ -1744,6 +1813,18 @@ interface ToneCorrection {
   fallback: string | null;
   /** What `describeDecision` prints, so the path taken is never silent. */
   label: string;
+}
+
+interface MatchedScoreInput {
+  actual: number[];
+  blank: number[];
+  width: number;
+  height: number;
+  tone: ToneCorrection;
+  offsetX: number;
+  offsetY: number;
+  radiusX: number;
+  radiusY: number;
 }
 
 /**
@@ -2238,6 +2319,17 @@ function calculateTemplateInkFeatures(
         radiusY,
       )
       : undefined,
+    matchedScoreInput: {
+      actual,
+      blank,
+      width: sampleWidth,
+      height: sampleHeight,
+      tone,
+      offsetX: alignment.x,
+      offsetY: alignment.y,
+      radiusX,
+      radiusY,
+    },
   };
 }
 
@@ -2826,6 +2918,74 @@ interface ResidualComposition {
 }
 
 /**
+ * Calculates the structural signal in one already-aligned candidate. This is
+ * the single definition shared by the trace and the production runner-up
+ * badge; callers decide when the result is worth paying for.
+ */
+function calculateMatchedScore(input: MatchedScoreInput): number {
+  const page = new Float32Array(input.width * input.height);
+  const base = new Float32Array(input.width * input.height);
+  for (let index = 0; index < page.length; index++) {
+    page[index] = darkness(applyTone(input.tone, input.actual[index]));
+    base[index] = darkness(input.blank[index]);
+  }
+
+  return calculateMatchedScoreFromSoftened(
+    softenSamples(page, input.width, input.height),
+    softenSamples(base, input.width, input.height),
+    input.width,
+    input.height,
+    input.offsetX,
+    input.offsetY,
+    input.radiusX,
+    input.radiusY,
+  );
+}
+
+function calculateMatchedScoreFromSoftened(
+  softPage: Float32Array,
+  softBase: Float32Array,
+  width: number,
+  height: number,
+  offsetX: number,
+  offsetY: number,
+  radiusX: number,
+  radiusY: number,
+): number {
+  const at = (grid: Float32Array, x: number, y: number): number => {
+    const cx = clamp(x, 0, width - 1);
+    const cy = clamp(y, 0, height - 1);
+    const x0 = Math.floor(cx);
+    const y0 = Math.floor(cy);
+    const fx = cx - x0;
+    const fy = cy - y0;
+    const x1 = Math.min(x0 + 1, width - 1);
+    const y1 = Math.min(y0 + 1, height - 1);
+    const topLeft = grid[y0 * width + x0];
+    const topRight = grid[y0 * width + x1];
+    const bottomLeft = grid[y1 * width + x0];
+    const bottomRight = grid[y1 * width + x1];
+    return topLeft
+      + (topRight - topLeft) * fx
+      + (bottomLeft - topLeft) * fy
+      + (topLeft - topRight - bottomLeft + bottomRight) * fx * fy;
+  };
+
+  let matchedScoreTotal = 0;
+  let count = 0;
+  for (let y = radiusY; y < height - radiusY; y++) {
+    for (let x = radiusX; x < width - radiusX; x++) {
+      const bx = x + offsetX;
+      const by = y + offsetY;
+      matchedScoreTotal += Math.max(0, at(softPage, x, y) - at(softBase, bx, by) - 0.08);
+      count++;
+    }
+  }
+
+  return matchedScoreTotal / Math.max(count, 1);
+}
+
+/**
  * What the leftover disagreement is made of, once the baseline is placed as
  * well as it can be.
  *
@@ -2852,7 +3012,8 @@ interface ResidualComposition {
  * compare the two at a common effective resolution. If softening changes
  * nothing, no operation on the baseline reaches this residual.
  *
- * Measured only while tracing.
+ * The full composition remains trace-only; `matchedScore` is also requested for
+ * the one runner-up of a high-confidence production group.
  */
 function analyzeResidualComposition(
   actual: number[],
@@ -2912,7 +3073,6 @@ function analyzeResidualComposition(
   let blankGradient = 0;
   let softBlankTotal = 0;
   let softBothTotal = 0;
-  let matchedScoreTotal = 0;
 
   for (let y = radiusY; y < height - radiusY; y++) {
     for (let x = radiusX; x < width - radiusX; x++) {
@@ -2922,7 +3082,6 @@ function analyzeResidualComposition(
       total += Math.abs(difference);
       softBlankTotal += Math.abs(at(page, x, y) - at(softBase, bx, by));
       softBothTotal += Math.abs(at(softPage, x, y) - at(softBase, bx, by));
-      matchedScoreTotal += Math.max(0, at(softPage, x, y) - at(softBase, bx, by) - 0.08);
       pageGradient += gradient(page, x, y);
       blankGradient += gradient(base, bx, by);
       count++;
@@ -2943,7 +3102,16 @@ function analyzeResidualComposition(
     blankSharpness: blankGradient / samples,
     fitSoftBlank: softBlankTotal / samples,
     fitSoftBoth: softBothTotal / samples,
-    matchedScore: matchedScoreTotal / samples,
+    matchedScore: calculateMatchedScoreFromSoftened(
+      softPage,
+      softBase,
+      width,
+      height,
+      offsetX,
+      offsetY,
+      radiusX,
+      radiusY,
+    ),
   };
 }
 
