@@ -54,6 +54,7 @@ export interface RecognitionDraft {
     recognitionCropDiagnostic?: Record<string, string>;
     recognitionRegistration?: Record<string, FieldRegistration>;
     recognitionValueSource?: Record<string, RecognitionValueSource>;
+    recognitionContested?: Record<string, boolean>;
     recognitionDecisionTrace?: Record<string, string>;
     recognitionManualEditedAt?: Record<string, string>;
   };
@@ -101,6 +102,7 @@ export interface RecognitionDraft {
   recognitionCropDiagnostic?: Record<string, string>;
   recognitionRegistration?: Record<string, FieldRegistration>;
   recognitionValueSource?: Record<string, RecognitionValueSource>;
+  recognitionContested?: Record<string, boolean>;
   recognitionDecisionTrace?: Record<string, string>;
   /** Server-only outlet; `/api/recognize` removes it before returning JSON. */
   recognitionMeasurements?: RecognitionMeasurementsByField;
@@ -141,6 +143,7 @@ export async function recognizeStudentForms(
   const recognitionCropDiagnostic: Record<string, string> = {};
   const recognitionRegistration: Record<string, FieldRegistration> = {};
   const recognitionValueSource: Record<string, RecognitionValueSource> = {};
+  const recognitionContested: Record<string, boolean> = {};
   const recognitionDecisionTrace: Record<string, string> = {};
   const recognitionMeasurements: RecognitionMeasurementsByField = {};
   // Instrumentation only: appended to the basic-information traces below so
@@ -150,6 +153,7 @@ export async function recognizeStudentForms(
 
   for (const field of RECOGNITION_FIELDS) {
     recognitionValueSource[field] = 'unresolved';
+    recognitionContested[field] = false;
     recognitionDecisionTrace[field] = 'Automatic entry was not confirmed.';
   }
 
@@ -319,6 +323,7 @@ export async function recognizeStudentForms(
         )
         : undefined;
       const directCheckboxEvidence = checkboxEvidence ? checkboxEvidence.accepted : true;
+      recognitionContested[result.field] = result.contested && directCheckboxEvidence;
       if (directCheckboxGroup) {
         basicCheckboxMeasurement[group.field] = [
           basicCheckboxMeasurement[group.field],
@@ -353,7 +358,8 @@ export async function recognizeStudentForms(
       }
       recognitionValueSource[result.field] = 'auto';
       recognitionDecisionTrace[result.field] =
-        getRecognitionFieldLabel(result.field) + ': automatic entry completed from a verified grid and high-confidence mark evidence.';
+        getRecognitionFieldLabel(result.field) + ': automatic entry completed from a verified grid and high-confidence mark evidence.'
+        + (recognitionContested[result.field] ? ' contested=1' : '');
     }
 
     for (const [field, rect] of Object.entries(cagiGridDetection.fieldRects)) {
@@ -479,6 +485,7 @@ export async function recognizeStudentForms(
         satisfactionImage,
       );
       draft.confidence[result.field] = result.confidence;
+      recognitionContested[result.field] = result.contested;
       draft.candidates![result.field] = result.candidates;
 
       if (result.value === undefined || result.confidence !== 'high') {
@@ -493,7 +500,8 @@ export async function recognizeStudentForms(
       draft.satisfaction[questionKey] = Number(result.value);
       recognitionValueSource[result.field] = 'auto';
       recognitionDecisionTrace[result.field] =
-        getRecognitionFieldLabel(result.field) + ': automatic entry completed from a verified grid and high-confidence mark evidence.';
+        getRecognitionFieldLabel(result.field) + ': automatic entry completed from a verified grid and high-confidence mark evidence.'
+        + (result.contested ? ' contested=1' : '');
     }
 
     for (const [field, rect] of Object.entries(satisfactionGridDetection.fieldRects)) {
@@ -551,6 +559,7 @@ export async function recognizeStudentForms(
     );
   }
   draft.recognitionValueSource = recognitionValueSource;
+  draft.recognitionContested = recognitionContested;
   draft.recognitionDecisionTrace = recognitionDecisionTrace;
 
   return draft;
