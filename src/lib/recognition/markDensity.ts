@@ -75,6 +75,11 @@ export interface ChoiceGroupResult {
   /** Internal measurement outlet; removed before the API response is built. */
   candidateMeasurements?: CandidateMeasurement[];
   /**
+   * Which box the two independent rankings both put first, on a group that is
+   * being left for review. Never a value: see `selectReviewSuggestion`.
+   */
+  suggestion?: ReviewSuggestion;
+  /**
    * Why this group landed where it did, as numbers and fixed labels only. See
    * `describeDecision`. Nothing in this string comes from the scanned page
    * except scores, so a student's answers cannot travel through it.
@@ -101,6 +106,87 @@ export function isContestedRunnerUp(
     && matchedScore !== undefined
     && Number.isFinite(matchedScore)
     && matchedScore >= CONTESTED_RUNNERUP_MSCORE;
+}
+
+/** Which box to offer the reviewer as a default. Never a value. */
+export interface ReviewSuggestion {
+  candidateIndex: number;
+  value: number | string;
+}
+
+/**
+ * One candidate's two ranking features, as the rule reads them.
+ *
+ * `matchedScore` is whatever `calculateMatchedScore` returned for this box —
+ * the same helper the contested badge and the trace share. There is no second
+ * definition of it anywhere, which is the property §29.5 records as the reason
+ * the badge's offline prediction transferred to production unchanged.
+ */
+export interface ReviewSuggestionFeatures {
+  candidateIndex: number;
+  value: number | string;
+  /** `actualInk - baselineInk`: how much darker this box is than the blank form. */
+  pageMinusBlank: number | undefined;
+  matchedScore: number | undefined;
+}
+
+/**
+ * The reviewer's default on a group the scorer refused.
+ *
+ * 근거: FIELD_TEST §31 (2026-09-02) + 중앙 측정. 세 세트 거절 192그룹(우연 32%)에서
+ * `pageMinusBlank` 단독 1위 적중 76.6%, `matchedScore` 단독 1위 76.8%. 두 특징이
+ * **서로 독립적으로 같은 상자를** 1위로 꼽은 159그룹에서 83.0%
+ * (세트별 76.7% / 90.7% / 80.6%).
+ *
+ * 83%는 자동 입력 기준에 **미달이다** — §31.3이 정확히 그것을 기각했다. 17%는
+ * 사람이 확인한 것처럼 저장되는 오답이 되고 `WRONG = 0`이 그것을 금지한다. 그래서
+ * 이 함수의 결과는 값이 아니라 **검수자가 확인하는 기본 선택지**로만 흐른다:
+ * 값·신뢰도·빈칸 수 어느 것도 이것을 읽지 않는다.
+ *
+ * Silence is the default. Where either ranking has a tie at the top, where the
+ * two rankings disagree, or where any box is missing either feature, there is
+ * no suggestion at all — the measured 83% is a property of the agreement, and a
+ * guess made without it is not the thing that was measured.
+ */
+export function selectReviewSuggestion(
+  features: ReviewSuggestionFeatures[],
+): ReviewSuggestion | undefined {
+  // A one-box group has nothing to rank: whichever box exists is trivially
+  // first on both features, and "both agree" would mean nothing.
+  if (features.length < 2) return undefined;
+  const byInk = strictlyFirstBy(features, (feature) => feature.pageMinusBlank);
+  if (!byInk) return undefined;
+  const byMatchedScore = strictlyFirstBy(features, (feature) => feature.matchedScore);
+  if (!byMatchedScore) return undefined;
+  if (byInk.candidateIndex !== byMatchedScore.candidateIndex) return undefined;
+  return { candidateIndex: byInk.candidateIndex, value: byInk.value };
+}
+
+/**
+ * The single highest candidate on one feature, or nothing.
+ *
+ * Returns undefined on a tie at the top and on any missing or non-finite
+ * reading, so a ranking is either complete and strict or it does not exist.
+ */
+function strictlyFirstBy(
+  features: ReviewSuggestionFeatures[],
+  read: (feature: ReviewSuggestionFeatures) => number | undefined,
+): ReviewSuggestionFeatures | undefined {
+  let leader: ReviewSuggestionFeatures | undefined;
+  let leadingValue = Number.NEGATIVE_INFINITY;
+  let tiedAtTop = false;
+  for (const feature of features) {
+    const value = read(feature);
+    if (value === undefined || !Number.isFinite(value)) return undefined;
+    if (value > leadingValue) {
+      leadingValue = value;
+      leader = feature;
+      tiedAtTop = false;
+    } else if (value === leadingValue) {
+      tiedAtTop = true;
+    }
+  }
+  return tiedAtTop ? undefined : leader;
 }
 
 export interface ChoiceGroupBaseline {
@@ -1051,6 +1137,7 @@ function describeDecision(
   outcome: string,
   refused: string[],
   contested = false,
+  suggestion?: ReviewSuggestion,
 ): string {
   const {
     field, usesBaseline, usesGridCells, scores, best, gap, relativeContrast,
@@ -1070,6 +1157,13 @@ function describeDecision(
 
   if (contested) {
     parts.push('contested=1');
+  }
+
+  // The box the two rankings agreed on, by its position in the template's
+  // candidate list -- the same index `boxes=[...]` below is ordered by score,
+  // not position, so the two are read together deliberately.
+  if (suggestion) {
+    parts.push(`suggest=${suggestion.candidateIndex}`);
   }
 
   if (best) {
@@ -1196,11 +1290,21 @@ function isTracing(): boolean {
 }
 
 /**
- * Reads the runner-up signal only after the group has earned high confidence.
+ * One candidate's structural score, from the one definition of it.
+ *
  * Traced groups already carry the exact value from `analyzeResidualComposition`;
- * normal production groups use the lazy input and calculate it once here.
+ * normal production groups use the lazy input and calculate it once here. Both
+ * routes end in `calculateMatchedScoreFromSoftened`, so the trace, the
+ * contested badge and the review suggestion are all reading the same number —
+ * §29.5 records that this sharing is why the badge's offline prediction
+ * transferred to production unchanged, and the suggestion rule was calibrated
+ * against the same trace field.
+ *
+ * The two callers differ only in when they are willing to pay for it: the badge
+ * asks for the runner-up of a group that already reached high confidence, the
+ * suggestion asks for every box of a group that reached no value at all.
  */
-function getRunnerUpMatchedScore(candidate: ScoredCandidate | undefined): number | undefined {
+function getCandidateMatchedScore(candidate: ScoredCandidate | undefined): number | undefined {
   const tracedScore = candidate?.shape?.composition?.matchedScore;
   if (typeof tracedScore === 'number') {
     return tracedScore;
@@ -1212,9 +1316,37 @@ function getRunnerUpMatchedScore(candidate: ScoredCandidate | undefined): number
 function isContestedHighConfidenceRunnerUp(candidate: ScoredCandidate | undefined): boolean {
   return isContestedRunnerUp(
     'high',
-    getRunnerUpMatchedScore(candidate),
+    getCandidateMatchedScore(candidate),
     Boolean(candidate),
   );
+}
+
+/**
+ * Reads both ranking features off a refused group's boxes and applies the rule.
+ *
+ * Only called from the two returns that leave a group for review with its
+ * geometry trusted. It reads nothing that any threshold reads and writes
+ * nothing back onto the candidates, so a group's value, confidence and blank
+ * status are identical whether or not this ever runs.
+ *
+ * `usesBaseline` is a precondition rather than a filter: without the blank form
+ * there is no `actualInk`/`baselineInk` pair and no `matchedScoreInput`, so the
+ * raw-density path has neither feature and this would return undefined anyway.
+ * Checking it up front just avoids walking the boxes to find that out.
+ */
+function buildReviewSuggestion(
+  scoredCandidates: ScoredCandidate[],
+  usesBaseline: boolean,
+): ReviewSuggestion | undefined {
+  if (!usesBaseline || scoredCandidates.length < 2) return undefined;
+  return selectReviewSuggestion(scoredCandidates.map((candidate) => ({
+    candidateIndex: candidate.candidateIndex,
+    value: candidate.value,
+    pageMinusBlank: candidate.shape
+      ? candidate.shape.actualInk - candidate.shape.baselineInk
+      : undefined,
+    matchedScore: getCandidateMatchedScore(candidate),
+  })));
 }
 
 function emitDecisionTrace(trace: string): void {
@@ -1533,6 +1665,12 @@ export function analyzeChoiceGroup(
     // separates them: if the form bounds are usable, the grid is what refused,
     // and that is a different file and a different fix.
     const formBounds = resolveFormBoundsStatus(image);
+    // No review suggestion here, and the scope is measured rather than
+    // cautious. The 192 refused groups §31 ranked are the ones whose geometry
+    // was trusted and whose *scoring* declined; the groups that got here
+    // instead are the ~21 per set the grid never verified (§30.1), and they
+    // were not in that sample. Ranking boxes that may not be the answer boxes
+    // is a different question with no measurement behind it.
     return {
       field: group.field,
       confidence: 'low',
@@ -1616,6 +1754,10 @@ export function analyzeChoiceGroup(
   if (offRowBand) {
     refused.push('band-structure');
     evidence.band = { ...offRowBand, inks: bandInks as number[] };
+    // No review suggestion. This refusal's own finding is that the band being
+    // measured is not the answer row, so the best box in it is not an answer
+    // and offering it as a default would be pointing the reviewer at the wrong
+    // part of the page.
     return {
       field: group.field,
       confidence: 'low',
@@ -1665,6 +1807,11 @@ export function analyzeChoiceGroup(
   // prevents actually occurs.
   if (photoProvenance && affineToneEnabled() && group.candidates.length === 2 && photoBinaryRefusalEnabled()) {
     refused.push('photo-binary-refused');
+    // No review suggestion, and this one is the sharpest case. Spec §14.1
+    // measured "the ranking is right" on exactly these groups and got 21 of 27
+    // -- every wrong one the other box winning outright. A default offered here
+    // would be that measured-bad rule wearing the 83% badge, on a population
+    // where 83% was never observed.
     return {
       field: group.field,
       confidence: 'low',
@@ -1734,14 +1881,19 @@ export function analyzeChoiceGroup(
   // already carries the photo-binary floor where it applies, so this path
   // cannot admit a score the high one refused for being under it.
   if (!requireHighVisualConfidence && best.score >= mediumScoreThreshold && gap >= mediumGapThreshold) {
+    // Medium reaches no automatic value either -- `detectCheckmarks` requires
+    // `high` -- so this group arrives at the review screen empty, exactly like
+    // the `low` return below, and gets the same default offered.
+    const suggestion = buildReviewSuggestion(scoredCandidates, usesBaseline);
     return {
       field: group.field,
       value: best.value,
       confidence: 'medium',
       contested: false,
+      suggestion,
       candidates,
       candidateMeasurements,
-      decision: describeDecision(evidence, 'medium', refused),
+      decision: describeDecision(evidence, 'medium', refused, false, suggestion),
     };
   }
 
@@ -1749,13 +1901,15 @@ export function analyzeChoiceGroup(
   if (!(best.score >= mediumScoreThreshold)) refused.push('medium-floor');
   if (!(gap >= mediumGapThreshold)) refused.push('medium-gap');
 
+  const suggestion = buildReviewSuggestion(scoredCandidates, usesBaseline);
   return {
     field: group.field,
     confidence: 'low',
     contested: false,
+    suggestion,
     candidates,
     candidateMeasurements,
-    decision: describeDecision(evidence, 'low', refused),
+    decision: describeDecision(evidence, 'low', refused, false, suggestion),
   };
 }
 

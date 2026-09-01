@@ -9,7 +9,7 @@ import {
   isRestorableSnapshot,
   stripDraftImages,
 } from '../src/lib/session/reviewSnapshot';
-import RecognitionReview from '../src/components/RecognitionReview';
+import RecognitionReview, { suggestionOptionLabels } from '../src/components/RecognitionReview';
 import {
   buildSheetQualityBadges,
   type SheetQualityAttachment,
@@ -219,6 +219,100 @@ describe('contested runner-up badge', () => {
     };
 
     expect(renderReview(draft)).not.toContain('경합');
+  });
+});
+
+describe('reviewer default on a refused field', () => {
+  /** A draft whose `cagi.q03` was left blank, with or without a suggestion. */
+  function makeBlankFieldDraft(suggested?: { candidateIndex: number; value: number | string }) {
+    const draft = stripDraftImages(makeDraft());
+    draft.cagi = { ...draft.cagi };
+    delete draft.cagi.q03;
+    draft.confidence = { ...draft.confidence, 'cagi.q03': 'low' };
+    draft.source = {
+      ...(draft.source || {}),
+      ...(suggested ? { recognitionSuggestion: { 'cagi.q03': suggested } } : {}),
+    };
+    return draft;
+  }
+
+  it('marks the suggested option and says plainly that it is a guess', () => {
+    const html = renderReview(makeBlankFieldDraft({ candidateIndex: 2, value: 2 }));
+
+    expect(html).toContain('추천');
+    expect(html).toContain('2 자주 있다');
+    expect(html).toContain('이 칸일 가능성이 높습니다 — 확인해주세요');
+  });
+
+  it('leaves the control empty, so the reviewer still has to answer', () => {
+    const html = renderReview(makeBlankFieldDraft({ candidateIndex: 2, value: 2 }));
+    // Just this field's card: every other blank cell renders the same options.
+    const start = html.indexOf('id="review-field-cagi-q03"');
+    const card = html.slice(start, html.indexOf('id="review-field-', start + 10));
+
+    expect(card).toContain('추천');
+    // React marks the chosen option in static markup. The empty placeholder is
+    // the selected one and no answer option is -- a suggestion is not a value.
+    expect(card).toContain('<option value="" selected="">선택</option>');
+    expect(card).not.toContain('selected="">2 자주 있다');
+    expect(card).not.toContain('<option value="2" selected="">');
+  });
+
+  it('changes no count: the field is still outstanding', () => {
+    const withSuggestion = renderReview(makeBlankFieldDraft({ candidateIndex: 2, value: 2 }));
+    const without = renderReview(makeBlankFieldDraft());
+    const count = (html: string) => html.match(/확인 필요 항목 (\d+)개/)?.[1];
+
+    expect(count(withSuggestion)).toBe(count(without));
+    expect(count(withSuggestion)).toBeDefined();
+    // And the card still reports itself as unresolved, not as anything the
+    // recognizer settled.
+    expect(withSuggestion).toContain('미확정');
+  });
+
+  it('offers nothing once the field has an answer', () => {
+    const draft = stripDraftImages(makeDraft());
+    draft.source = {
+      ...(draft.source || {}),
+      recognitionSuggestion: { 'cagi.q01': { candidateIndex: 3, value: 3 } },
+    };
+    // `cagi.q01` is 0 in the fixture draft, so there is nothing to default.
+    expect(renderReview(draft)).not.toContain('추천');
+  });
+
+  it('offers nothing once the reviewer has settled the field', () => {
+    const draft = makeBlankFieldDraft({ candidateIndex: 2, value: 2 });
+    draft.source = {
+      ...(draft.source || {}),
+      recognitionValueSource: { 'cagi.q03': 'blank_ok' },
+    };
+
+    expect(renderReview(draft)).not.toContain('추천');
+  });
+
+  it('renders nothing at all when no field carries a suggestion', () => {
+    expect(renderReview(makeBlankFieldDraft())).not.toContain('추천');
+  });
+
+  it('names every option exactly as its select renders it', () => {
+    // The suggestion strip keeps its own copy of the option labels. This is the
+    // guard against that copy drifting away from the controls it describes.
+    const html = renderReview(stripDraftImages(makeDraft()));
+    const fields = [
+      'basic.gender', 'basic.schoolType', 'basic.grade',
+      'cagi.q01', 'cagi.q09',
+      'satisfaction.q01', 'satisfaction.q02', 'satisfaction.q06',
+      'satisfaction.q07', 'satisfaction.q10',
+    ];
+    for (const field of fields) {
+      const labels = suggestionOptionLabels(field);
+      expect(labels, field).toBeDefined();
+      for (const [value, label] of Object.entries(labels!)) {
+        // `selected=""` lands between the two on whichever option is current.
+        const rendered = new RegExp(`value="${value}"( selected="")?>${label}</option>`);
+        expect(rendered.test(html), `${field} = ${value} (${label})`).toBe(true);
+      }
+    }
   });
 });
 

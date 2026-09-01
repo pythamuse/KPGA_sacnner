@@ -42,6 +42,23 @@ import fs from 'fs/promises';
 export type RecognitionCropSource = 'grid' | 'grid-candidate' | 'row' | 'row-fallback' | 'fixed';
 export type RecognitionValueSource = 'auto' | 'manual' | 'confirmed' | 'blank_ok' | 'unresolved' | 'restored';
 
+/**
+ * A default offered to the reviewer on a field the scorer left blank.
+ *
+ * Display only. No value, confidence or blank count is derived from it: the
+ * field stays empty and stays outstanding until a person picks something, and
+ * picking the suggestion goes through the ordinary manual-change path so it is
+ * labelled as a human's choice like any other. See `selectReviewSuggestion` for
+ * the rule and the measurement that scoped it to a suggestion rather than an
+ * automatic value.
+ */
+export interface RecognitionSuggestion {
+  /** Position in the template's candidate list; matches `suggest=` in the trace. */
+  candidateIndex: number;
+  /** The option as the review control holds it, through the same mapping the candidate summary uses. */
+  value: number | string;
+}
+
 export interface RecognitionDraft {
   source?: {
     cagiImageId?: string;
@@ -55,6 +72,12 @@ export interface RecognitionDraft {
     recognitionRegistration?: Record<string, FieldRegistration>;
     recognitionValueSource?: Record<string, RecognitionValueSource>;
     recognitionContested?: Record<string, boolean>;
+    /**
+     * Which option to offer as the reviewer's default on a field that was left
+     * blank. Display only: no value, confidence or blank count is derived
+     * from it anywhere. See `RecognitionSuggestion`.
+     */
+    recognitionSuggestion?: Record<string, RecognitionSuggestion>;
     recognitionDecisionTrace?: Record<string, string>;
     recognitionManualEditedAt?: Record<string, string>;
   };
@@ -103,6 +126,7 @@ export interface RecognitionDraft {
   recognitionRegistration?: Record<string, FieldRegistration>;
   recognitionValueSource?: Record<string, RecognitionValueSource>;
   recognitionContested?: Record<string, boolean>;
+  recognitionSuggestion?: Record<string, RecognitionSuggestion>;
   recognitionDecisionTrace?: Record<string, string>;
   /** Server-only outlet; `/api/recognize` removes it before returning JSON. */
   recognitionMeasurements?: RecognitionMeasurementsByField;
@@ -144,6 +168,7 @@ export async function recognizeStudentForms(
   const recognitionRegistration: Record<string, FieldRegistration> = {};
   const recognitionValueSource: Record<string, RecognitionValueSource> = {};
   const recognitionContested: Record<string, boolean> = {};
+  const recognitionSuggestion: Record<string, RecognitionSuggestion> = {};
   const recognitionDecisionTrace: Record<string, string> = {};
   const recognitionMeasurements: RecognitionMeasurementsByField = {};
   // Instrumentation only: appended to the basic-information traces below so
@@ -324,6 +349,16 @@ export async function recognizeStudentForms(
         : undefined;
       const directCheckboxEvidence = checkboxEvidence ? checkboxEvidence.accepted : true;
       recognitionContested[result.field] = result.contested && directCheckboxEvidence;
+      // Present only on results that reached no high confidence, and those all
+      // `continue` below without writing a value -- so a field that carries a
+      // suggestion is always a field the reviewer finds empty. Nothing here
+      // reads it back.
+      if (result.suggestion) {
+        recognitionSuggestion[result.field] = {
+          candidateIndex: result.suggestion.candidateIndex,
+          value: mapRecognizedCandidateValue(result.field, result.suggestion.value),
+        };
+      }
       if (directCheckboxGroup) {
         basicCheckboxMeasurement[group.field] = [
           basicCheckboxMeasurement[group.field],
@@ -486,6 +521,14 @@ export async function recognizeStudentForms(
       );
       draft.confidence[result.field] = result.confidence;
       recognitionContested[result.field] = result.contested;
+      // See the CAGI loop: only non-high results carry one, and those leave the
+      // field blank.
+      if (result.suggestion) {
+        recognitionSuggestion[result.field] = {
+          candidateIndex: result.suggestion.candidateIndex,
+          value: mapRecognizedCandidateValue(result.field, result.suggestion.value),
+        };
+      }
       draft.candidates![result.field] = result.candidates;
 
       if (result.value === undefined || result.confidence !== 'high') {
@@ -560,6 +603,9 @@ export async function recognizeStudentForms(
   }
   draft.recognitionValueSource = recognitionValueSource;
   draft.recognitionContested = recognitionContested;
+  if (Object.keys(recognitionSuggestion).length > 0) {
+    draft.recognitionSuggestion = recognitionSuggestion;
+  }
   draft.recognitionDecisionTrace = recognitionDecisionTrace;
 
   return draft;

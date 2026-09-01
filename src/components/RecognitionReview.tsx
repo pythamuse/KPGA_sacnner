@@ -52,6 +52,46 @@ const cropSourceLabel = {
   fixed: '위치 특정 실패 (구역 전체 표시)',
 };
 
+/**
+ * How each field's options read, so a suggestion can name the option the way
+ * the reviewer sees it in the `select` rather than as a bare number.
+ *
+ * Written out here rather than by refactoring the `select` markup to share a
+ * table: those controls carry the values this whole screen exists to protect,
+ * and this is read only by the suggestion strip. `review-snapshot.test.ts`
+ * checks every label here against the option the select actually renders, so
+ * drift fails a test rather than mislabelling a guess.
+ */
+export const suggestionOptionLabels = (key: string): Record<string, string> | undefined => {
+  if (key === 'basic.gender') return { 남: '남', 여: '여' };
+  if (key === 'basic.schoolType') {
+    return {
+      초등학교: '초등학교', 중학교: '중학교', 고등학교: '고등학교', 학교외기관: '학교외기관',
+    };
+  }
+  if (key === 'basic.grade') {
+    return {
+      '1학년': '1학년', '2학년': '2학년', '3학년': '3학년',
+      '4학년': '4학년', '5학년': '5학년', '6학년': '6학년', 해당없음: '해당없음',
+    };
+  }
+  if (key.startsWith('cagi.')) {
+    return { 0: '0 없다', 1: '1 가끔 있다', 2: '2 자주 있다', 3: '3 거의 항상 있다' };
+  }
+  if (key === 'satisfaction.q01') {
+    return { 1: '1 없음', 2: '2 1회', 3: '3 2회', 4: '4 3회 이상' };
+  }
+  if (['satisfaction.q02', 'satisfaction.q03', 'satisfaction.q04', 'satisfaction.q05', 'satisfaction.q06'].includes(key)) {
+    return { 0: '0 아니오', 1: '1 예' };
+  }
+  if (['satisfaction.q07', 'satisfaction.q08', 'satisfaction.q09', 'satisfaction.q10'].includes(key)) {
+    return {
+      0: '0 매우 그렇지 않다', 1: '1 그렇지 않다', 2: '2 보통이다', 3: '3 그렇다', 4: '4 매우 그렇다',
+    };
+  }
+  return undefined;
+};
+
 export default function RecognitionReview({
   draft,
   jobId,
@@ -476,6 +516,99 @@ export default function RecognitionReview({
       >
         {empty ? '비어 있는 것이 맞음' : '이 값이 맞음'}
       </button>
+    );
+  };
+
+  /**
+   * Picks the suggested option, through the ordinary manual-change path.
+   *
+   * Deliberately not a route of its own: the result is exactly what choosing
+   * that option in the `select` produces, including the `수기 수정` label. A
+   * value that arrives here is a person's, and the record says so.
+   */
+  const applySuggestion = (key: string, value: number | string) => {
+    const [group, name] = key.split('.');
+    if (group === 'basic') {
+      handleBasicChange(name, value);
+    } else if (group === 'cagi') {
+      handleCagiChange(name, Number(value));
+    } else {
+      handleSatisfactionChange(name, Number(value));
+    }
+  };
+
+  /**
+   * The default the reviewer confirms, on a field the recognizer refused.
+   *
+   * Measured at ~83% (FIELD_TEST §31 and the central three-set run), which is
+   * why it is offered rather than filled in: 17% wrong would be stored as if a
+   * person had verified it. So this changes nothing about the field's state --
+   * the control stays empty, `needsValue` stays true, the card keeps its colour
+   * and the field keeps its place in `확인 필요`. It only saves the reviewer
+   * from picking out of four when they already agree with the guess.
+   *
+   * Two placement decisions follow from the same worry, that a default which is
+   * usually right trains people to stop looking:
+   *
+   * - It renders *after* the crop image, not next to the control. The reviewer
+   *   scrolls past the photograph of the actual paper to reach it, so the
+   *   evidence is on screen before the guess is reachable.
+   * - It is the quietest interactive thing in the card: a dashed outline in
+   *   neutral grey, against a card that is already red or amber. Confirm stays
+   *   the green one. Nothing here competes with the scan for attention.
+   */
+  const renderReviewSuggestion = (key: string) => {
+    const suggestion = draft.source?.recognitionSuggestion?.[key];
+    if (!suggestion) return null;
+    // Never over an answer that is already there, and never once the reviewer
+    // has dealt with the field -- at that point it would be second-guessing a
+    // person who has looked at the paper.
+    if (!needsValue(key) || isSettled(key)) return null;
+    const label = suggestionOptionLabels(key)?.[String(suggestion.value)];
+    // An option this screen cannot name is one it should not offer.
+    if (!label) return null;
+
+    return (
+      <div style={{ marginTop: 8, display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 }}>
+        <button
+          type="button"
+          onClick={() => applySuggestion(key, suggestion.value)}
+          title="자동 입력 기준에는 미치지 못하는 추정입니다. 종이를 보고 확인해주세요."
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 6,
+            padding: '4px 10px',
+            fontSize: 12,
+            fontWeight: 700,
+            borderRadius: 6,
+            cursor: 'pointer',
+            border: '1px dashed #b9c1cd',
+            background: '#ffffff',
+            color: '#4b5565',
+          }}
+        >
+          <span
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              padding: '1px 6px',
+              borderRadius: 999,
+              border: '1px solid #d8dde8',
+              background: '#f6f8fb',
+              color: '#667085',
+              fontSize: 11,
+              fontWeight: 800,
+            }}
+          >
+            추천
+          </span>
+          {label}
+        </button>
+        <span style={{ color: 'var(--text-muted)', fontSize: 11, fontWeight: 600, lineHeight: 1.35 }}>
+          이 칸일 가능성이 높습니다 — 확인해주세요
+        </span>
+      </div>
     );
   };
 
@@ -1025,6 +1158,7 @@ export default function RecognitionReview({
       {control}
       {renderCandidateSummary(badgeKey)}
       {renderFieldCropPreview(badgeKey)}
+      {renderReviewSuggestion(badgeKey)}
       {renderDecisionTrace(badgeKey)}
       {renderConfirmButton(badgeKey)}
     </div>
@@ -1216,6 +1350,7 @@ export default function RecognitionReview({
                 </select>
                 {renderCandidateSummary(`cagi.q${num}`)}
                 {renderFieldCropPreview(`cagi.q${num}`)}
+                {renderReviewSuggestion(`cagi.q${num}`)}
                 {renderDecisionTrace(`cagi.q${num}`)}
       {renderConfirmButton(`cagi.q${num}`)}
               </div>
@@ -1242,6 +1377,7 @@ export default function RecognitionReview({
             </select>
             {renderCandidateSummary('satisfaction.q01')}
             {renderFieldCropPreview('satisfaction.q01')}
+            {renderReviewSuggestion('satisfaction.q01')}
             {renderDecisionTrace('satisfaction.q01')}
       {renderConfirmButton('satisfaction.q01')}
           </div>
@@ -1265,6 +1401,7 @@ export default function RecognitionReview({
                 </select>
                 {renderCandidateSummary(`satisfaction.q0${num}`)}
                 {renderFieldCropPreview(`satisfaction.q0${num}`)}
+                {renderReviewSuggestion(`satisfaction.q0${num}`)}
                 {renderDecisionTrace(`satisfaction.q0${num}`)}
       {renderConfirmButton(`satisfaction.q0${num}`)}
               </div>
@@ -1293,6 +1430,7 @@ export default function RecognitionReview({
                 </select>
                 {renderCandidateSummary(`satisfaction.${key}`)}
                 {renderFieldCropPreview(`satisfaction.${key}`)}
+                {renderReviewSuggestion(`satisfaction.${key}`)}
                 {renderDecisionTrace(`satisfaction.${key}`)}
       {renderConfirmButton(`satisfaction.${key}`)}
               </div>

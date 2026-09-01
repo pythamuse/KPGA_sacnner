@@ -233,6 +233,7 @@ export async function POST(req: Request) {
         recognitionRejectedCandidateRects,
         recognitionValueSource,
         recognitionContested,
+        recognitionSuggestion,
         recognitionDecisionTrace,
         recognitionMeasurements,
         ...recognizedDraft
@@ -283,6 +284,7 @@ export async function POST(req: Request) {
           recognitionRegistration,
           recognitionValueSource,
           recognitionContested,
+          recognitionSuggestion,
           recognitionDecisionTrace,
         },
       });
