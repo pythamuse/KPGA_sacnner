@@ -204,7 +204,7 @@ describe('review suggestion metadata path', () => {
     const cagiPath = path.join(fixtureDir, 'cagi.png');
     const satisfactionPath = path.join(fixtureDir, 'satisfaction.png');
     const cagiDrawn: Record<string, number | string> = {
-      'basic.gender': 'female',
+      'basic.gender': '여',
       'cagi.q01': 1, 'cagi.q02': 1, 'cagi.q03': 2, 'cagi.q04': 2, 'cagi.q05': 3,
       'cagi.q06': 0, 'cagi.q07': 1, 'cagi.q08': 2, 'cagi.q09': 3,
     };
