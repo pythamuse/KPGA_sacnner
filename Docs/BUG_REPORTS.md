@@ -26,6 +26,7 @@
 | 20 | 표시가 없는 칸에 값을 만들어내 `높음`으로 확정 (배포본에 존재) | 배포본 해상도에서 해소(`WRONG 0`), 실배포 재확인 필요 | [RECOGNITION_ROOT_CAUSE_ISOLATION_2026-08-13](../Task/RECOGNITION_ROOT_CAUSE_ISOLATION_2026-08-13.md), [MEASUREMENT_RENDER_PARITY_2026-08-19](../Task/MEASUREMENT_RENDER_PARITY_2026-08-19.md) |
 | 21 | 계측기가 배포본과 다른 해상도·형식의 이미지를 측정해 모든 판정이 무효 | 계측기 수정 완료, 기준선 재설정 | [MEASUREMENT_RENDER_PARITY_2026-08-19](../Task/MEASUREMENT_RENDER_PARITY_2026-08-19.md) |
 | 22 | `contentBoundsConfident`와 `contentBoundsSource`가 같은 사실을 이중 저장해 분류·인식 게이트가 갈라질 수 있음 | **미발현 — 기록만** | — (본 문서 §22) |
+| 23 | dev 서버 인식 중 tesseract.js 워커 `.next/worker-script/node/index.js` MODULE_NOT_FOUND 반복 — 브라우저 나이 19/19 빈칸의 원인일 수 있음 | 미조사(2026-09-03 B-11 검증 중 관측) | [B11_SETTLEMENT_GATE_2026-09-03](../Task/B11_SETTLEMENT_GATE_2026-09-03.md) §0 |
 
 ---
 

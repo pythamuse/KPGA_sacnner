@@ -246,7 +246,8 @@ REAL_SCAN_SAT_REVERSED=1   REAL_SCAN_CAGI_PDF=".../선별검사 샘플3반복.pd
 자동값이 확정으로 계산됨)이 오답 0의 마지막 관문이다. 소견의 독립 검증과 기술 스택 재판정은
 [Task/DESIGN_AUDIT_VERIFICATION_2026-09-03.md](Task/DESIGN_AUDIT_VERIFICATION_2026-09-03.md)·
 [Docs/17_TECH_STACK_REVALIDATION.md](Docs/17_TECH_STACK_REVALIDATION.md) — **B-10은 기각됐고, B-11은 첫 저장
-게이트까지 포함한다.**
+게이트까지 포함한다.** B-11은 2026-09-03에 병합됐다([Task/B11_SETTLEMENT_GATE_2026-09-03.md](Task/B11_SETTLEMENT_GATE_2026-09-03.md)) —
+그 결과 "확인 필요 합계"에 자동값이 포함되므로 §5.2의 기준선 135는 **재설정 대상**이다. 다음은 §D 2순위(B-12·B-13).
 
 ### 5.1 판정자는 둘이고 역할이 다르다
 
