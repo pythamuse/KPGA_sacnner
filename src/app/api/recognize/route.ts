@@ -235,6 +235,7 @@ export async function POST(req: Request) {
         recognitionContested,
         recognitionSuggestion,
         recognitionDecisionTrace,
+        recognitionEvidence,
         recognitionMeasurements,
         ...recognizedDraft
       } = draft;
@@ -286,6 +287,7 @@ export async function POST(req: Request) {
           recognitionContested,
           recognitionSuggestion,
           recognitionDecisionTrace,
+          recognitionEvidence,
         },
       });
     }

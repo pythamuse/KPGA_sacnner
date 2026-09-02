@@ -10,6 +10,7 @@ import {
   isSettledSource,
   unconfirmedMachineFields,
 } from '../lib/review/settlement';
+import { describeEvidence, remarkCause } from '../lib/review/evidence';
 
 interface RecognitionReviewProps {
   draft: RecognitionDraft;
@@ -706,6 +707,51 @@ export default function RecognitionReview({
     );
   };
 
+  const evidenceCandidateLabels = (key: string): string[] => {
+    const labels = suggestionOptionLabels(key);
+    if (labels) return Object.keys(labels);
+    return (draft.candidates?.[key] || []).map((candidate) => String(candidate.value));
+  };
+
+  const renderRecognitionEvidence = (key: string) => {
+    const evidence = draft.source?.recognitionEvidence?.[key];
+    if (!evidence) return null;
+    const causes = remarkCause(evidence);
+    const causeLabels: Record<typeof causes[number], string> = {
+      faint: '흐림',
+      offset: '자리 이탈',
+      shape: '모양 이상',
+    };
+
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 5, marginTop: 6 }}>
+        <span style={{ color: '#6b7280', fontSize: 11, fontWeight: 600, lineHeight: 1.35, overflowWrap: 'anywhere' }}>
+          {describeEvidence(evidence, evidenceCandidateLabels(key))}
+        </span>
+        {causes.map((cause) => (
+          <span
+            key={`${key}-${cause}`}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              minHeight: 19,
+              padding: '1px 6px',
+              borderRadius: 999,
+              border: '1px solid #d8dde8',
+              color: '#667085',
+              background: '#f6f8fb',
+              fontSize: 10,
+              fontWeight: 800,
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {causeLabels[cause]}
+          </span>
+        ))}
+      </div>
+    );
+  };
+
   const renderValueSourceBadge = (key: string) => {
     const source = draft.source?.recognitionValueSource?.[key] || 'unresolved';
     const contested = (source === 'auto' || source === 'restored')
@@ -1211,6 +1257,7 @@ export default function RecognitionReview({
       {control}
       {renderCandidateSummary(badgeKey)}
       {renderCropSourceBadge(badgeKey)}
+      {renderRecognitionEvidence(badgeKey)}
       {renderFieldCropPreview(badgeKey)}
       {renderReviewSuggestion(badgeKey)}
       {renderDecisionTrace(badgeKey)}
@@ -1421,6 +1468,7 @@ export default function RecognitionReview({
                 </select>
                 {renderCandidateSummary(`cagi.q${num}`)}
                 {renderCropSourceBadge(`cagi.q${num}`)}
+                {renderRecognitionEvidence(`cagi.q${num}`)}
                 {renderFieldCropPreview(`cagi.q${num}`)}
                 {renderReviewSuggestion(`cagi.q${num}`)}
                 {renderDecisionTrace(`cagi.q${num}`)}
@@ -1449,6 +1497,7 @@ export default function RecognitionReview({
             </select>
             {renderCandidateSummary('satisfaction.q01')}
             {renderCropSourceBadge('satisfaction.q01')}
+            {renderRecognitionEvidence('satisfaction.q01')}
             {renderFieldCropPreview('satisfaction.q01')}
             {renderReviewSuggestion('satisfaction.q01')}
             {renderDecisionTrace('satisfaction.q01')}
@@ -1474,6 +1523,7 @@ export default function RecognitionReview({
                 </select>
                 {renderCandidateSummary(`satisfaction.q0${num}`)}
                 {renderCropSourceBadge(`satisfaction.q0${num}`)}
+                {renderRecognitionEvidence(`satisfaction.q0${num}`)}
                 {renderFieldCropPreview(`satisfaction.q0${num}`)}
                 {renderReviewSuggestion(`satisfaction.q0${num}`)}
                 {renderDecisionTrace(`satisfaction.q0${num}`)}
@@ -1504,6 +1554,7 @@ export default function RecognitionReview({
                 </select>
                 {renderCandidateSummary(`satisfaction.${key}`)}
                 {renderCropSourceBadge(`satisfaction.${key}`)}
+                {renderRecognitionEvidence(`satisfaction.${key}`)}
                 {renderFieldCropPreview(`satisfaction.${key}`)}
                 {renderReviewSuggestion(`satisfaction.${key}`)}
                 {renderDecisionTrace(`satisfaction.${key}`)}

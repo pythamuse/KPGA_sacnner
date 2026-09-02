@@ -1,0 +1,169 @@
+# B-7·B-2 검수 근거 구현 보고서
+
+- 브랜치: `codex-b7-evidence`
+- 기준: `main` `2a0d5c1`
+- 목표: 판정값·게이트·스코어링은 그대로 두고, 검수 화면과 decision trace에 구조화된 수치 근거를 전달
+
+## 바꾼 파일:행
+
+- `src/lib/recognition/markDensityConstants.ts:1-14`
+  - 기존 mark-density 문턱을 sharp 없는 순수 모듈로 이동했다. 값은 그대로이며 `markDensity.ts`가 기존 이름으로 재수출한다.
+- `src/lib/recognition/markDensity.ts:80-96`
+  - 공개 `DecisionEvidence`와 `ChoiceGroupResult.evidence`를 추가했다.
+- `src/lib/recognition/markDensity.ts:1356-1388`
+  - `describeDecision`이 trace를 조립할 때 같은 `best`, runner-up, gap, contrast, high thresholds, winner shape 값을 evidence에도 기록한다.
+- `src/lib/recognition/markDensity.ts:1843,1930,2014,2069,2088,2124,2147,2164`
+  - 후보 없음, 기하 거절, band/photo 거절, high/rescue/medium/low 등 모든 반환 경로에 evidence를 연결했다.
+- `src/lib/review/evidence.ts:1-194`
+  - 순수 함수 `describeEvidence`, `refusalLabel`, `remarkCause`와 전송 축약 fallback을 추가했다.
+- `src/lib/recognition/detectCheckmarks.ts:66-138,185-199`
+  - `RecognitionDraft`와 source에 `recognitionEvidence`를 추가했다.
+- `src/lib/recognition/detectCheckmarks.ts:353-358,414-420,452-456,549-554,576-582,606-610`
+  - CAGI·satisfaction 결과를 evidence sidecar에 넣고 자동 trace는 직렬화기에서 만들며, 보류 trace에는 기존 세 문장 뒤에 evidence 문장을 붙였다.
+- `src/lib/recognition/detectCheckmarks.ts:764-850`
+  - snapshot 예산용 축약과 보류 trace 보조 함수를 추가했다. 빈 `refused`와 반복 `thresholds`는 JSON 열거에서 제외하고 review serializer가 고정 상수로 복원한다.
+- `src/app/api/recognize/route.ts:235-291`
+  - 응답 source 화이트리스트에 `recognitionEvidence`를 추가했다. `recognitionMeasurements` 분리 및 label export 경로는 변경하지 않았다.
+- `src/components/RecognitionReview.tsx:710-754,1257,1468-1557`
+  - 출처·등록 배지 줄 바로 아래에 11px 회색 evidence 한 줄을 기본 표시하고, 원인 칩을 추가했다. diagnostics 토글의 원문 trace는 유지했다.
+- `tests/review-evidence.test.ts:1-131`
+  - 자동·경합·보류 직렬화, 모든 지정 refusal label, snapshot 실측 크기, 세 원인 분류를 검증한다.
+- `tests/recognition-mark-density.test.ts:78-96`
+  - decision 문자열의 `floor=`·`gap=` 문턱/값과 evidence 수치가 동일한지 검증한다.
+- `tests/review-snapshot.test.ts:138-161`
+  - evidence가 이미지 제거 snapshot에 남고 기본 화면에 렌더되는지 검증한다.
+- `report.md`
+  - 이 보고서.
+
+## `DecisionEvidence` 최종 정의
+
+```ts
+export interface DecisionEvidence {
+  outcome: 'auto' | 'refused' | 'contested';
+  winner?: { index: number; label?: string; score: number };
+  runnerUp?: { index: number; score: number };
+  gap?: number;
+  relativeContrast?: number;
+  thresholds: { score: number; gap: number; contrast: number };
+  refused: string[];
+  offset?: { x: number; y: number };
+  shape?: { componentRatio: number; diagonalRatio: number };
+  contested: boolean;
+}
+```
+
+스코어러가 반환하는 evidence에는 `thresholds`와 `refused`가 모두 있다. 실제 review JSON에서는 학생당 예산을 맞추기 위해 반복되는 `thresholds`와 빈 `refused`만 비열거 속성으로 축약한다. JSON을 파싱한 뒤 `src/lib/review/evidence.ts`가 기존 상수와 빈 배열 fallback을 사용하므로 화면 문구는 동일하다. 값·판정 분기·게이트는 이 기록을 읽지 않는다.
+
+## 필드당 직렬화 크기
+
+측정 방법은 `Buffer.byteLength(JSON.stringify(item), 'utf8')`이며 `tests/fixtures/blank-form`을 실제로 인식한 draft의 `recognitionEvidence` 각 항목을 측정했다.
+
+| 필드 | JSON 바이트 |
+| --- | ---: |
+| `cagi.q01`–`cagi.q09` | 각 130B |
+| `satisfaction.q01`–`satisfaction.q10` | 각 130B |
+| 최대 | 130B |
+
+목표 `≤160B`를 30B 여유로 통과했다. 실제 로그의 19개 항목(`cagi.q01`부터 `cagi.q09`, `satisfaction.q01`부터 `satisfaction.q10`)은 모두 `130`이었다.
+
+## 새 UI 문구 전체
+
+직렬화기 예시는 다음과 같다.
+
+- 자동: `1위 '0' 7.1% · 2위 '2' 3.0% · 여유 2.4× · 자리 편차 0.02`
+- 경합: `경합 — 1위 '여' 17% · 2위 '남' 6% (두 칸 모두 표시 흔적)`
+- 보류: `보류 — 잉크가 옅음(0.015 < 0.021) · 1·2위 차이 부족(0.002 < 0.004)`
+- 사진 문턱 fallback: `보류 — 사진 이진 판정 미달(0.032 < 0.042)`
+- 원인 칩: `흐림`, `자리 이탈`, `모양 이상`
+- evidence가 없는 구형 draft에서는 근거를 추정해 만들지 않고 기존 화면을 유지한다.
+
+토큰 라벨은 다음과 같다.
+
+- `absolute-floor` → `잉크가 옅음`
+- `gap` → `1·2위 차이 부족`
+- `mark-shape` → `표시 모양이 불규칙`
+- `relative-contrast` → `빈 양식 대비 부족`
+- `ink-invariant` → `빈 양식보다 옅음(잡음 가능)`
+- `band-structure` → `줄무늬 구조`
+- `photo-binary-floor`, `photo-binary-refused` → `사진 이진 판정 미달`
+- `rescued:x` → `구제됨(x)`
+- `medium-path-not-offered`, `medium-floor`, `medium-gap` → `중간 신뢰 경로 미달`
+- 보조 토큰 `form-bounds:*` → `양식 경계 미검증`, `grid-unverified` → `격자 검증 안 됨`, `no-candidates` → `후보 없음`
+
+수치를 보유한 refusal은 가능한 경우 위 라벨 뒤에 `값 < 문턱`을 붙인다. 예를 들어 `mark-shape`는 성분/대각 비율과 각각 `0.200` 문턱을, `relative-contrast`는 `1.25`를 표시한다. `ink-invariant`는 actual ink와 blank ink의 비교이며 이번 공개 타입에 그 두 원시 측정값을 중복하지 않았으므로 잘못된 score 문턱을 표시하지 않고 지정 라벨만 표시한다.
+
+## 테스트 결과 전문
+
+### TypeScript
+
+```text
+$ npx.cmd tsc --noEmit
+exit code: 0
+stdout: (없음)
+```
+
+### 기본 모드
+
+```text
+$ npx.cmd vitest run
+The CJS build of Vite's Node API is deprecated. See https://vite.dev/guide/troubleshooting.html#vite-cjs-node-api-deprecated for more details.
+RUN v1.6.1
+
+✓ 46 test files passed
+↓ 14 probe test files skipped
+✓ 453 tests passed
+↓ 14 probe tests skipped
+
+recognition evidence bytes:
+cagi.q01 130, cagi.q02 130, cagi.q03 130, cagi.q04 130, cagi.q05 130,
+cagi.q06 130, cagi.q07 130, cagi.q08 130, cagi.q09 130,
+satisfaction.q01 130, satisfaction.q02 130, satisfaction.q03 130,
+satisfaction.q04 130, satisfaction.q05 130, satisfaction.q06 130,
+satisfaction.q07 130, satisfaction.q08 130, satisfaction.q09 130,
+satisfaction.q10 130
+
+Test Files  46 passed | 14 skipped (60)
+     Tests  453 passed | 14 skipped (467)
+Duration 24.07s
+```
+
+기본 모드 실행 중 기존 테스트가 출력하는 OCR/좌표 진단과 `Invalid resolution 25 dpi. Using 70 instead.` 경고가 있었지만 실패는 없었다.
+
+### `MARK_AFFINE_TONE=1`
+
+```text
+$env:MARK_AFFINE_TONE = '1'; npx.cmd vitest run
+The CJS build of Vite's Node API is deprecated. See https://vite.dev/guide/troubleshooting.html#vite-cjs-node-api-deprecated for more details.
+RUN v1.6.1
+
+✓ 46 test files passed
+↓ 14 probe test files skipped
+✓ 453 tests passed
+↓ 14 probe tests skipped
+
+recognition evidence bytes:
+cagi.q01 130, cagi.q02 130, cagi.q03 130, cagi.q04 130, cagi.q05 130,
+cagi.q06 130, cagi.q07 130, cagi.q08 130, cagi.q09 130,
+satisfaction.q01 130, satisfaction.q02 130, satisfaction.q03 130,
+satisfaction.q04 130, satisfaction.q05 130, satisfaction.q06 130,
+satisfaction.q07 130, satisfaction.q08 130, satisfaction.q09 130,
+satisfaction.q10 130
+
+Test Files  46 passed | 14 skipped (60)
+     Tests  453 passed | 14 skipped (467)
+Duration 24.21s
+```
+
+`npm run build`는 명세대로 실행하지 않았다.
+
+## 명세와 다르게 한 것과 이유
+
+1. 실제 snapshot JSON에서 `thresholds`와 빈 `refused`를 축약했다. 전체 evidence는 처음 측정 시 160B를 넘었고, 문턱은 이미 코드에 있는 상수이며 serializer가 같은 상수로 복원할 수 있어 130B로 맞췄다.
+2. `basic.gender`, `basic.schoolType`, `basic.grade`에는 이번 `recognitionEvidence`를 만들지 않았다. 명세가 기존 `describeBasicCheckboxDecision`의 `pick=/conf=/gate=/scr=` 수치 문장을 유지하는 이번 범위의 제외 대상으로 명시했기 때문이다.
+3. `ink-invariant`에는 임의의 score/threshold 비교를 붙이지 않았다. 이 토큰의 실제 비교는 `actualInk`와 `baselineInk`이고, 요구된 `DecisionEvidence` 정의에 그 필드가 없기 때문이다.
+4. sharp가 포함된 `markDensity.ts`를 클라이언트 직렬화기가 직접 import하지 않도록 기존 상수만 `markDensityConstants.ts`로 이동하고 재수출했다. 새 라이브러리나 의존성은 추가하지 않았다.
+
+## 확신 없는 부분
+
+- 구형 snapshot처럼 `recognitionEvidence`가 없는 draft에는 과거 수치를 추정하지 않고 evidence 줄/칩을 렌더하지 않는다. 새 인식 응답과 새 snapshot에는 sidecar가 존재하므로 데이터 없는 구형 기록에 허위 근거를 만들지 않는 선택이다.
+- `자리 이탈` 분류는 기존 `BASELINE_ALIGNMENT_RADIUS = 1` 이상, `모양 이상` 분류는 기존 component/diagonal ratio `0.2` 미만을 사용한다. 두 값은 gate를 변경하지 않고 원인 분류에만 읽힌다.

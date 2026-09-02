@@ -16,6 +16,7 @@ import {
   type SheetQualityVerdictLike,
 } from '../src/lib/recognition/sheetQualityDisplay';
 import type { RecognitionDraft } from '../src/lib/recognition/detectCheckmarks';
+import type { DecisionEvidence } from '../src/lib/recognition/markDensity';
 // Type-only: `sheetQuality.ts` reaches sharp through markDensity, and this
 // import is erased at compile time. It exists so that `tsc --noEmit` fails the
 // moment the server verdict and the client-side structural copy drift apart.
@@ -132,6 +133,31 @@ describe('review snapshot', () => {
     expect(source.recognitionCropSource).toEqual({ 'basic.gender': 'grid' });
     expect(source.recognitionDecisionTrace).toBeDefined();
     expect(source.cagiImageId).toBe('cagi_page_001');
+  });
+
+  it('keeps compact recognition evidence in the snapshot and renders it by default', () => {
+    const draft = stripDraftImages(makeDraft());
+    const evidence: DecisionEvidence = {
+      outcome: 'refused',
+      winner: { index: 0, score: 0.015 },
+      gap: 0.002,
+      thresholds: { score: 0.021, gap: 0.004, contrast: 1.25 },
+      refused: ['absolute-floor', 'gap'],
+      contested: false,
+    };
+    draft.source = {
+      ...(draft.source || {}),
+      recognitionEvidence: { 'cagi.q01': evidence },
+    };
+
+    const resumed = stripDraftImages(draft);
+    expect(resumed.source?.recognitionEvidence?.['cagi.q01']).toEqual(evidence);
+
+    const start = renderReview(resumed).indexOf('id="review-field-cagi-q01"');
+    const html = renderReview(resumed);
+    const card = html.slice(start, html.indexOf('id="review-field-', start + 10));
+    expect(card).toContain('보류 — 잉크가 옅음(0.015 &lt; 0.021)');
+    expect(card).toContain('흐림');
   });
 
   it('never writes scanned responses into browser storage', () => {

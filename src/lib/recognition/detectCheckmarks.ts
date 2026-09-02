@@ -6,6 +6,7 @@ import {
   resolveFormBoundsStatus,
   loadImageAnalysisData,
   type ChoiceGroupResult,
+  type DecisionEvidence,
   type ImageAnalysisData,
   type PixelRect,
 } from './markDensity';
@@ -14,6 +15,8 @@ import type {
   RecognitionMeasurementsByField,
 } from '../labelExport/types';
 import type { SheetQualityAttachment } from './sheetQualityDisplay';
+import { describeEvidence } from '../review/evidence';
+import { BASELINE_ALIGNMENT_RADIUS } from './markDensityConstants';
 import { getTemplate, type ChoiceGroup } from './roiTemplates';
 import {
   buildCagiRowDetection,
@@ -80,6 +83,7 @@ export interface RecognitionDraft {
      */
     recognitionSuggestion?: Record<string, RecognitionSuggestion>;
     recognitionDecisionTrace?: Record<string, string>;
+    recognitionEvidence?: Record<string, DecisionEvidence>;
     recognitionManualEditedAt?: Record<string, string>;
   };
   basic: {
@@ -129,6 +133,7 @@ export interface RecognitionDraft {
   recognitionContested?: Record<string, boolean>;
   recognitionSuggestion?: Record<string, RecognitionSuggestion>;
   recognitionDecisionTrace?: Record<string, string>;
+  recognitionEvidence?: Record<string, DecisionEvidence>;
   /** Server-only outlet; `/api/recognize` removes it before returning JSON. */
   recognitionMeasurements?: RecognitionMeasurementsByField;
   /**
@@ -180,6 +185,8 @@ export async function recognizeStudentForms(
   const recognitionContested: Record<string, boolean> = {};
   const recognitionSuggestion: Record<string, RecognitionSuggestion> = {};
   const recognitionDecisionTrace: Record<string, string> = {};
+  const recognitionEvidence: Record<string, DecisionEvidence> = {};
+  const decisionEvidenceForTrace: Record<string, DecisionEvidence> = {};
   const recognitionMeasurements: RecognitionMeasurementsByField = {};
   // Instrumentation only: appended to the basic-information traces below so
   // the box placement can be read off real scans instead of inferred. Nothing
@@ -346,6 +353,10 @@ export async function recognizeStudentForms(
         cropSource,
         cagiImage,
       );
+      if (result.evidence && result.field.startsWith('cagi.')) {
+        decisionEvidenceForTrace[result.field] = result.evidence;
+        recognitionEvidence[result.field] = compactRecognitionEvidence(result.evidence);
+      }
       draft.confidence[result.field] = result.confidence;
       draft.candidates![result.field] = mapRecognizedCandidates(result.field, result.candidates);
       const checkboxEvidence = directCheckboxGroup && cagiBaseline?.basicCheckboxCandidateRects?.[group.field]
@@ -403,9 +414,10 @@ export async function recognizeStudentForms(
         draft.cagi[questionKey] = Number(result.value);
       }
       recognitionValueSource[result.field] = 'auto';
-      recognitionDecisionTrace[result.field] =
-        getRecognitionFieldLabel(result.field) + ': automatic entry completed from a verified grid and high-confidence mark evidence.'
-        + (recognitionContested[result.field] ? ' contested=1' : '');
+      recognitionDecisionTrace[result.field] = result.evidence
+        ? describeEvidence(result.evidence, group.candidates.map((candidate) => String(candidate.value)))
+        : getRecognitionFieldLabel(result.field) + ': automatic entry completed from a verified grid and high-confidence mark evidence.'
+          + (recognitionContested[result.field] ? ' contested=1' : '');
     }
 
     for (const [field, rect] of Object.entries(cagiGridDetection.fieldRects)) {
@@ -437,6 +449,12 @@ export async function recognizeStudentForms(
         .filter(Boolean)
         .join(' ');
     }
+    appendRecognitionEvidenceTraces(
+      cagiTemplate.choiceGroups,
+      decisionEvidenceForTrace,
+      recognitionValueSource,
+      recognitionDecisionTrace,
+    );
   } catch {
     // 이미지 분석 실패 시 임의값을 넣지 않고 검수 화면에서 직접 입력하도록 낮은 신뢰도로 둔다.
   }
@@ -531,6 +549,10 @@ export async function recognizeStudentForms(
         cropSource,
         satisfactionImage,
       );
+      if (result.evidence && result.field.startsWith('satisfaction.')) {
+        decisionEvidenceForTrace[result.field] = result.evidence;
+        recognitionEvidence[result.field] = compactRecognitionEvidence(result.evidence);
+      }
       draft.confidence[result.field] = result.confidence;
       recognitionContested[result.field] = result.contested;
       // See the CAGI loop: only non-high results carry one, and those leave the
@@ -554,9 +576,10 @@ export async function recognizeStudentForms(
       const questionKey = result.field.replace('satisfaction.', '');
       draft.satisfaction[questionKey] = Number(result.value);
       recognitionValueSource[result.field] = 'auto';
-      recognitionDecisionTrace[result.field] =
-        getRecognitionFieldLabel(result.field) + ': automatic entry completed from a verified grid and high-confidence mark evidence.'
-        + (result.contested ? ' contested=1' : '');
+      recognitionDecisionTrace[result.field] = result.evidence
+        ? describeEvidence(result.evidence, group.candidates.map((candidate) => String(candidate.value)))
+        : getRecognitionFieldLabel(result.field) + ': automatic entry completed from a verified grid and high-confidence mark evidence.'
+          + (result.contested ? ' contested=1' : '');
     }
 
     for (const [field, rect] of Object.entries(satisfactionGridDetection.fieldRects)) {
@@ -580,6 +603,12 @@ export async function recognizeStudentForms(
         );
       }
     }
+    appendRecognitionEvidenceTraces(
+      satisfactionTemplate.choiceGroups,
+      decisionEvidenceForTrace,
+      recognitionValueSource,
+      recognitionDecisionTrace,
+    );
   } catch {
     // Keep satisfaction fields empty so the review screen can collect them manually.
   }
@@ -617,6 +646,9 @@ export async function recognizeStudentForms(
   draft.recognitionContested = recognitionContested;
   if (Object.keys(recognitionSuggestion).length > 0) {
     draft.recognitionSuggestion = recognitionSuggestion;
+  }
+  if (Object.keys(recognitionEvidence).length > 0) {
+    draft.recognitionEvidence = recognitionEvidence;
   }
   draft.recognitionDecisionTrace = recognitionDecisionTrace;
 
@@ -721,6 +753,101 @@ function buildCandidateMeasurements(
       autoFilled: false,
     };
   });
+}
+
+/**
+ * Keep the review payload small. The scorer result retains the full thresholds
+ * for probes and tests; the browser-side serializer knows the same constants,
+ * so the repeated threshold object does not need to be copied into every
+ * student snapshot field.
+ */
+function compactRecognitionEvidence(evidence: DecisionEvidence): DecisionEvidence {
+  const compact: DecisionEvidence = {
+    ...evidence,
+    refused: [...evidence.refused],
+  };
+  // Keep the scorer's public type complete while omitting the repeated object
+  // from JSON. `describeEvidence` falls back to the shared constants after
+  // the response is parsed in the browser.
+  Object.defineProperty(compact, 'thresholds', {
+    value: undefined,
+    enumerable: false,
+    configurable: true,
+    writable: true,
+  });
+  if (compact.refused.length === 0) {
+    Object.defineProperty(compact, 'refused', {
+      value: [],
+      enumerable: false,
+      configurable: true,
+      writable: true,
+    });
+  }
+  if (compact.relativeContrast !== undefined && !Number.isFinite(compact.relativeContrast)) {
+    delete compact.relativeContrast;
+  }
+
+  if (compact.outcome === 'refused') {
+    delete compact.runnerUp;
+    const refused = compact.refused || [];
+    if (!refused.includes('gap')) delete compact.gap;
+    if (!refused.includes('relative-contrast')) delete compact.relativeContrast;
+    // A shape object is useful on its own; when several gates fail, the token
+    // still preserves the cause while omitting this optional object keeps the
+    // evidence field within the storage budget.
+    if (!refused.includes('mark-shape') || refused.length > 1) delete compact.shape;
+    if (
+      compact.offset
+      && Math.abs(compact.offset.x) < BASELINE_ALIGNMENT_RADIUS
+      && Math.abs(compact.offset.y) < BASELINE_ALIGNMENT_RADIUS
+    ) {
+      delete compact.offset;
+    }
+  } else {
+    // Auto and contested lines use the ranking plus relative contrast. Gap and
+    // shape are only needed when they are the reason for a refusal.
+    delete compact.gap;
+    delete compact.shape;
+    if (compact.outcome === 'auto' && compact.relativeContrast === undefined) {
+      delete compact.runnerUp;
+    }
+    if (
+      compact.offset
+      && compact.offset.x === 0
+      && compact.offset.y === 0
+    ) {
+      delete compact.offset;
+    }
+    if (
+      compact.outcome === 'contested'
+      && compact.offset
+      && Math.abs(compact.offset.x) < BASELINE_ALIGNMENT_RADIUS
+      && Math.abs(compact.offset.y) < BASELINE_ALIGNMENT_RADIUS
+    ) {
+      delete compact.offset;
+    }
+  }
+
+  return compact;
+}
+
+function appendRecognitionEvidenceTraces(
+  groups: ChoiceGroup[],
+  evidenceByField: Record<string, DecisionEvidence>,
+  valueSourceByField: Record<string, RecognitionValueSource>,
+  traceByField: Record<string, string>,
+): void {
+  for (const group of groups) {
+    const evidence = evidenceByField[group.field];
+    if (!evidence || valueSourceByField[group.field] === 'auto') continue;
+    const description = describeEvidence(
+      evidence,
+      group.candidates.map((candidate) => String(candidate.value)),
+    );
+    traceByField[group.field] = [traceByField[group.field], description]
+      .filter(Boolean)
+      .join(' ');
+  }
 }
 
 function mapRecognizedCandidates(
