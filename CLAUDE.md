@@ -247,8 +247,8 @@ REAL_SCAN_SAT_REVERSED=1   REAL_SCAN_CAGI_PDF=".../선별검사 샘플3반복.pd
 [Task/DESIGN_AUDIT_VERIFICATION_2026-09-03.md](Task/DESIGN_AUDIT_VERIFICATION_2026-09-03.md)·
 [Docs/17_TECH_STACK_REVALIDATION.md](Docs/17_TECH_STACK_REVALIDATION.md) — **B-10은 기각됐고, B-11은 첫 저장
 게이트까지 포함한다.** B-11은 2026-09-03에 병합됐다([Task/B11_SETTLEMENT_GATE_2026-09-03.md](Task/B11_SETTLEMENT_GATE_2026-09-03.md)) —
-그 결과 "확인 필요 합계"에 자동값이 포함되므로 §5.2의 기준선 135는 **재설정 대상**이다. B-12·B-13도 같은 날 병합됐다([Task/B12_B13_VISIBILITY_2026-09-03.md](Task/B12_B13_VISIBILITY_2026-09-03.md)). 다음은 §D 3순위 — B-1의
-`'frame'`/legacy 경계를 고정하는 테스트부터, 그 뒤 값 경로 변경은 7개 조건(스캔 3·사진 4)으로 판정.
+그 결과 "확인 필요 합계"에 자동값이 포함되므로 §5.2의 기준선 135는 **재설정 대상**이다. B-12·B-13도 같은 날 병합됐다([Task/B12_B13_VISIBILITY_2026-09-03.md](Task/B12_B13_VISIBILITY_2026-09-03.md)). B-1도 병합됐다([Task/B1_FRAME_BOUNDS_GATE_2026-09-03.md](Task/B1_FRAME_BOUNDS_GATE_2026-09-03.md)): 대체 경계는
+자동값을 못 만든다. **사진 4세트 기준선은 `59/0 · 34/0 · 36/0 · 24/0`(오답 0)**. 다음은 §D 4순위 — B-7+B-2(수치 근거·거절 사유의 구조화 전달).
 
 ### 5.1 판정자는 둘이고 역할이 다르다
 

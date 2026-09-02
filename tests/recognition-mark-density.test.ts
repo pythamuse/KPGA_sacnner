@@ -334,6 +334,21 @@ describe('마킹 밀도 기반 선택지 분석', () => {
       contentBounds,
       contentBoundsSource: 'dark',
     })).toBe(false);
+    // Audit B-1: frame bounds and page-less legacy edges register the sheet
+    // for review but never unlock automatic values. Pinned after measuring
+    // that the fallback produced the photo path's last wrong (2026-09-03).
+    expect(hasUsableFormBounds({
+      ...image,
+      contentBounds,
+      pageBounds: paperBounds || undefined,
+      contentBoundsSource: 'frame',
+    })).toBe(false);
+    expect(hasUsableFormBounds({
+      ...image,
+      contentBounds,
+      pageBounds: undefined,
+      contentBoundsSource: 'paper',
+    })).toBe(false);
   });
 
   it('derives a threshold between bright paper and a dark desk', () => {

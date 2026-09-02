@@ -1,7 +1,7 @@
 import {
   applyTemplateRegistrationFrame,
   calculateDarkPixelDensity,
-  hasUsableFormBounds,
+  hasReviewableFormBounds,
   loadImageAnalysisData,
   type ImageAnalysisData,
 } from './markDensity';
@@ -54,7 +54,7 @@ export async function hasCagiEarlyInterventionMarks(filePath: string): Promise<b
  * intentionally never OCR'd, returned, persisted, or included in a warning.
  */
 export function detectCagiEarlyInterventionFromImage(image: ImageAnalysisData): CagiEarlyInterventionDetection {
-  if (!hasUsableFormBounds(image)) {
+  if (!hasReviewableFormBounds(image)) {
     return { hasMarks: false, hasContactInformation: false };
   }
 

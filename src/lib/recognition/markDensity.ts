@@ -1066,6 +1066,13 @@ export function hasUsableFormBounds(
   return resolveFormBoundsStatus(image).usable;
 }
 
+/** Review-side check: a sheet is present, whether or not values may be produced. */
+export function hasReviewableFormBounds(
+  image: Pick<ImageAnalysisData, 'width' | 'height' | 'contentBounds' | 'contentBoundsSource' | 'pageBounds'>,
+): boolean {
+  return resolveFormBoundsStatus(image, { strict: false }).usable;
+}
+
 /**
  * The safety precondition, with the clause that decided it.
  *
@@ -1081,9 +1088,23 @@ export function hasUsableFormBounds(
  */
 export function resolveFormBoundsStatus(
   image: Pick<ImageAnalysisData, 'width' | 'height' | 'contentBounds' | 'contentBoundsSource' | 'pageBounds'>,
+  options: { strict?: boolean } = {},
 ): { usable: boolean; reason: string } {
+  // strict (default): the automatic-value gate. Non-strict: "is there a sheet
+  // here at all" for review-side signals such as the privacy alert, which
+  // must keep working on frame/legacy bounds that may not produce values.
+  const strict = options.strict !== false;
   if (image.contentBoundsSource === 'dark') {
     return { usable: false, reason: 'dark-bounds-only' };
+  }
+  // Frame bounds are a fallback for the registration step, not evidence that
+  // the template sits where the frame says. Measured 2026-09-03 (audit B-1):
+  // the fallback never fired on 152 scanned sheets, fired on 13 sunlit photo
+  // sheets, and the one automatic value it produced wrongly (p3 cagi.q01 -> 3)
+  // was the photo path's last remaining wrong. It may still register the
+  // sheet for review; it may not produce automatic values.
+  if (strict && image.contentBoundsSource === 'frame') {
+    return { usable: false, reason: 'frame-bounds-only' };
   }
 
   const bounds = image.contentBounds;
@@ -1138,10 +1159,13 @@ export function resolveFormBoundsStatus(
     && aspectRatio >= 1.05
     && aspectRatio <= 1.9;
 
+  // Without page bounds the edge checks above cannot tell a sheet from a
+  // desk-plus-sheet; the verdict is recorded for diagnostics but no longer
+  // unlocks automatic values (audit B-1, same measurement as above).
   return {
-    usable,
+    usable: usable && !strict,
     reason: usable
-      ? 'ok-legacy'
+      ? (strict ? 'legacy-edges-unverified' : 'ok-legacy')
       : `legacy-edges(w=${(width / image.width).toFixed(3)}/0.720`
         + ` h=${(height / image.height).toFixed(3)}/0.780`
         + ` l=${(bounds.left / image.width).toFixed(3)}/0.160`
