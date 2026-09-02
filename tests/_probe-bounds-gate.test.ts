@@ -88,7 +88,9 @@ run('bounds gate probe', () => {
     const realInfo = console.info;
     for (let i = 0; i < Math.min(cagi.length, sat.length); i += 1) {
       const lines: string[] = [];
+      const realLog = console.log;
       console.info = (...args: unknown[]) => { lines.push(String(args[0])); };
+      console.log = (...args: unknown[]) => { lines.push(String(args[0])); };
       let draft: Record<string, unknown> = {};
       try {
         draft = (await recognizeStudentForms(cagi[i], sat[i], {
@@ -97,6 +99,7 @@ run('bounds gate probe', () => {
         })) as unknown as Record<string, unknown>;
       } finally {
         console.info = realInfo;
+        console.log = realLog;
       }
       const source = (draft.recognitionValueSource || {}) as Record<string, string>;
       const registration = (draft.recognitionRegistration || {}) as Record<string, { status?: string }>;
