@@ -66,7 +66,13 @@ const nextConfig = {
   // being present in a deployment bundle.
   experimental: {
     outputFileTracingIncludes: {
-      '/api/recognize': ['./src/lib/recognition/assets/**'],
+      // The tesseract node worker is loaded by path at runtime (see
+      // OCR_WORKER_PATH in ocrTextLines.ts), so the tracer cannot see it.
+      '/api/recognize': [
+        './src/lib/recognition/assets/**',
+        './node_modules/tesseract.js/src/**',
+        './node_modules/tesseract.js-core/**',
+      ],
     },
   },
   // sharp 라이브러리가 Next.js API Routes 내부에서 원활히 빌드되고 구동되도록 설정

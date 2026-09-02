@@ -112,6 +112,14 @@ const DIGIT_OCR_CACHE_PATH = path.join(os.tmpdir(), 'gambling-prevention-digit-t
 // beside the blank-form assets and traced into the deployment bundle
 // (next.config.mjs), so worker creation is now a local file read.
 const DIGIT_OCR_LANG_PATH = path.join(process.cwd(), 'src', 'lib', 'recognition', 'assets');
+// tesseract.js builds its default node worker path from `__dirname`, which
+// inside a Next.js server bundle resolves to `.next/`, so the worker module
+// was never found and every age OCR call ended in the timeout branch -- in
+// dev and in `next start` alike (BUG_REPORTS #23, 2026-09-03). Point it at the
+// real file; the deployment trace includes it (next.config.mjs).
+const OCR_WORKER_PATH = path.join(
+  process.cwd(), 'node_modules', 'tesseract.js', 'src', 'worker-script', 'node', 'index.js',
+);
 
 // --- Age crop preprocessing ---------------------------------------------------
 // Measured on the deployment raster the age crop is about 68x16px, so it is
@@ -1492,7 +1500,7 @@ function renderStrokesForOcr(mask: InkMask, strokes: InkStroke[]): Promise<Buffe
 
 function getWorker(): Promise<Worker> {
   if (!workerPromise) {
-    workerPromise = createWorker('kor', OEM.DEFAULT, { cachePath: OCR_CACHE_PATH })
+    workerPromise = createWorker('kor', OEM.DEFAULT, { cachePath: OCR_CACHE_PATH, workerPath: OCR_WORKER_PATH })
       .then(async (worker) => {
         await worker.setParameters({
           tessedit_pageseg_mode: PSM.SPARSE_TEXT,
@@ -1537,6 +1545,7 @@ function getDigitWorker(): Promise<Worker> {
     digitWorkerPromise = createWorker('eng', OEM.DEFAULT, {
       cachePath: DIGIT_OCR_CACHE_PATH,
       langPath: DIGIT_OCR_LANG_PATH,
+      workerPath: OCR_WORKER_PATH,
       gzip: false,
     })
       .then(async (worker) => {
