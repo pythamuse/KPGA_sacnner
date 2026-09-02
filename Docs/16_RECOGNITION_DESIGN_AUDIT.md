@@ -109,26 +109,100 @@ BUG_REPORTS #11(2026-08-05)·#19·#20이 모두 이 정의 위에 서 있고, #1
 
 ---
 
-## B. 코드 설계 감사 — **미완, 중단 지점 (2026-09-02)**
+## B. 코드 설계 감사 (2026-09-02, 재개)
 
-토큰 사용량 때문에 사용자 지시로 여기서 멈춘다. A부만 완료됐다.
+방식: 범위를 나눈 Opus 에이전트 둘(읽기 전용)이 소견을 내고, 인용 행은 메인 판정자가 소스에서
+직접 확인했다. 아래는 확인을 통과한 것만이다.
 
-**재개 방법**: 여섯 관점(파이프라인 분해·실패 봉쇄 / 리마크 계약 / 보정·입력 가정 / 파서 자기검증·
-관측성 / 표시 의미론 / 래스터 정합) 병렬 감사 워크플로가 착수됐다가 중단됐다. 스크립트는
-`~/.claude/projects/.../workflows/scripts/design-audit-wf_9bb3a5e6-9da.js`, 실행 ID
-`wf_9bb3a5e6-9da` — 같은 세션에서만 `resumeFromRunId`로 이어갈 수 있고, 새 세션이면 스크립트를
-다시 돌린다. 완료된 렌즈의 결과는 저널에 남아 있을 수 있다.
+### B.1 인식 핵심 — 확정 소견
 
-**재개 전에 이미 확정된 코드 소견**(A.4에서 소스로 추적됨, B부의 첫 항목이 될 것):
+| # | 소견 | 위치 | 종류·심각도 | 권고 |
+|---|---|---|---|---|
+| B-1 | **프레임 대체가 자동 확정 게이트를 통과한다.** 게이트는 `resolveFormBoundsStatus`(`markDensity.ts:1082`)이며 `'dark'`만 거절하고 `'frame'`은 통과, `pageBounds`가 없으면 legacy 분기(`:1144`, 폭≥72%·높이≥78%·가장자리≤16%)가 `ok-legacy`를 낸다. `contentBoundsConfident`(`:476`)는 `classifyForm.ts:58`만 읽으므로 A.4의 귀속은 **정정**: 게이트는 `:1082/:1144`다 | `markDensity.ts:1082, :1144` | 설계 · 높음 | **restructure** — 종이 경계 없이 '사용 가능'을 내지 않는다. 프레임/legacy는 값 생산 금지, 검수 표시만 |
+| B-2 | (정정) 신뢰도 등급은 `high/medium/low` 뿐이지만 **`contested: boolean`**(`:75`, 계산 `:1986/:2021`)과 **거절 사유 `refused[]`**(`:1875-1889`)는 존재한다. 결함은 상태의 부재가 아니라 **전달의 부재** — B-7 참조 | `markDensity.ts:75, :1875` | 설계 · 중간 | 계약 층에서 해결(B-7) |
+| B-3 | 열 방향 균일 이동 허용치 0.08 > 열 간격 0.057~0.064(`roiTemplates.ts:53`) → 한 칸 밀림이 "종이 이동"으로 통과(`:840`) | `tableGridDetection.ts:37, :840` | 설계 · 높음 | **restructure** — 허용치를 상수가 아니라 템플릿 열 간격에서 유도(예: 간격의 ½ 미만) |
+| B-4 | `matchTemplateLinePattern`(`:1417`): 검출 수 == 기대 수면 선택지가 하나뿐이고 상대 간격 편차 ≤0.35(`:1446`)만으로 채택. `anchorScore`(`:1453`)는 **순위만** 매기고 거절하지 않는다 → 헤더 상단선부터 1:1 대응 | `tableGridDetection.ts:1417-1453` | 설계 · 높음 | **restructure** — 선 하나를 뺀 대안 대응을 시도해 편차 작은 쪽 채택; 앵커 점수에 거절 권한 부여 |
+| B-5 | 절대 밝기 상수: `tableGridDetection.ts:44`(200), `markDensity.ts:926/:976`(220), `:3616/:3643`에 재하드코딩. 입력 계급(1비트·회색조·사진)을 정규화하는 명시적 단계가 없다 | 위 행들 | 설계 · 높음 | **add-stage** — 이미지당 밝기 정규화(또는 문턱 유도) 한 곳으로 모으고 각 검출기는 그 결과만 받는다 |
+| B-6 | 결정 트레이스가 문자열(`markDensity.ts:88 decision: string`, 조립 `:1297-1330`) → 프로브가 정규식으로 파싱, 한 주에 파서 오류 4건 | `markDensity.ts:88` | 관측성 · 중간 | **restructure** — 구조화(JSON) 트레이스, 후보 색인 규약(0/1-기반) 명시 |
+| **B-7** | **검수자에게 가는 근거가 상수 문장이다.** 수치 근거(`floor=/gap=/contrast=`, `refused=`)가 담긴 `result.decision`은 계산되지만, API의 `recognitionDecisionTrace`에는 자동입력 칸마다 동일한 문장 *"automatic entry completed from a verified grid and high-confidence mark evidence"*가 들어간다(`contested=1`만 덧붙음). 1.01×로 통과한 칸과 5×로 통과한 칸이 검수 화면에서 같다 | `detectCheckmarks.ts:396, :546` | 설계 · 높음 | **restructure** — 여유 폭·거절 사유·출처를 구조화해 전달. 리마크의 세 원인(자리=`align!`·모양=`shape`·흐림=`floor` 근접)은 이미 내부에 있다 |
+| **B-8** | **기준선 기하가 페이지 기하와 독립이다.** 빈 양식은 자체 격자 검출을 돌리고(`templateBaseline.ts:60-62`), 페이지 셀과는 **색인 i↔i로만** 짝짓는다(`completeOverrideOrNull`, `tableGridDetection.ts:229`는 개수만 검사). 한쪽이 템플릿 명목 사각형으로 떨어지면(`:78`) 차분이 조용히 어긋난다 | `templateBaseline.ts:60-79`, `tableGridDetection.ts:229` | 설계 · 높음 | **add-stage** — 기준선 셀과 페이지 셀의 기하 일치(중심 편차) 검증, 불일치 시 차분 대신 거절 |
+| **B-9** | `anchoredToTemplate \|\| uniformlyTranslated`(`tableGridDetection.ts:851`)의 OR — 표 전체가 강체 이동하기만 하면 `verified`. B-3의 운반체 | `tableGridDetection.ts:851` | 설계 · 높음 | B-3과 함께 restructure |
+| B-10 | `allowAutoValue` 재확인(`markDensity.ts:1822`)이 게이트가 본 `cagiRegisteredImage`가 아니라 `gridStream.scoringImage`에서 돈다 → 보고된 거절 사유가 실제 발화한 게이트와 다를 수 있다 | `detectCheckmarks.ts:193, :204/:318` | 설계 · 중간 | restructure — 게이트에 쓴 이미지를 전달 |
 
-| # | 소견 | 위치 | 종류 |
+확인된 긍정: `'row'`/`'fixed'` 출처에서는 값이 생산되지 않는다 — `buildBasicRowRegistrations`(`:252`)는
+`candidate/failed`만 내고 `isVerifiedGrid`(`detectCheckmarks.ts:923`)는 `'grid'+'verified'`를 요구한다.
+재설계 §5의 원칙은 **격자 계층에서는 집행**되고 있다; 구멍은 그 앞의 등록 계층(B-1)이다.
+
+**단계 지도** (image → draft):
+load `loadImageAnalysisData`(markDensity:449) → paper/frame `detectFrameBounds`(:972) →
+registration `applyTemplateRegistrationFrame`(:519) → gate `resolveFormBoundsStatus`(:1082) →
+lines `matchTemplateLinePattern`(tableGridDetection:1417) → verdict `isVerifiedGridQuality`(:826) →
+baseline `createBlankFormBaseline`(templateBaseline:46) → scoring `analyzeChoiceGroup`(markDensity:1613) →
+draft write (detectCheckmarks:384/:542).
+
+### B.2 검수 계약·API·래스터 정합 — 확정 소견
+
+검수자가 필드마다 받는 것(`src/app/api/recognize/route.ts:275-289`): 크롭·원본 이미지,
+`recognitionCropSource`(grid|grid-candidate|row|row-fallback|fixed), `recognitionRegistration`(status),
+`recognitionValueSource`(auto|manual|confirmed|blank_ok|unresolved|restored), `recognitionContested`,
+`recognitionSuggestion`, `recognitionDecisionTrace`(문장 하나), 상위 `confidence`·`candidates`(3개).
+
+**의도 3(리마크의 세 원인)을 검수자가 구분할 수 있는가:**
+
+| 구분 | 가능? | 근거 |
+|---|---|---|
+| (i) 기하 미검증 | 조건부 아니오 | 배지는 있으나(`RecognitionReview.tsx:620-624`) 유일한 호출자 `renderFieldCropPreview`가 후보 없는 필드에서 `null`을 반환(`:763`, 호출 `:805`) — **기하가 가장 심하게 실패한 필드일수록 배지가 안 보인다** |
+| (ii) 두 칸에 표시 | 실질적 아니오 | `경합` 배지는 `source === 'auto'`에서만(`:678`), `attentionFields`는 신뢰도 등급·빈값만 본다(`:904`) → 경합 칸은 **주의 목록에 들어가지 않는다** |
+| (iii) 흐림 / 자리 / 모양 | 아니오 | 세 경우가 같은 문장을 낸다(B-7) |
+| (iv) 대체 출처(frame/row/fixed) | 예 — 단 (i)과 같은 null 게이트 아래 | `cropSourceLabel` `:47-53`, `:645` |
+
+| # | 소견 | 위치 | 종류·심각도 | 권고 |
+|---|---|---|---|---|
+| **B-11** | **기계 입력이 확정으로 계산된다.** 저장된 학생으로 돌아오면 `auto`·`unresolved` 값이 `restored`로 바뀌고(`page.tsx:547-557`), `isSettled`가 `restored`를 확정으로 센다(`RecognitionReview.tsx:190-193`). 툴팁은 "사람이 명시적으로 확인한 라벨은 아닙니다"라고 말하지만(`:695`) **주의 목록에서는 빠진다** — 검수자가 다시 보지 않는 한 자동값이 사람 확인처럼 저장 경로로 간다 | `page.tsx:547-557`, `RecognitionReview.tsx:190-193` | 설계 · **최고** | **restructure** — `restored`를 미확정으로 유지하거나, 자동 출처가 복원되면 `attentionFields`에 남긴다. 오답 0의 마지막 관문이 여기다 |
+| B-12 | 경합 칸이 주의 목록에 들어가지 않는다 | `RecognitionReview.tsx:678, :904` | 설계 · 높음 | contested를 `attentionFields`에 포함 (또는 자동 확정 거부) |
+| B-13 | 기하 배지가 크롭 미리보기 안에서만 그려져, 후보가 없는 필드에서는 사라진다 | `RecognitionReview.tsx:763, :805` | 설계 · 높음 | 출처·등록 배지를 크롭이 아니라 필드 셸(`:1151`)에서 렌더 |
+| B-14 | 한쪽 시트 분석이 통째로 실패해도 `catch {}`가 삼켜, 22칸 개별 거절과 구분되지 않는다 | `detectCheckmarks.ts:429-431` | 설계 · 중상 | 시트 단위 실패 사유를 기록·전달 |
+| B-15 | (계측) 노드 하네스는 렌더 사다리 0단만 쓰고 `OVER UPLOAD LIMIT`을 로그만 남기지만, 브라우저는 1·2단으로 떨어진다(`ImageUploadPanel.tsx:690,715`) — 큰 페이지에서 두 경로가 다른 해상도를 본다 | `tests/real-scan-measure.test.ts:136-148` | 튜닝(계측기) · 중간 | 하네스도 같은 사다리를 `MAX_UPLOAD_IMAGE_BYTES`에 대해 걷는다 |
+
+**래스터 정합**: 래스터화는 (a) PDF → 브라우저(`ImageUploadPanel.tsx:686-728`, 사다리→JPEG),
+(b) 이미지 → 상한 미만이면 원본 그대로(`:331-333`), (c) 노드 → pdf.js+node-canvas
+(`real-scan-measure.test.ts:101-149`). 서버가 PDF 원본을 받아 직접 래스터하면 측정 경로 = 제품
+경로가 된다(`route.ts materializeUploadBatch :362-393`이 자리). 제약 둘: `MAX_UPLOAD_IMAGE_BYTES =
+3.8MB`(`pdfRenderConfig.ts:19`)는 **쪽당** 상한이라 19쪽 PDF 한 덩어리와 충돌하고, `canvas`·
+`pdfjs-dist`가 **devDependencies**(`package.json:34-35`)라 서버 번들에 없다(`sharp`는 PDF를 못 읽는다).
+CLAUDE.md §5.5의 "정합 도달 불가"는 **두 렌더러를 맞추는 것**에 대한 결론이었고, **렌더러를 하나로**
+하는 선택지는 평가된 적이 없다 — 의존성·업로드 상한을 옮기는 설계 변경이며 별도 판단 대상.
+
+---
+
+## C. 결론 — 구조가 의도를 막는 지점
+
+의도의 사슬(파서 → 판정 → 리마크 → 사람)에서 **각 마디가 다음 마디에 자기 불확실성을 넘기지
+않는다.** 그것이 열다섯 소견의 공통 형태다:
+
+1. **등록이 파서에 불확실성을 넘기지 않는다** — 프레임/legacy 경계가 "사용 가능"으로 통과(B-1),
+   기준선과 페이지가 색인으로만 짝지어짐(B-8).
+2. **파서가 판정에 불확실성을 넘기지 않는다** — 강체 이동만으로 `verified`(B-9·B-3), 선 대응이
+   앵커 점수를 무시(B-4), 절대 상수가 입력 계급을 모름(B-5).
+3. **판정이 리마크에 근거를 넘기지 않는다** — 수치 근거와 거절 사유를 계산하고도 상수 문장을
+   보냄(B-7), 트레이스가 문자열(B-6).
+4. **리마크가 사람에게 닿지 않는다** — 경합·기하 배지가 주의 목록/크롭 게이트 뒤에 숨음
+   (B-12·B-13), 복원된 자동값이 확정으로 계산됨(**B-11**).
+
+오답 0은 규칙으로는 선언돼 있지만(PRD A2), **구조적으로 보장되는 지점이 없다.** 세 버그
+(#11·#19·#20)가 재발한 이유다.
+
+## D. 권고 순서 (토큰·위험 대비 효과)
+
+| 순서 | 항목 | 이유 | 판정 조건 |
 |---|---|---|---|
-| B-1 | 프레임 대체가 "확신"으로 계산됨 → 종이를 못 찾아도 자동 확정이 열림 | `markDensity.ts:476`, `resolveFormBoundsStatus` legacy 분기 | 설계 |
-| B-2 | 신뢰도가 단일 척도(`high/medium/low`) — 리마크 원인(자리·모양·흐림)과 경합 상태를 표현할 자리가 없음 | `markDensity.ts:74`, `detectCheckmarks.ts:116` | 설계 |
-| B-3 | 열 방향 균일 이동 허용치(0.08)가 열 간격(0.064·0.058)보다 커서 한 칸 밀림을 기하로 가릴 수 없음 | `tableGridDetection.ts:37` vs 템플릿 | 설계(허용치가 템플릿에서 유도되지 않음) |
-| B-4 | 수평선 1:1 대응이 후보 수만 맞으면 헤더 상단선부터 시작 — 회색조에서 행이 한 줄 밀림 | §17.3 | 설계(대응 로직) |
-| B-5 | 절대 밝기 상수가 세 곳(격자 선 200, 종이 경계 195/170→수정, 프레임 220) — 입력 계급(1비트·회색조·사진)에 대한 명시적 정규화 단계가 없음 | `tableGridDetection.ts:44`, `markDensity.ts` `detectFrameBounds` | 설계 |
-| B-6 | 결정 트레이스가 문자열이라 프로브가 정규식으로 파싱 — 한 주에 파서 오류 4건 | `markDensity.ts` trace 조립부 | 관측성 |
+| 1 | **B-11** `restored` 확정 계산 제거 | 코드 몇 줄, 오답 0의 마지막 관문, 회귀 위험 없음 | 검수 화면에서 복원 자동값이 주의 목록에 남는지(렌더 시험) |
+| 2 | **B-12·B-13** 배지를 주의 목록·필드 셸로 | UI만, 값 무변경 | 렌더 시험 + 값 바이트 동일 |
+| 3 | **B-1** 등록 게이트에서 frame/legacy 제외 | 값 경로 변경 — 7개 조건(스캔 3·사진 4)으로 판정 | 스캔 바이트 동일 · 사진 오답 비증가 |
+| 4 | **B-7** 근거 구조화 전달 | B-6(구조화 트레이스)과 함께 한 라운드 | 값 바이트 동일 |
+| 5 | B-3·B-9, B-4 | 파서 검증 재구조화 — 세트 4가 판정 표본 | 스캔 1~3 동일 + 세트 4 정답↑·오답 비증가 |
+| 6 | B-8, B-5 | 기준선 기하 검증, 정규화 단계 | 회색조 재보정과 묶어 별도 설계 |
+| — | 래스터 단일화 | 의존성·상한을 옮기는 아키텍처 결정 | 사용자 판단 |
 
-이 여섯은 워크플로 없이도 이 문서와 Task 기록만으로 성립한다. 재개 시 여섯 관점 감사가 여기에
-**추가·반증**한다.
+상위 문서 반영: PRD §1·§4에 입력 우선순위, §8.2에 리마크 원인 3종, §9의 다중 체크를 `contested`
+상태로 연결, 스펙 §7의 `error` 상태를 구현하거나 삭제(A.6). 이 문서가 그 근거다.

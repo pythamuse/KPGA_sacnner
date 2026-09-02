@@ -210,7 +210,9 @@ REAL_SCAN_SAT_REVERSED=1   REAL_SCAN_CAGI_PDF=".../선별검사 샘플3반복.pd
 **스캔이 현실적 상위권 입력이다.** 표적은 스캔 경로의 정확도, 그중 "잘못된 항목을 가리키는"
 오답이다. 사진의 양호/불량 판정 게이트는 보류 — 그 갈래에서 얻은 것(종이 경계 수정, 검수
 제안의 기기 간 유지)은 병합된 채 둔다. 다음 세션은 **브라우저 19명 전수 재측정**으로 시작한다
-([Task/FIELD_TEST_2026-08-21.md](Task/FIELD_TEST_2026-08-21.md) §33).
+([Task/FIELD_TEST_2026-08-21.md](Task/FIELD_TEST_2026-08-21.md) §33). 설계 결함과 수정 순서는
+[Docs/16_RECOGNITION_DESIGN_AUDIT.md](Docs/16_RECOGNITION_DESIGN_AUDIT.md) §D — 첫 항목(B-11, 복원된
+자동값이 확정으로 계산됨)이 오답 0의 마지막 관문이다.
 
 ### 5.1 판정자는 둘이고 역할이 다르다
 
