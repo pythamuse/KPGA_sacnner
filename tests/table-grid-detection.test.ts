@@ -68,9 +68,9 @@ describe('table grid detection', () => {
 
     expect(registration).toMatchObject({
       source: 'grid',
-      status: process.env.GRID_MATCH_V2 === '1' ? 'candidate' : 'verified',
+      status: process.env.GRID_MATCH_V2 !== '0' ? 'candidate' : 'verified',
     });
-    if (process.env.GRID_MATCH_V2 === '1') {
+    if (process.env.GRID_MATCH_V2 !== '0') {
       expect(registration.diagnostic).toContain('V2 line match refused');
     } else {
       expect(registration.candidateCenterOffset?.x).toBeLessThan(-0.03);
@@ -113,7 +113,7 @@ describe('table grid detection', () => {
       status: 'verified',
     });
     expect(registration.inferredVerticalLines).toMatchObject({ found: 2, expected: 3 });
-    if (process.env.GRID_MATCH_V2 === '1') {
+    if (process.env.GRID_MATCH_V2 !== '0') {
       expect(registration.missingExpected?.columns).toEqual([2]);
       expect(registration.diagnostic).toContain('affine reconstruction');
     }
@@ -137,7 +137,7 @@ describe('table grid detection', () => {
       status: 'verified',
     });
     expect(registration.inferredVerticalLines).toMatchObject({ found: 4, expected: 6 });
-    if (process.env.GRID_MATCH_V2 === '1') {
+    if (process.env.GRID_MATCH_V2 !== '0') {
       expect(registration.missingExpected?.columns).toEqual([0, 5]);
       expect(registration.diagnostic).toContain('affine reconstruction');
     }
@@ -162,7 +162,7 @@ describe('table grid detection', () => {
       status: 'verified',
     });
     expect(registration.inferredHorizontalLines).toMatchObject({ found: 2, expected: 3 });
-    if (process.env.GRID_MATCH_V2 === '1') {
+    if (process.env.GRID_MATCH_V2 !== '0') {
       expect(registration.missingExpected?.rows).toEqual([1]);
       expect(registration.diagnostic).toContain('affine reconstruction');
     }
@@ -186,7 +186,7 @@ describe('table grid detection', () => {
       status: 'verified',
       independentRegistration: true,
     });
-    if (process.env.GRID_MATCH_V2 === '1') {
+    if (process.env.GRID_MATCH_V2 !== '0') {
       expect(registration.missingExpected?.rows).toEqual([4]);
       expect(registration.diagnostic).toContain('affine reconstruction');
     } else {
@@ -240,7 +240,7 @@ describe('table grid detection', () => {
     const detection = buildCagiGridDetection(await loadImageAnalysisData(filePath));
     const diagnostic = detection.diagnostics?.['cagi.q01'];
 
-    if (process.env.GRID_MATCH_V2 === '1') {
+    if (process.env.GRID_MATCH_V2 !== '0') {
       expect(detection.overrides['cagi.q01']).toHaveLength(4);
       expect(detection.registrations['cagi.q01']).toMatchObject({
         source: 'grid',

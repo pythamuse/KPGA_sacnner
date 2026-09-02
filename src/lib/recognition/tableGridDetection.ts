@@ -171,7 +171,9 @@ export interface DerivedGridTolerances {
 }
 
 function isGridMatchV2Enabled(): boolean {
-  return process.env.GRID_MATCH_V2 === '1';
+  // Default on since 2026-09-03 (Task/B3_GRID_FIT_MEASUREMENT_2026-09-03.md §6);
+  // GRID_MATCH_V2=0 restores the choose-k matcher for comparison runs.
+  return process.env.GRID_MATCH_V2 !== '0';
 }
 
 /**
