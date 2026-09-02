@@ -15,6 +15,7 @@
 - **README(이 문서)** — 프로젝트 개요와 문서 규칙.
 - **PRD/스펙 문서** (`00_PRD.md`, `01_DATA_MAPPING.md`~`13_IMPLEMENTED_FEATURES_STATUS.md`) — 요구사항, 데이터 매핑, 검증 규칙, 테스트 계획, 구현 로드맵, 현재 구현 상태 등. 최초 기획 단계에 작성되었고 이후에도 그 자체로 유효한 "제품이 무엇인가"에 대한 문서라 이 폴더에 남긴다.
 - **`DESIGN.md`** — UI 디자인 시스템 문서(색·타이포·레이아웃). 인식 아키텍처 문서가 아니다.
+- 2026-09-03 수리 라운드 기록(Task/): [B11_SETTLEMENT_GATE](Task/B11_SETTLEMENT_GATE_2026-09-03.md) · [B12_B13_VISIBILITY](Task/B12_B13_VISIBILITY_2026-09-03.md) · [B1_FRAME_BOUNDS_GATE](Task/B1_FRAME_BOUNDS_GATE_2026-09-03.md) · [B7_EVIDENCE](Task/B7_EVIDENCE_2026-09-03.md) · [B3_GRID_FIT_MEASUREMENT](Task/B3_GRID_FIT_MEASUREMENT_2026-09-03.md)(선 대응 V2, 3라운드) · [B3_LINE_MATCHING_V2](Task/B3_LINE_MATCHING_V2_2026-09-03.md)(코덱스 보고서)
 - **[17_TECH_STACK_REVALIDATION.md](Docs/17_TECH_STACK_REVALIDATION.md)** — 기술 스택 도입·기각 판단의 재검증(2026-09-03). 후보 17개의 최종 판정과 사용자 결정이 필요한 항목 5개. 소견 검증 기록은 [Task/DESIGN_AUDIT_VERIFICATION_2026-09-03.md](Task/DESIGN_AUDIT_VERIFICATION_2026-09-03.md).
 - **[16_RECOGNITION_DESIGN_AUDIT.md](Docs/16_RECOGNITION_DESIGN_AUDIT.md)** — 인식 파이프라인 설계 감사(2026-09-02). 사용자 의도(항목 추출·판정·리마크·오답 0) 대 상위 문서 대 코드를 대조하고, 구조 결함과 그 집행 지점을 file:line으로 적는다.
 - **[BUG_REPORTS.md](Docs/BUG_REPORTS.md)** — 실제 버그(정상적으로 동작해야 하는데 하지 못한 사례)만 모은 색인.

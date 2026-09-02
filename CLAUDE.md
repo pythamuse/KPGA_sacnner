@@ -253,7 +253,8 @@ REAL_SCAN_SAT_REVERSED=1   REAL_SCAN_CAGI_PDF=".../선별검사 샘플3반복.pd
 게이트까지 포함한다.** B-11은 2026-09-03에 병합됐다([Task/B11_SETTLEMENT_GATE_2026-09-03.md](Task/B11_SETTLEMENT_GATE_2026-09-03.md)) —
 그 결과 "확인 필요 합계"에 자동값이 포함되므로 §5.2의 기준선 135는 **재설정 대상**이다. B-12·B-13도 같은 날 병합됐다([Task/B12_B13_VISIBILITY_2026-09-03.md](Task/B12_B13_VISIBILITY_2026-09-03.md)). B-1도 병합됐다([Task/B1_FRAME_BOUNDS_GATE_2026-09-03.md](Task/B1_FRAME_BOUNDS_GATE_2026-09-03.md)): 대체 경계는
 자동값을 못 만든다. **사진 4세트 기준선은 `59/0 · 34/0 · 36/0 · 24/0`(오답 0)**. B-7+B-2도 병합됐다([Task/B7_EVIDENCE_2026-09-03.md](Task/B7_EVIDENCE_2026-09-03.md)). B-3·B-4·B-9도 병합됐다(V2 선 대응 기본값 ON, [Task/B3_GRID_FIT_MEASUREMENT_2026-09-03.md](Task/B3_GRID_FIT_MEASUREMENT_2026-09-03.md) §6).
-다음은 §D 6순위 — B-5(`darkness()` 178, `photoProvenance` 단일 스위치)·B-8(기준선 기하), 회색조 재보정과 묶어 별도 설계.
+§D 6순위(B-5·B-8)는 사용자가 미룬 회색조 재보정과 같은 설계라 **사용자 결정 뒤에** 착수한다. 앙상블 거부권은 계측으로
+기각됐다(Docs/17 §3.15). 남은 사용자 결정 5건은 Docs/17 §5, 남은 브라우저 오답 9건의 실체는 FIELD_TEST §34.1.
 
 ### 5.1 판정자는 둘이고 역할이 다르다
 
