@@ -21,6 +21,8 @@ export interface ImageAnalysisData {
   contentBounds?: PixelBounds;
   contentBoundsSource?: ContentBoundsSource;
   pageBounds?: PixelBounds;
+  /** Brightness threshold selected from this image for paper detection. */
+  paperBoundsThreshold?: number;
   contentBoundsConfident: boolean;
   /** Whole-page quality measurements kept for the offline training export. */
   pageInkRatio?: number;
@@ -437,7 +439,8 @@ export async function loadImageAnalysisData(filePath: string): Promise<ImageAnal
   }
 
   const image = { width, height, pixels };
-  const pageBounds = detectPaperBounds(image);
+  const paperDetection = detectPaperBoundsWithDiagnostics(image);
+  const pageBounds = paperDetection.bounds;
   // A dark printed border can split an otherwise white scan into separate
   // bright components. In that case the largest bright component is the
   // *inside* of the form, and searching only inside it hides the actual outer
@@ -469,6 +472,7 @@ export async function loadImageAnalysisData(filePath: string): Promise<ImageAnal
     contentBounds,
     contentBoundsSource,
     pageBounds: pageBounds || undefined,
+    paperBoundsThreshold: paperDetection.threshold,
     contentBoundsConfident: paperContentBounds !== null || frameBounds !== null,
     ...pageQuality,
   };
@@ -635,32 +639,59 @@ export function detectContentBounds(image: Pick<ImageAnalysisData, 'width' | 'he
   return detectDarkPixelBounds(image);
 }
 
+const PAPER_BOUNDS_SCAN_THRESHOLD = 195;
+const PAPER_BOUNDS_BINARY_INTERMEDIATE_RATIO = 0.01;
+const PAPER_BOUNDS_MIN_GROUP_SEPARATION = 8;
+
+interface PaperBoundsSampling {
+  sampleWidth: number;
+  sampleHeight: number;
+  stepX: number;
+  stepY: number;
+}
+
+interface PaperBoundsDetection {
+  bounds: PixelBounds | null;
+  threshold: number;
+}
+
 /**
- * Finds the bright sheet before looking for printed ink. Phone photos often
- * include a dark desk, cable, or shadow that must never become part of the
- * normalized document coordinate system.
+ * Chooses the paper mask threshold from the observed luminance distribution.
+ *
+ * Otsu's split identifies the two populated sides of the histogram. The mask
+ * threshold is the midpoint of those sides' means rather than Otsu's split
+ * itself: for two narrow modes this puts the boundary between the desk and
+ * paper even when the paper mode is below the old absolute 170 cutoff.
+ *
+ * A nearly binary white image is the scan path. Its threshold is deliberately
+ * pinned to the old 195 value, because changing it cannot improve a 0/255
+ * mask and could change which antialiased edge pixels are included.
  */
-export function detectPaperBounds(image: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>): PixelBounds | null {
-  const sampleWidth = Math.min(360, Math.max(1, Math.ceil(image.width / 8)));
-  const sampleHeight = Math.min(520, Math.max(1, Math.ceil(image.height / 8)));
-  const stepX = image.width / sampleWidth;
-  const stepY = image.height / sampleHeight;
+export function derivePaperBoundsThreshold(
+  image: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>,
+): number {
+  const sampling = getPaperBoundsSampling(image);
+  return derivePaperBoundsThresholdFromHistogram(buildPaperBoundsHistogram(image, sampling));
+}
 
-  let bestCandidate: { bounds: PixelBounds; area: number } | null = null;
+function detectPaperBoundsWithDiagnostics(
+  image: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>,
+): PaperBoundsDetection {
+  const sampling = getPaperBoundsSampling(image);
+  const threshold = derivePaperBoundsThresholdFromHistogram(buildPaperBoundsHistogram(image, sampling));
+  const { sampleWidth, sampleHeight, stepX, stepY } = sampling;
 
-  for (const threshold of [195, 170]) {
-    const component = findLargestBrightComponent(
-      image,
-      sampleWidth,
-      sampleHeight,
-      stepX,
-      stepY,
-      threshold,
-    );
-    if (!component) {
-      continue;
-    }
+  let bestCandidate: PixelBounds | null = null;
 
+  const component = findLargestBrightComponent(
+    image,
+    sampleWidth,
+    sampleHeight,
+    stepX,
+    stepY,
+    threshold,
+  );
+  if (component) {
     const bounds = {
       left: clamp(Math.floor(component.left * stepX), 0, image.width - 1),
       top: clamp(Math.floor(component.top * stepY), 0, image.height - 1),
@@ -668,12 +699,131 @@ export function detectPaperBounds(image: Pick<ImageAnalysisData, 'width' | 'heig
       bottom: clamp(Math.ceil(component.bottom * stepY), 1, image.height),
     };
 
-    if (isPlausiblePaperBounds(image, bounds) && (!bestCandidate || component.area > bestCandidate.area)) {
-      bestCandidate = { bounds, area: component.area };
+    if (isPlausiblePaperBounds(image, bounds)) {
+      bestCandidate = bounds;
     }
   }
 
-  return bestCandidate?.bounds || null;
+  return { bounds: bestCandidate, threshold };
+}
+
+/**
+ * Finds the bright sheet before looking for printed ink. Phone photos often
+ * include a dark desk, cable, or shadow that must never become part of the
+ * normalized document coordinate system.
+ */
+export function detectPaperBounds(
+  image: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>,
+): PixelBounds | null {
+  return detectPaperBoundsWithDiagnostics(image).bounds;
+}
+
+function getPaperBoundsSampling(
+  image: Pick<ImageAnalysisData, 'width' | 'height'>,
+): PaperBoundsSampling {
+  const sampleWidth = Math.min(360, Math.max(1, Math.ceil(image.width / 8)));
+  const sampleHeight = Math.min(520, Math.max(1, Math.ceil(image.height / 8)));
+  return {
+    sampleWidth,
+    sampleHeight,
+    stepX: image.width / sampleWidth,
+    stepY: image.height / sampleHeight,
+  };
+}
+
+function buildPaperBoundsHistogram(
+  image: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>,
+  sampling: PaperBoundsSampling,
+): Uint32Array {
+  const histogram = new Uint32Array(256);
+  for (let sampleY = 0; sampleY < sampling.sampleHeight; sampleY++) {
+    const pixelY = Math.min(image.height - 1, Math.floor((sampleY + 0.5) * sampling.stepY));
+    for (let sampleX = 0; sampleX < sampling.sampleWidth; sampleX++) {
+      const pixelX = Math.min(image.width - 1, Math.floor((sampleX + 0.5) * sampling.stepX));
+      histogram[image.pixels[pixelY * image.width + pixelX]] += 1;
+    }
+  }
+  return histogram;
+}
+
+function derivePaperBoundsThresholdFromHistogram(histogram: Uint32Array): number {
+  let total = 0;
+  let intermediate = 0;
+  for (let value = 0; value < histogram.length; value++) {
+    total += histogram[value];
+    if (value !== 0 && value !== 255) {
+      intermediate += histogram[value];
+    }
+  }
+
+  if (
+    total === 0
+    || (histogram[255] > 0 && intermediate / total <= PAPER_BOUNDS_BINARY_INTERMEDIATE_RATIO)
+  ) {
+    return PAPER_BOUNDS_SCAN_THRESHOLD;
+  }
+
+  const otsuThreshold = findOtsuThreshold(histogram, total);
+  if (otsuThreshold === null) {
+    return PAPER_BOUNDS_SCAN_THRESHOLD;
+  }
+
+  let darkCount = 0;
+  let brightCount = 0;
+  let darkSum = 0;
+  let brightSum = 0;
+  for (let value = 0; value <= otsuThreshold; value++) {
+    darkCount += histogram[value];
+    darkSum += value * histogram[value];
+  }
+  for (let value = otsuThreshold + 1; value < histogram.length; value++) {
+    brightCount += histogram[value];
+    brightSum += value * histogram[value];
+  }
+
+  if (darkCount === 0 || brightCount === 0) {
+    return PAPER_BOUNDS_SCAN_THRESHOLD;
+  }
+
+  const darkMean = darkSum / darkCount;
+  const brightMean = brightSum / brightCount;
+  if (brightMean - darkMean < PAPER_BOUNDS_MIN_GROUP_SEPARATION) {
+    return PAPER_BOUNDS_SCAN_THRESHOLD;
+  }
+
+  return clamp(Math.round((darkMean + brightMean) / 2), 1, PAPER_BOUNDS_SCAN_THRESHOLD);
+}
+
+function findOtsuThreshold(histogram: Uint32Array, total: number): number | null {
+  let totalSum = 0;
+  for (let value = 0; value < histogram.length; value++) {
+    totalSum += value * histogram[value];
+  }
+
+  let backgroundWeight = 0;
+  let backgroundSum = 0;
+  let bestVariance = -1;
+  let bestThreshold: number | null = null;
+
+  for (let threshold = 0; threshold < 255; threshold++) {
+    backgroundWeight += histogram[threshold];
+    backgroundSum += threshold * histogram[threshold];
+    const foregroundWeight = total - backgroundWeight;
+    if (backgroundWeight === 0 || foregroundWeight === 0) {
+      continue;
+    }
+
+    const backgroundMean = backgroundSum / backgroundWeight;
+    const foregroundMean = (totalSum - backgroundSum) / foregroundWeight;
+    const betweenClassVariance = backgroundWeight * foregroundWeight
+      * (backgroundMean - foregroundMean) ** 2;
+    if (betweenClassVariance > bestVariance) {
+      bestVariance = betweenClassVariance;
+      bestThreshold = threshold;
+    }
+  }
+
+  return bestThreshold;
 }
 
 function findLargestBrightComponent(
@@ -1040,6 +1190,7 @@ interface DecisionEvidence {
   field: string;
   boundsSource: ContentBoundsSource | 'none';
   boundsWidth: number;
+  paperBoundsThreshold?: number;
   boundsRejection?: string;
   usesBaseline: boolean;
   usesGridCells: boolean;
@@ -1149,6 +1300,9 @@ function describeDecision(
     `outcome=${outcome}`,
     `bounds=${evidence.boundsSource}`
       + `/${evidence.boundsWidth.toFixed(4)}`
+      + (evidence.paperBoundsThreshold !== undefined
+        ? `/paper-threshold=${evidence.paperBoundsThreshold}`
+        : '')
       + `${evidence.boundsRejection ? `/${evidence.boundsRejection}` : ''}`,
     refused.length > 0 ? `refused=${refused.join(',')}` : 'refused=none',
     `base=${usesBaseline ? 1 : 0} cells=${usesGridCells ? 1 : 0} n=${scores.length}`,
@@ -1573,6 +1727,7 @@ export function analyzeChoiceGroup(
     boundsSource: image.contentBoundsSource ?? 'none',
     boundsWidth: ((image.contentBounds?.right ?? image.width)
       - (image.contentBounds?.left ?? 0)) / image.width,
+    paperBoundsThreshold: image.paperBoundsThreshold,
     boundsRejection: image.contentBoundsRejection,
     usesBaseline,
     usesGridCells,

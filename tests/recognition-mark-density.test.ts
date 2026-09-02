@@ -10,6 +10,7 @@ import {
   CONTESTED_RUNNERUP_MSCORE,
   detectContentBounds,
   detectPaperBounds,
+  derivePaperBoundsThreshold,
   hasUsableFormBounds,
   ImageAnalysisData,
   loadImageAnalysisData,
@@ -36,6 +37,20 @@ function makeTestImage(): ImageAnalysisData {
   }
 
   return { width, height, pixels, contentBoundsConfident: true };
+}
+
+function makePaperScene(paperValue: number, deskValue = 40) {
+  const width = 320;
+  const height = 480;
+  const pixels = Buffer.alloc(width * height, deskValue);
+
+  for (let y = 32; y < 448; y++) {
+    for (let x = 32; x < 288; x++) {
+      pixels[y * width + x] = paperValue;
+    }
+  }
+
+  return { width, height, pixels };
 }
 
 describe('마킹 밀도 기반 선택지 분석', () => {
@@ -319,5 +334,59 @@ describe('마킹 밀도 기반 선택지 분석', () => {
       contentBounds,
       contentBoundsSource: 'dark',
     })).toBe(false);
+  });
+
+  it('derives a threshold between bright paper and a dark desk', () => {
+    const image = makePaperScene(230);
+
+    expect(derivePaperBoundsThreshold(image)).toBe(135);
+    expect(detectPaperBounds(image)).toEqual({ left: 32, top: 32, right: 288, bottom: 448 });
+  });
+
+  it('finds paper whose observed brightness is below the old absolute cutoff', () => {
+    const image = makePaperScene(165);
+
+    expect(derivePaperBoundsThreshold(image)).toBe(103);
+    expect(detectPaperBounds(image)).toEqual({ left: 32, top: 32, right: 288, bottom: 448 });
+  });
+
+  it('pins a full-white scan-like image to the old threshold and bounds', () => {
+    const image = {
+      width: 320,
+      height: 480,
+      pixels: Buffer.alloc(320 * 480, 255),
+    };
+
+    expect(derivePaperBoundsThreshold(image)).toBe(195);
+    expect(detectPaperBounds(image)).toEqual({ left: 0, top: 0, right: 320, bottom: 480 });
+  });
+
+  it('does not invent paper bounds for a uniformly dark image', () => {
+    const image = {
+      width: 320,
+      height: 480,
+      pixels: Buffer.alloc(320 * 480, 40),
+    };
+
+    expect(derivePaperBoundsThreshold(image)).toBe(195);
+    expect(detectPaperBounds(image)).toBeNull();
+  });
+
+  it('includes the selected paper threshold in the bounds decision trace', async () => {
+    fs.mkdirSync(fixtureDir, { recursive: true });
+    const filePath = path.join(fixtureDir, 'paper-threshold-trace.png');
+    const scene = makePaperScene(165);
+    await sharp(scene.pixels, {
+      raw: { width: scene.width, height: scene.height, channels: 1 },
+    }).png().toFile(filePath);
+
+    const image = await loadImageAnalysisData(filePath);
+    const result = analyzeChoiceGroup(image, {
+      field: 'cagi.q05',
+      candidates: [{ value: 0, rect: { x: 0.1, y: 0.1, width: 0.3, height: 0.3 } }],
+    });
+
+    expect(image.paperBoundsThreshold).toBe(103);
+    expect(result.decision).toContain('paper-threshold=103');
   });
 });
