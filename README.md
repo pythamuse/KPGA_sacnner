@@ -14,7 +14,8 @@
 
 - **README(이 문서)** — 프로젝트 개요와 문서 규칙.
 - **PRD/스펙 문서** (`00_PRD.md`, `01_DATA_MAPPING.md`~`13_IMPLEMENTED_FEATURES_STATUS.md`) — 요구사항, 데이터 매핑, 검증 규칙, 테스트 계획, 구현 로드맵, 현재 구현 상태 등. 최초 기획 단계에 작성되었고 이후에도 그 자체로 유효한 "제품이 무엇인가"에 대한 문서라 이 폴더에 남긴다.
-- **`DESIGN.md`** — 아키텍처/설계 문서.
+- **`DESIGN.md`** — UI 디자인 시스템 문서(색·타이포·레이아웃). 인식 아키텍처 문서가 아니다.
+- **[16_RECOGNITION_DESIGN_AUDIT.md](Docs/16_RECOGNITION_DESIGN_AUDIT.md)** — 인식 파이프라인 설계 감사(2026-09-02). 사용자 의도(항목 추출·판정·리마크·오답 0) 대 상위 문서 대 코드를 대조하고, 구조 결함과 그 집행 지점을 file:line으로 적는다.
 - **[BUG_REPORTS.md](Docs/BUG_REPORTS.md)** — 실제 버그(정상적으로 동작해야 하는데 하지 못한 사례)만 모은 색인.
 - **[15_FAILURE_ELIMINATION_TABLE.md](Docs/15_FAILURE_ELIMINATION_TABLE.md)** — 인식이 채우지 못하는 항목별로 **이미 기각된 가설**을 숫자와 함께 모은 소거표. 새 가설을 세우기 전에 여기부터 확인해 같은 막다른 길을 다시 걷지 않는다.
 
