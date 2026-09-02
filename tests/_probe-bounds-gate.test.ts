@@ -101,13 +101,26 @@ run('bounds gate probe', () => {
       const source = (draft.recognitionValueSource || {}) as Record<string, string>;
       const registration = (draft.recognitionRegistration || {}) as Record<string, { status?: string }>;
       for (const line of lines) {
+        const g = /^\[grid-fit\] (.*)$/.exec(line);
+        if (g) {
+          const kv: Record<string, string | number> = { set: SET, page: i + 1, kind: 'grid-fit' };
+          for (const token of g[1].split(' ')) {
+            const eq = token.indexOf('=');
+            if (eq > 0) {
+              const v = token.slice(eq + 1);
+              kv[token.slice(0, eq)] = /^-?\d+(\.\d+)?$/.test(v) ? Number(v) : v;
+            }
+          }
+          rows.push(kv);
+          continue;
+        }
         const m = /\[bounds-gate\] sheet=(\w+) source=(\S+) confident=(\d) usable=(\d) reason=(.*)$/.exec(line);
         if (!m) continue;
         const sheet = m[1];
         const prefix = sheet === 'cagi' ? /^(basic|cagi)\./ : /^satisfaction\./;
         const autoCount = Object.entries(source).filter(([k, v]) => prefix.test(k) && v === 'auto').length;
         const verified = Object.entries(registration).filter(([k, v]) => prefix.test(k) && v?.status === 'verified').length;
-        rows.push({ set: SET, page: i + 1, sheet, source: m[2], confident: m[3] === '1', usable: m[4] === '1', reason: m[5], autoCount, verifiedFields: verified });
+        rows.push({ set: SET, page: i + 1, kind: 'bounds-gate', sheet, source: m[2], confident: m[3] === '1', usable: m[4] === '1', reason: m[5], autoCount, verifiedFields: verified });
       }
       realInfo(`${SET} p${i + 1} ${lines.filter((l) => l.startsWith('[bounds-gate]')).join(' || ')}`);
     }

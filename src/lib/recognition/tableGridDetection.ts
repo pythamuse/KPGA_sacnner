@@ -592,6 +592,21 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
     const diagnostic = status === 'candidate'
       ? formatGridQualityDiagnostic(quality, candidateCenter, spec.maxUniformCandidateOffsetY) + lineEvidence
       : undefined;
+    if (process.env.GRID_TRACE) {
+      // Instrument only (audit B-3/B-4/B-9): the numbers each verified-grid
+      // clause saw, so tolerance changes can be judged against the measured
+      // distribution instead of a constant.
+      console.info(
+        `[grid-fit] table=${spec.id} field=${group.field} status=${status}`
+        + ` hLines=${horizontalLines.length}/${expectedY.length} vLines=${verticalLines.length}/${expectedX.length}`
+        + ` rowGap=${quality.rowGapDeviation.toFixed(4)} colGap=${quality.columnGapDeviation.toFixed(4)}`
+        + ` rowRes=${quality.rowResidualRatio.toFixed(4)} colRes=${quality.columnResidualRatio.toFixed(4)}`
+        + ` meanX=${candidateCenter.meanX.toFixed(4)} meanY=${candidateCenter.meanY.toFixed(4)}`
+        + ` spreadX=${candidateCenter.spreadX.toFixed(4)} spreadY=${candidateCenter.spreadY.toFixed(4)}`
+        + ` maxX=${candidateCenter.maxX.toFixed(4)} maxY=${candidateCenter.maxY.toFixed(4)}`
+        + ` tolY=${(spec.maxUniformCandidateOffsetY ?? GRID_MAX_UNIFORM_CANDIDATE_OFFSET_Y).toFixed(3)}`,
+      );
+    }
     return [group.field, {
       tableId: spec.id,
       source: 'grid',
