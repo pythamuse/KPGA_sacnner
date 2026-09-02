@@ -75,6 +75,25 @@ describe('마킹 밀도 기반 선택지 분석', () => {
     expect(result.contested).toBe(false);
   });
 
+  it('records the same floor and gap numbers that the decision string prints', () => {
+    const result = analyzeChoiceGroup(makeTestImage(), {
+      field: 'cagi.q01',
+      candidates: [
+        { value: 0, rect: { x: 0.1, y: 0.1, width: 0.3, height: 0.3 } },
+        { value: 1, rect: { x: 0.6, y: 0.6, width: 0.3, height: 0.3 } },
+      ],
+    });
+    const evidence = result.evidence;
+    expect(evidence).toBeDefined();
+
+    const floor = /floor=([^/]+)\/([^ (]+)/.exec(result.decision);
+    const gap = /(?:^|\s)gap=([^/]+)\/([^ (]+)/.exec(result.decision);
+    expect(Number(floor?.[1])).toBe(evidence?.winner?.score);
+    expect(Number(floor?.[2])).toBe(evidence?.thresholds?.score);
+    expect(Number(gap?.[1])).toBe(evidence?.gap);
+    expect(Number(gap?.[2])).toBe(evidence?.thresholds?.gap);
+  });
+
   it('ROI 안의 어두운 픽셀 비율을 계산한다', () => {
     const image = makeTestImage();
 

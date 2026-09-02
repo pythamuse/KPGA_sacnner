@@ -1,5 +1,14 @@
 import sharp from 'sharp';
 import { ChoiceGroup, NormalizedRect } from './roiTemplates';
+import {
+  BASELINE_ALIGNMENT_RADIUS,
+  HIGH_ABSOLUTE_SIGNAL,
+  HIGH_RELATIVE_CONTRAST,
+  PHOTO_BINARY_FLOOR,
+  STRUCTURED_MARK_MIN_COMPONENT,
+  STRUCTURED_MARK_MIN_COMPONENT_RATIO,
+  STRUCTURED_MARK_MIN_DIAGONAL_RATIO,
+} from './markDensityConstants';
 
 export type ContentBoundsSource = 'frame' | 'paper' | 'template' | 'dark';
 
@@ -68,6 +77,25 @@ export interface CandidateMeasurement {
   diagonalRatio: number | null;
 }
 
+export interface DecisionEvidence {
+  outcome: 'auto' | 'refused' | 'contested';
+  winner?: { index: number; label?: string; score: number };
+  runnerUp?: { index: number; score: number };
+  gap?: number;
+  relativeContrast?: number;
+  /**
+   * Present on the scorer result with the exact thresholds used by the gate.
+   * Review-session transport may omit the JSON key to keep each field below
+   * the storage budget; `src/lib/review/evidence.ts` uses the same shared
+   * constants then.
+   */
+  thresholds: { score: number; gap: number; contrast: number };
+  refused: string[];
+  offset?: { x: number; y: number };
+  shape?: { componentRatio: number; diagonalRatio: number };
+  contested: boolean;
+}
+
 export interface ChoiceGroupResult {
   field: string;
   value?: number | string;
@@ -76,6 +104,7 @@ export interface ChoiceGroupResult {
   candidates: CandidateScore[];
   /** Internal measurement outlet; removed before the API response is built. */
   candidateMeasurements?: CandidateMeasurement[];
+  evidence?: DecisionEvidence;
   /**
    * Which box the two independent rankings both put first, on a group that is
    * being left for review. Never a value: see `selectReviewSuggestion`.
@@ -344,7 +373,7 @@ interface ScoredCandidate extends CandidateScore {
  * baseline-backed group may be confirmed automatically. See `analyzeChoiceGroup`
  * for why an absolute gap cannot carry this decision.
  */
-const HIGH_RELATIVE_CONTRAST = 1.25;
+export { HIGH_RELATIVE_CONTRAST };
 
 /**
  * Minimum residual ink a baseline-backed option must carry before it may be
@@ -352,7 +381,7 @@ const HIGH_RELATIVE_CONTRAST = 1.25;
  * answer (its winning score was 0.0200) while costing the fewest correct ones:
  * 0.021 gives CORRECT 102 WRONG 0, where 0.023 drops to 99 and 0.026 to 97.
  */
-const HIGH_ABSOLUTE_SIGNAL = 0.021;
+export { HIGH_ABSOLUTE_SIGNAL };
 
 /**
  * PROVISIONAL, and cut through a mixed distribution. The same minimum for a
@@ -390,7 +419,7 @@ const HIGH_ABSOLUTE_SIGNAL = 0.021;
  * it and `photo-binary-floor` is still named when it would have refused -- so
  * a trace run can still read what it was costing.
  */
-const PHOTO_BINARY_FLOOR = 0.042;
+export { PHOTO_BINARY_FLOOR };
 
 /**
  * Whether a two-candidate group on a photo sheet is refused outright.
@@ -421,9 +450,11 @@ function photoBinaryRefusalEnabled(): boolean {
  * trace can report each sub-test against the value it was actually compared
  * with; the values are unchanged.
  */
-const STRUCTURED_MARK_MIN_COMPONENT = 7;
-const STRUCTURED_MARK_MIN_COMPONENT_RATIO = 0.2;
-const STRUCTURED_MARK_MIN_DIAGONAL_RATIO = 0.2;
+export {
+  STRUCTURED_MARK_MIN_COMPONENT,
+  STRUCTURED_MARK_MIN_COMPONENT_RATIO,
+  STRUCTURED_MARK_MIN_DIAGONAL_RATIO,
+};
 
 export async function loadImageAnalysisData(filePath: string): Promise<ImageAnalysisData> {
   const { data: pixels, info } = await sharp(filePath)
@@ -1210,7 +1241,7 @@ function isPlausiblePaperBounds(
   );
 }
 
-interface DecisionEvidence {
+interface DecisionTraceContext {
   field: string;
   boundsSource: ContentBoundsSource | 'none';
   boundsWidth: number;
@@ -1233,6 +1264,7 @@ interface DecisionEvidence {
    * check never touched reads exactly as it did before.
    */
   band?: { nonVoid: number; empty: number; minNonVoid: number; inks: number[] };
+  published?: DecisionEvidence;
 }
 
 /**
@@ -1308,7 +1340,7 @@ function rescueConfidence(
 }
 
 function describeDecision(
-  evidence: DecisionEvidence,
+  evidence: DecisionTraceContext,
   outcome: string,
   refused: string[],
   contested = false,
@@ -1318,6 +1350,39 @@ function describeDecision(
     field, usesBaseline, usesGridCells, scores, best, gap, relativeContrast,
     highScoreThreshold, highGapThreshold, mediumScoreThreshold, mediumGapThreshold,
   } = evidence;
+
+  // Build the review-facing record from the exact variables immediately used
+  // by the trace below. This is a recording outlet only: no gate reads it.
+  evidence.published = {
+    outcome: contested ? 'contested' : outcome === 'high' ? 'auto' : 'refused',
+    ...(best ? {
+      winner: {
+        index: best.candidateIndex,
+        score: best.score,
+      },
+    } : {}),
+    ...(evidence.ranked[1] ? {
+      runnerUp: {
+        index: evidence.ranked[1].candidateIndex,
+        score: evidence.ranked[1].score,
+      },
+    } : {}),
+    ...(best ? { gap, relativeContrast } : {}),
+    thresholds: {
+      score: highScoreThreshold,
+      gap: highGapThreshold,
+      contrast: HIGH_RELATIVE_CONTRAST,
+    },
+    refused: [...refused],
+    ...(best?.shape ? {
+      offset: { x: best.shape.alignX, y: best.shape.alignY },
+      shape: {
+        componentRatio: best.shape.largestComponentRatio,
+        diagonalRatio: best.shape.diagonalRatio,
+      },
+    } : {}),
+    contested,
+  };
 
   const parts = [
     `field=${field}`,
@@ -1746,7 +1811,7 @@ export function analyzeChoiceGroup(
 
   const best = scoredCandidates[0];
   const second = scoredCandidates[1];
-  const evidence: DecisionEvidence = {
+  const evidence: DecisionTraceContext = {
     field: group.field,
     boundsSource: image.contentBoundsSource ?? 'none',
     boundsWidth: ((image.contentBounds?.right ?? image.width)
@@ -1775,6 +1840,7 @@ export function analyzeChoiceGroup(
       candidates,
       candidateMeasurements,
       decision: describeDecision(evidence, 'low', ['no-candidates']),
+      evidence: evidence.published,
     };
   }
 
@@ -1861,6 +1927,7 @@ export function analyzeChoiceGroup(
         'low',
         [formBounds.usable ? 'grid-unverified' : `form-bounds:${formBounds.reason}`],
       ),
+      evidence: evidence.published,
     };
   }
 
@@ -1944,6 +2011,7 @@ export function analyzeChoiceGroup(
       candidates,
       candidateMeasurements,
       decision: describeDecision(evidence, 'low', refused),
+      evidence: evidence.published,
     };
   }
 
@@ -1998,6 +2066,7 @@ export function analyzeChoiceGroup(
       candidates,
       candidateMeasurements,
       decision: describeDecision(evidence, 'low', refused),
+      evidence: evidence.published,
     };
   }
 
@@ -2016,6 +2085,7 @@ export function analyzeChoiceGroup(
       candidates,
       candidateMeasurements,
       decision: describeDecision(evidence, 'high', refused, contested),
+      evidence: evidence.published,
     };
   }
 
@@ -2051,6 +2121,7 @@ export function analyzeChoiceGroup(
       candidates,
       candidateMeasurements,
       decision: describeDecision(evidence, 'high', refused, contested),
+      evidence: evidence.published,
     };
   }
 
@@ -2073,6 +2144,7 @@ export function analyzeChoiceGroup(
       candidates,
       candidateMeasurements,
       decision: describeDecision(evidence, 'medium', refused, false, suggestion),
+      evidence: evidence.published,
     };
   }
 
@@ -2089,6 +2161,7 @@ export function analyzeChoiceGroup(
     candidates,
     candidateMeasurements,
     decision: describeDecision(evidence, 'low', refused, false, suggestion),
+    evidence: evidence.published,
   };
 }
 
@@ -3046,7 +3119,7 @@ export function sampleRect(
  * registration failure rather than jitter, and the cell should not be scored on
  * a guess.
  */
-const BASELINE_ALIGNMENT_RADIUS = 1;
+export { BASELINE_ALIGNMENT_RADIUS };
 const BASELINE_ALIGNMENT_MAX_RADIUS = 4;
 
 /**
