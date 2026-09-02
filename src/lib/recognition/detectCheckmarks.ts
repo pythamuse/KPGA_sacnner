@@ -24,6 +24,7 @@ import {
   buildCagiGridDetection,
   buildSatisfactionGridDetection,
   completeOverrideOrNull,
+  isAutomaticGridEligible,
   type FieldRegistration,
   type GridDetectionResult,
   type RegistrationStatus,
@@ -39,6 +40,8 @@ import { recognizeDigitsInRegionDetailed, type DigitOcrOptions } from './ocrText
 import { buildFlattenedGeometryImage } from './illuminationFlatten';
 import { loadBlankFormBaseline } from './templateBaseline';
 import fs from 'fs/promises';
+
+export { isAutomaticGridEligible } from './tableGridDetection';
 
 export type RecognitionCropSource = 'grid' | 'grid-candidate' | 'row' | 'row-fallback' | 'fixed';
 export type RecognitionValueSource = 'auto' | 'manual' | 'confirmed' | 'blank_ok' | 'unresolved' | 'restored';
@@ -322,9 +325,9 @@ export async function recognizeStudentForms(
       }
 
       // The affine-reconstructed row is valid registration geometry and is
-      // used for scoring, but it does not independently confirm the answer
-      // band. Keep automatic entry manual-only until the row detector supplies
-      // that second signal; the recovered grid remains visible as evidence.
+      // used for scoring. Automatic entry is allowed only for a verified grid
+      // with no row gap or one bounded interior gap; the recovered grid remains
+      // visible as evidence even when that precondition is not met.
       const verifiedGridCells = isAutomaticGridEligible(registration) ? gridCells : undefined;
       const result = analyzeChoiceGroup(
         cagiImage,
@@ -937,10 +940,6 @@ function getRecognitionFieldLabel(field: string): string {
 
 function isVerifiedGrid(registration?: FieldRegistration): boolean {
   return registration?.source === 'grid' && registration.status === 'verified';
-}
-
-function isAutomaticGridEligible(registration?: FieldRegistration): boolean {
-  return isVerifiedGrid(registration) && !Boolean(registration?.missingExpected?.rows.length);
 }
 
 function mergeBasicCheckboxDetection(

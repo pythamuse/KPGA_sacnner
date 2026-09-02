@@ -90,6 +90,50 @@ export interface GridDetectionResult {
   diagnostics?: Record<string, string>;
 }
 
+export type AutomaticGridMissingKind = 'none' | 'interior' | 'end' | 'multi';
+
+/**
+ * Classifies only missing horizontal boundaries because automatic entry reads
+ * choices across a recovered row. Missing columns remain safe after affine
+ * reconstruction, while a missing first/last row boundary requires extrapolation.
+ */
+export function getAutomaticGridMissingKind(
+  registration?: Pick<FieldRegistration, 'missingExpected' | 'horizontalLines' | 'inferredHorizontalLines'>,
+): AutomaticGridMissingKind {
+  const missingRows = registration?.missingExpected?.rows ?? [];
+  if (missingRows.length === 0) {
+    return 'none';
+  }
+  if (missingRows.length > 1) {
+    return 'multi';
+  }
+
+  const expectedRowCount = registration?.inferredHorizontalLines?.expected
+    ?? registration?.horizontalLines?.expected;
+  const missingIndex = missingRows[0];
+  const isInterior = Number.isInteger(missingIndex)
+    && expectedRowCount !== undefined
+    && Number.isInteger(expectedRowCount)
+    && expectedRowCount > 2
+    && missingIndex > 0
+    && missingIndex < expectedRowCount - 1;
+  return isInterior ? 'interior' : 'end';
+}
+
+/**
+ * A verified grid may auto-fill with one recovered interior boundary. The
+ * affine fit is bounded by both neighbouring observed boundaries there; the
+ * first/last boundary is an extrapolation and stays manual-only.
+ */
+export function isAutomaticGridEligible(registration?: FieldRegistration): boolean {
+  if (registration?.source !== 'grid' || registration.status !== 'verified') {
+    return false;
+  }
+
+  const missingKind = getAutomaticGridMissingKind(registration);
+  return missingKind === 'none' || missingKind === 'interior';
+}
+
 /**
  * The line correspondence used by the optional matcher revision. Indexes are
  * indexes in the sorted detected/expected arrays passed to the matcher.
@@ -480,6 +524,21 @@ function emitGridTrace(
       registration,
     ])))
     : trace.status;
+  const autoEligible = tableRegistrations.length > 0
+    && tableRegistrations.every((registration) => isAutomaticGridEligible(registration));
+  const missingKind = getAutomaticGridMissingKind(tableRegistrations[0] ?? {
+    missingExpected: {
+      rows: trace.rowMatch?.missingExpected ?? [],
+      columns: trace.columnMatch?.missingExpected ?? [],
+    },
+    inferredHorizontalLines: {
+      found: trace.rowMatch?.matchedExpected.length ?? 0,
+      expected: trace.expectedRows,
+    },
+  });
+  const eligibilityTrace = trace.mode === 'v2'
+    ? ` autoEligible=${autoEligible ? 1 : 0} missingKind=${missingKind}`
+    : '';
   const refusedBy = status === 'verified'
     ? 'none'
     : trace.status === 'verified' && trace.refusedBy === 'none'
@@ -563,6 +622,7 @@ function emitGridTrace(
       + ` tolY=${format(trace.maxUniformCandidateOffsetY)}`
       + ` status=${status}`
       + ` refusedBy=${refusedBy}`
+      + eligibilityTrace
       + ` matchedCols=${formatIndexes(trace.columnMatch?.matchedExpected)}`
       + ` missingCols=${formatIndexes(trace.columnMatch?.missingExpected)}`,
   );

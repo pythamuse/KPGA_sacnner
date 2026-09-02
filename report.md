@@ -4,8 +4,9 @@
 
 - `src/lib/recognition/tableGridDetection.ts`: V2 affine 후보에 절대 위치 점수와 양 끝점 검사 추가.
 - `src/lib/recognition/tableGridDetection.ts`: 결손 기대선은 적합된 affine으로 `lines`에 복원하고, 결손만으로 등록을 `candidate`로 낮추지 않도록 변경. `missingExpected`와 diagnostic/trace에는 결손 사실을 유지.
-- `src/lib/recognition/detectCheckmarks.ts`: 행 결손으로 affine 복원한 grid는 scoring에 사용하되, 독립 row measurement가 없는 경우 자동 입력 precondition은 계속 막도록 호환 처리.
-- `tests/table-grid-detection.test.ts`: OLD p4 18선 경쟁 후보와 바깥 열 1개 결손 복원 시험 추가/고정.
+- `src/lib/recognition/tableGridDetection.ts`: `isAutomaticGridEligible`를 verified grid의 행 결손 분류와 공유. 내부 가로 경계 1개는 허용하고 끝 경계/2개 이상은 차단하며, 열 결손은 기존처럼 허용한다.
+- `src/lib/recognition/detectCheckmarks.ts`: scoring과 자동 입력 precondition이 같은 eligibility 판정을 사용하도록 연결.
+- `tests/table-grid-detection.test.ts`: OLD p4 18선 경쟁 후보·결손 복원 시험과 기대 가로 경계 8개 기준의 내부/끝/다중 행 결손 eligibility 시험을 고정.
 
 ## V2 규칙
 
@@ -23,6 +24,19 @@ score  = r + lambda * (C + S)
 V2는 대응선이 2개 미만이거나, 결손이 `floor(E/3)`을 초과하거나, scale/잔차가 범위를 벗어나거나, 절대 위치가 거부되면 `null`이다. 절대 위치 거부 한도는 `0.5d`이며 중심 이동과 기존 span residual을 검사하고, scale이 중심 이동을 상쇄하지 못하도록 적합 affine의 첫 선과 마지막 선의 signed absolute offset도 각각 검사한다. 결손 위치는 affine 예측값으로 `lines`에 채운다.
 
 V2 matcher가 거절되어도 V1 완전 패턴이 있으면 기존 review-only `candidate` geometry를 보존한다. 반대로 결손만 있고 품질/절대 위치 조건을 통과하면 registration은 `verified`로 남는다. `satisfaction.frequency`의 단일 행 legacy fallback도 유지한다.
+
+## 자동 입력 eligibility 규칙 (B-3·B-4 V2 후속)
+
+`isAutomaticGridEligible`는 먼저 `source=grid`와 `status=verified`를 요구한다. 그 다음 `missingExpected.rows`만 판정한다. 기대 가로 경계 수를 `E`라 할 때, 결손이 없거나 정확히 하나이고 `0 < i < E−1`인 경우 `eligible=1`이다. `i=0`, `i=E−1`, 결손 2개 이상, 기대 경계 수를 알 수 없는 결손은 각각 `end` 또는 `multi`로 분류해 `eligible=0`으로 둔다. `missingExpected.columns`는 이 gate에 참여하지 않는다.
+
+새 단위시험 수치는 다음과 같다.
+
+```text
+expected horizontal boundaries = 8, missing rows = [2]   -> missingKind=interior, autoEligible=1
+expected horizontal boundaries = 8, missing rows = [0] or [7] -> missingKind=end, autoEligible=0
+expected horizontal boundaries = 8, missing rows = [2,5] -> missingKind=multi,    autoEligible=0
+expected horizontal boundaries = 8, missing rows = [], columns = [2] -> missingKind=none, autoEligible=1
+```
 
 ## 새 단위시험의 실제 수치
 
@@ -73,7 +87,7 @@ diagnostic = grid: missing expected rows [] columns [2] (affine reconstruction)
 
 표별 최소 간격에서 V2 uniform/anchor tolerance를 유도한다. `satisfaction.frequency`는 내부 행 간격이 식별되지 않아 기존 `0.0375` cell-boundary fallback을 유지한다. V2가 없으면 기존 상수·spec 경로를 그대로 사용한다.
 
-행 결손은 등록을 verified로 만들고 affine 복원 경계를 scoring에 사용한다. 다만 독립 row measurement가 없는 synthetic/legacy 경로에서는 자동 입력 precondition을 열지 않는다. 이 호환층은 결손 상태를 candidate로 되돌리지 않으며, 실제 위임 측정에서 확인된 결손이 열이라는 조건에서는 affine grid scoring과 자동 입력 경로를 그대로 사용한다.
+행 결손은 등록을 verified로 만들고 affine 복원 경계를 scoring에 사용한다. 자동 입력은 verified 상태에서 내부 단일 행 경계 결손만 허용하며, 끝 행 결손 또는 다중 행 결손은 manual-only로 남긴다. 열 결손은 행 gate와 무관하게 기존처럼 허용한다.
 
 ## 테스트 결과 전문
 
@@ -87,33 +101,42 @@ $ npx.cmd tsc --noEmit
 ```text
 $ npx.cmd vitest run
 Test Files  45 passed | 14 skipped (59)
-Tests       437 passed | 14 skipped (451)
-Start at    07:04:29
-Duration    24.69s
+Tests       441 passed | 14 skipped (455)
+Start at    07:30:48
+Duration    24.28s (transform 4.79s, setup 6ms, collect 20.38s, tests 50.90s, environment 10ms, prepare 14.03s)
 ```
 
 ```text
 $env:GRID_MATCH_V2='1'; npx.cmd vitest run
 Test Files  45 passed | 14 skipped (59)
-Tests       437 passed | 14 skipped (451)
-Start at    07:05:01
-Duration    24.00s
+Tests       441 passed | 14 skipped (455)
+Start at    07:31:20
+Duration    24.65s (transform 4.30s, setup 4ms, collect 20.05s, tests 51.84s, environment 11ms, prepare 13.75s)
 ```
 
-추가 대상 실행도 통과했다.
+trace 필드 확인을 겸한 대상 실행도 통과했다.
 
 ```text
-$env:GRID_MATCH_V2='1'; npx.cmd vitest run tests/table-grid-detection.test.ts tests/review-suggestion.test.ts
-Test Files  2 passed
-Tests       28 passed
+$env:GRID_MATCH_V2='1'; $env:GRID_TRACE='1'; npx.cmd vitest run tests/table-grid-detection.test.ts
+Test Files  1 passed (1)
+Tests       21 passed (21)
+Start at    07:31:52
+Duration    734ms (transform 94ms, setup 0ms, collect 162ms, tests 321ms, environment 0ms, prepare 80ms)
+```
+
+대표 trace에는 새 필드가 다음처럼 함께 출력된다.
+
+```text
+status=verified refusedBy=none autoEligible=1 missingKind=interior
+status=verified refusedBy=none autoEligible=0 missingKind=end
 ```
 
 ## 명세와 다르게 한 것과 이유
 
 - 현재 checkout의 `cagi.primary`는 q01~q07 7개 응답행이라 경계 기대선이 8개다. OLD p4 시험은 명세의 4선 표현을 임의로 재구성하지 않고 현재 template에서 계산되는 8개 기대선을 사용했다.
-- 행 결손이 있는 synthetic/legacy scoring에서는 affine 복원 cell을 사용하되, 독립 row measurement가 없으면 자동 입력만 막는다. registration 자체는 `verified`이며 결손 때문에 candidate가 된 것이 아니다. 기존 리뷰 제안 시험과 실제 측정에서 결손이 열이라는 조건을 함께 보존하기 위한 호환층이다.
+- 행 결손이 있는 scoring에서는 affine 복원 cell을 사용한다. registration은 결손만으로 `candidate`가 되지 않으며, 자동 입력 gate만 내부 단일 결손을 허용하고 끝/다중 결손을 차단한다.
 - V2가 `null`인 경우 V1 완전 패턴을 review-only candidate로 보존한다. 이는 기존 crop/diagnostic 호환성과 V1 동작 보존에 필요하다.
-- trace의 row/column affine 메트릭은 기존 단일 trace 줄에 `absCenter`, `absSpan`, `absEnds`, `score`를 추가했다. V1에서는 새 메트릭을 출력하지 않는다.
+- V2 trace의 row/column affine 메트릭은 기존 단일 trace 줄에 `absCenter`, `absSpan`, `absEnds`, `score`를 유지하고 `autoEligible`·`missingKind`를 추가했다. V1에서는 새 trace 토큰을 출력하지 않으며, 값/자동 입력 결과는 기존 경로를 유지한다.
 
 ## 확신 없는 부분
 

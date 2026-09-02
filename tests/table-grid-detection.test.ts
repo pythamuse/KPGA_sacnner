@@ -10,7 +10,10 @@ import {
   buildSatisfactionGridOverrides,
   deriveTemplateGridTolerances,
   detectVerticalLines,
+  getAutomaticGridMissingKind,
+  isAutomaticGridEligible,
   matchTemplateLinePattern,
+  type FieldRegistration,
 } from '../src/lib/recognition/tableGridDetection';
 import { cagiTemplate, satisfactionTemplate, type ChoiceGroup } from '../src/lib/recognition/roiTemplates';
 
@@ -299,6 +302,38 @@ describe('table grid detection', () => {
     expect(match?.lines[2]).toBeCloseTo(180, 6);
   });
 
+  it('allows one missing interior boundary for a verified eight-boundary grid', () => {
+    const registration = makeVerifiedGridRegistration([2]);
+
+    expect(registration.status).toBe('verified');
+    expect(getAutomaticGridMissingKind(registration)).toBe('interior');
+    expect(isAutomaticGridEligible(registration)).toBe(true);
+  });
+
+  it('blocks a verified grid when either end boundary is missing', () => {
+    for (const missingRows of [[0], [7]]) {
+      const registration = makeVerifiedGridRegistration(missingRows);
+
+      expect(getAutomaticGridMissingKind(registration)).toBe('end');
+      expect(isAutomaticGridEligible(registration)).toBe(false);
+    }
+  });
+
+  it('blocks a verified grid when two boundaries are missing', () => {
+    const registration = makeVerifiedGridRegistration([2, 5]);
+
+    expect(getAutomaticGridMissingKind(registration)).toBe('multi');
+    expect(isAutomaticGridEligible(registration)).toBe(false);
+  });
+
+  it('keeps a verified grid with only a missing column eligible', () => {
+    const registration = makeVerifiedGridRegistration([]);
+    registration.missingExpected = { rows: [], columns: [2] };
+
+    expect(getAutomaticGridMissingKind(registration)).toBe('none');
+    expect(isAutomaticGridEligible(registration)).toBe(true);
+  });
+
   it('V2 ignores one spurious detected boundary without losing expected matches', () => {
     const match = withGridMatchV2(() => matchTemplateLinePattern(
       [100, 120, 140, 180, 220],
@@ -484,4 +519,16 @@ function withGridMatchV2<T>(callback: () => T): T {
       process.env.GRID_MATCH_V2 = previous;
     }
   }
+}
+
+function makeVerifiedGridRegistration(missingRows: number[]): FieldRegistration {
+  const expected = 8;
+  return {
+    tableId: 'cagi.primary',
+    source: 'grid',
+    status: 'verified',
+    horizontalLines: { found: expected - missingRows.length, expected },
+    inferredHorizontalLines: { found: expected - missingRows.length, expected },
+    missingExpected: { rows: missingRows, columns: [] },
+  };
 }
