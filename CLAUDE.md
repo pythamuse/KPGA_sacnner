@@ -190,13 +190,17 @@ node -e "const j=require('./local-scans/answer-key.json');j.pages.forEach(p=>Obj
 REAL_SCAN_SAT_REVERSED=1   REAL_SCAN_CAGI_PDF=".../선별검사 샘플3반복.pdf"   REAL_SCAN_SAT_PDF=".../만족도조사 샘플3 역순.pdf"   REAL_SCAN_PAGES=19 npx vitest run tests/real-scan-measure.test.ts
 ```
 
-기준선(2026-08-28, 노드):
+기준선(2026-09-03, 노드, V2 선 대응 기본값 — 이전 2026-08-28 값은 `355/7/75 · 343/8/86 · 342/3/92`):
 
 ```
-세트 1   CORRECT 355  WRONG 7  BLANK 75
-세트 2   CORRECT 343  WRONG 8  BLANK 86
-세트 3   CORRECT 342  WRONG 3  BLANK 92
+세트 1   CORRECT 361  WRONG 5  BLANK 71   OFF 30
+세트 2   CORRECT 346  WRONG 8  BLANK 83   OFF 21
+세트 3   CORRECT 344  WRONG 3  BLANK 90   OFF 12
+세트 4   CORRECT 232  WRONG 11 BLANK 194  OFF 70   (회색조, 판정 표본 아님)
+사진     OLD 61/0 · Set1 34/0 · Set2 42/0 · Set3 32/0
 ```
+
+`GRID_MATCH_V2=0`을 주면 이전 대응기(V1)로 잰다 — 비교 실험 전용.
 
 **오답 칸이 세트마다 거의 겹치지 않는다.** 합치면 서로 다른 13칸인데 반복되는 것은 p16의
 다섯뿐이고, 그 다섯도 세트 3에서는 거절되어 빈칸이다. 즉 지금 남은 오답의 대부분은 고정된
@@ -248,8 +252,8 @@ REAL_SCAN_SAT_REVERSED=1   REAL_SCAN_CAGI_PDF=".../선별검사 샘플3반복.pd
 [Docs/17_TECH_STACK_REVALIDATION.md](Docs/17_TECH_STACK_REVALIDATION.md) — **B-10은 기각됐고, B-11은 첫 저장
 게이트까지 포함한다.** B-11은 2026-09-03에 병합됐다([Task/B11_SETTLEMENT_GATE_2026-09-03.md](Task/B11_SETTLEMENT_GATE_2026-09-03.md)) —
 그 결과 "확인 필요 합계"에 자동값이 포함되므로 §5.2의 기준선 135는 **재설정 대상**이다. B-12·B-13도 같은 날 병합됐다([Task/B12_B13_VISIBILITY_2026-09-03.md](Task/B12_B13_VISIBILITY_2026-09-03.md)). B-1도 병합됐다([Task/B1_FRAME_BOUNDS_GATE_2026-09-03.md](Task/B1_FRAME_BOUNDS_GATE_2026-09-03.md)): 대체 경계는
-자동값을 못 만든다. **사진 4세트 기준선은 `59/0 · 34/0 · 36/0 · 24/0`(오답 0)**. B-7+B-2도 병합됐다([Task/B7_EVIDENCE_2026-09-03.md](Task/B7_EVIDENCE_2026-09-03.md)). 다음은 §D 5순위 — B-3·B-4 V2(플래그
-`GRID_MATCH_V2`, [Task/B3_GRID_FIT_MEASUREMENT_2026-09-03.md](Task/B3_GRID_FIT_MEASUREMENT_2026-09-03.md))의 판정.
+자동값을 못 만든다. **사진 4세트 기준선은 `59/0 · 34/0 · 36/0 · 24/0`(오답 0)**. B-7+B-2도 병합됐다([Task/B7_EVIDENCE_2026-09-03.md](Task/B7_EVIDENCE_2026-09-03.md)). B-3·B-4·B-9도 병합됐다(V2 선 대응 기본값 ON, [Task/B3_GRID_FIT_MEASUREMENT_2026-09-03.md](Task/B3_GRID_FIT_MEASUREMENT_2026-09-03.md) §6).
+다음은 §D 6순위 — B-5(`darkness()` 178, `photoProvenance` 단일 스위치)·B-8(기준선 기하), 회색조 재보정과 묶어 별도 설계.
 
 ### 5.1 판정자는 둘이고 역할이 다르다
 
@@ -292,6 +296,7 @@ REAL_SCAN_SAT_REVERSED=1   REAL_SCAN_CAGI_PDF=".../선별검사 샘플3반복.pd
 **재측정(2026-09-03, 프로덕션 빌드, B-11 이후 — FIELD_TEST §34)**: 자동 309 · 정답 299 · **오답 10** · 미확정
 빈칸 128 · 경합 104(오답 10 중 9). B-11 이후 "확인 필요 합계"(=437)는 작업량 지표이지 개선 판정 축이 아니다 —
 판정은 **자동 오답 · 자동 정답 · 경합 중 오답 비율**로 한다.
+**V2 선 대응 병합 후(2026-09-03 오후, dev, FIELD_TEST §34.1)**: 자동 339 · 정답 330 · **오답 9** · 미확정 빈칸 98 · 경합 99(오답 7/9).
 
 ```
 ```
