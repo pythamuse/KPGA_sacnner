@@ -6,6 +6,8 @@
 > **처음 설계부터** 다시 검증한다. 이 문서는 상위 문서(README·PRD·04 스펙·재설계 기록)와 코드가
 > 아래 의도를 담고 있는지를 묻는다.
 
+> **검증 이력(2026-09-03)**: 소견 15건을 독립 검증자 30개가 반박 시도 — **B-10 기각**, 11건 정정, 3건 확정. 아래 표는 원문을 유지하며 정정은 [Task/DESIGN_AUDIT_VERIFICATION_2026-09-03.md](../Task/DESIGN_AUDIT_VERIFICATION_2026-09-03.md)가 우선한다. 기술 스택 후보의 재판정은 [17_TECH_STACK_REVALIDATION.md](17_TECH_STACK_REVALIDATION.md).
+
 ## 0. 기준으로 삼는 의도 (사용자, 2026-09-02)
 
 1. **항목별 이미지 추출·파서** — 스캔 한 장을 문항 단위 셀로 정확히 분해한다.
@@ -127,7 +129,7 @@ BUG_REPORTS #11(2026-08-05)·#19·#20이 모두 이 정의 위에 서 있고, #1
 | **B-7** | **검수자에게 가는 근거가 상수 문장이다.** 수치 근거(`floor=/gap=/contrast=`, `refused=`)가 담긴 `result.decision`은 계산되지만, API의 `recognitionDecisionTrace`에는 자동입력 칸마다 동일한 문장 *"automatic entry completed from a verified grid and high-confidence mark evidence"*가 들어간다(`contested=1`만 덧붙음). 1.01×로 통과한 칸과 5×로 통과한 칸이 검수 화면에서 같다 | `detectCheckmarks.ts:396, :546` | 설계 · 높음 | **restructure** — 여유 폭·거절 사유·출처를 구조화해 전달. 리마크의 세 원인(자리=`align!`·모양=`shape`·흐림=`floor` 근접)은 이미 내부에 있다 |
 | **B-8** | **기준선 기하가 페이지 기하와 독립이다.** 빈 양식은 자체 격자 검출을 돌리고(`templateBaseline.ts:60-62`), 페이지 셀과는 **색인 i↔i로만** 짝짓는다(`completeOverrideOrNull`, `tableGridDetection.ts:229`는 개수만 검사). 한쪽이 템플릿 명목 사각형으로 떨어지면(`:78`) 차분이 조용히 어긋난다 | `templateBaseline.ts:60-79`, `tableGridDetection.ts:229` | 설계 · 높음 | **add-stage** — 기준선 셀과 페이지 셀의 기하 일치(중심 편차) 검증, 불일치 시 차분 대신 거절 |
 | **B-9** | `anchoredToTemplate \|\| uniformlyTranslated`(`tableGridDetection.ts:851`)의 OR — 표 전체가 강체 이동하기만 하면 `verified`. B-3의 운반체 | `tableGridDetection.ts:851` | 설계 · 높음 | B-3과 함께 restructure |
-| B-10 | `allowAutoValue` 재확인(`markDensity.ts:1822`)이 게이트가 본 `cagiRegisteredImage`가 아니라 `gridStream.scoringImage`에서 돈다 → 보고된 거절 사유가 실제 발화한 게이트와 다를 수 있다 | `detectCheckmarks.ts:193, :204/:318` | 설계 · 중간 | restructure — 게이트에 쓴 이미지를 전달 |
+| ~~B-10~~ (**기각** 2026-09-03 — 검증 기록 §3.10: `scoringImage`는 게이트가 본 것과 같은 객체) | `allowAutoValue` 재확인(`markDensity.ts:1822`)이 게이트가 본 `cagiRegisteredImage`가 아니라 `gridStream.scoringImage`에서 돈다 → 보고된 거절 사유가 실제 발화한 게이트와 다를 수 있다 | `detectCheckmarks.ts:193, :204/:318` | 설계 · 중간 | restructure — 게이트에 쓴 이미지를 전달 |
 
 확인된 긍정: `'row'`/`'fixed'` 출처에서는 값이 생산되지 않는다 — `buildBasicRowRegistrations`(`:252`)는
 `candidate/failed`만 내고 `isVerifiedGrid`(`detectCheckmarks.ts:923`)는 `'grid'+'verified'`를 요구한다.
@@ -158,11 +160,11 @@ draft write (detectCheckmarks:384/:542).
 
 | # | 소견 | 위치 | 종류·심각도 | 권고 |
 |---|---|---|---|---|
-| **B-11** | **기계 입력이 확정으로 계산된다.** 저장된 학생으로 돌아오면 `auto`·`unresolved` 값이 `restored`로 바뀌고(`page.tsx:547-557`), `isSettled`가 `restored`를 확정으로 센다(`RecognitionReview.tsx:190-193`). 툴팁은 "사람이 명시적으로 확인한 라벨은 아닙니다"라고 말하지만(`:695`) **주의 목록에서는 빠진다** — 검수자가 다시 보지 않는 한 자동값이 사람 확인처럼 저장 경로로 간다 | `page.tsx:547-557`, `RecognitionReview.tsx:190-193` | 설계 · **최고** | **restructure** — `restored`를 미확정으로 유지하거나, 자동 출처가 복원되면 `attentionFields`에 남긴다. 오답 0의 마지막 관문이 여기다 |
+| **B-11** | **기계 입력이 확정으로 계산된다.** 저장된 학생으로 돌아오면 `auto`·`unresolved` 값이 `restored`로 바뀌고(`page.tsx:547-557`), `isSettled`가 `restored`를 확정으로 센다(`RecognitionReview.tsx:190-193`). 툴팁은 "사람이 명시적으로 확인한 라벨은 아닙니다"라고 말하지만(`:695`) **주의 목록에서는 빠진다** — 검수자가 다시 보지 않는 한 자동값이 사람 확인처럼 저장 경로로 간다 | `page.tsx:547-557`, `RecognitionReview.tsx:190-193` | 설계 · **최고** | **restructure** — `restored`를 미확정으로 유지하거나, 자동 출처가 복원되면 `attentionFields`에 남긴다. 오답 0의 마지막 관문이 여기다. **검증(09-03): 누출 지점은 복원이 아니라 첫 저장 — 미확정 저장 게이트 병행** |
 | B-12 | 경합 칸이 주의 목록에 들어가지 않는다 | `RecognitionReview.tsx:678, :904` | 설계 · 높음 | contested를 `attentionFields`에 포함 (또는 자동 확정 거부) |
 | B-13 | 기하 배지가 크롭 미리보기 안에서만 그려져, 후보가 없는 필드에서는 사라진다 | `RecognitionReview.tsx:763, :805` | 설계 · 높음 | 출처·등록 배지를 크롭이 아니라 필드 셸(`:1151`)에서 렌더 |
 | B-14 | 한쪽 시트 분석이 통째로 실패해도 `catch {}`가 삼켜, 22칸 개별 거절과 구분되지 않는다 | `detectCheckmarks.ts:429-431` | 설계 · 중상 | 시트 단위 실패 사유를 기록·전달 |
-| B-15 | (계측) 노드 하네스는 렌더 사다리 0단만 쓰고 `OVER UPLOAD LIMIT`을 로그만 남기지만, 브라우저는 1·2단으로 떨어진다(`ImageUploadPanel.tsx:690,715`) — 큰 페이지에서 두 경로가 다른 해상도를 본다 | `tests/real-scan-measure.test.ts:136-148` | 튜닝(계측기) · 중간 | 하네스도 같은 사다리를 `MAX_UPLOAD_IMAGE_BYTES`에 대해 걷는다 |
+| B-15 | (계측) 노드 하네스는 렌더 사다리 0단만 쓰고 `OVER UPLOAD LIMIT`을 로그만 남기지만, 브라우저는 1·2단으로 떨어진다(`ImageUploadPanel.tsx:690,715`) — 큰 페이지에서 두 경로가 다른 해상도를 본다 | `tests/real-scan-measure.test.ts:136-148` | 튜닝(계측기) · 낮음(잠재 — 검증 기록 §3.15) | 하네스도 같은 사다리를 `MAX_UPLOAD_IMAGE_BYTES`에 대해 걷는다 |
 
 **래스터 정합**: 래스터화는 (a) PDF → 브라우저(`ImageUploadPanel.tsx:686-728`, 사다리→JPEG),
 (b) 이미지 → 상한 미만이면 원본 그대로(`:331-333`), (c) 노드 → pdf.js+node-canvas
@@ -196,7 +198,7 @@ CLAUDE.md §5.5의 "정합 도달 불가"는 **두 렌더러를 맞추는 것**�
 
 | 순서 | 항목 | 이유 | 판정 조건 |
 |---|---|---|---|
-| 1 | **B-11** `restored` 확정 계산 제거 | 코드 몇 줄, 오답 0의 마지막 관문, 회귀 위험 없음 | 검수 화면에서 복원 자동값이 주의 목록에 남는지(렌더 시험) |
+| 1 | **B-11** `restored` 확정 계산 제거 **+ 미확정 저장 게이트**(검증 기록 §3.11) | 코드 몇 줄, 오답 0의 마지막 관문, 회귀 위험 없음 | 검수 화면에서 복원 자동값이 주의 목록에 남는지(렌더 시험) |
 | 2 | **B-12·B-13** 배지를 주의 목록·필드 셸로 | UI만, 값 무변경 | 렌더 시험 + 값 바이트 동일 |
 | 3 | **B-1** 등록 게이트에서 frame/legacy 제외 | 값 경로 변경 — 7개 조건(스캔 3·사진 4)으로 판정 | 스캔 바이트 동일 · 사진 오답 비증가 |
 | 4 | **B-7** 근거 구조화 전달 | B-6(구조화 트레이스)과 함께 한 라운드 | 값 바이트 동일 |
