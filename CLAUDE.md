@@ -136,6 +136,12 @@ node -e "const j=require('./local-scans/answer-key.json');j.pages.forEach(p=>Obj
 | 1 | `선별검사 샘플1.pdf` | `만족도조사 샘플1.pdf` | 그대로 |
 | 2 | `선별검사 샘플2반복.pdf` | `만족도조사 샘플2 반복.pdf` | 그대로 |
 | 3 | `선별검사 샘플3반복.pdf` | `만족도조사 샘플3 역순.pdf` | **만족도만 역순** |
+| 4 | `선별검사지(그레이,600dpi).pdf` | `만족도(역순,그레이,600dpi).pdf` | **만족도만 역순** |
+
+**세트 4는 회색조 600dpi**(`BitsPerComponent 8` · `DeviceGray` · JPEG)이고, 세트 1~3은
+1비트 CCITTFax다. 원본은 `C:/Users/night/Desktop/` 에 있고 사본은 스크래치패드에 둔다.
+**세트 4는 아직 판정에 쓸 수 없다** — 빈 양식 기준 자산이 1비트 계열이라 차분이 성립하지
+않는다(FIELD_TEST §32). 회색조 빈 양식을 받은 뒤에야 유효하다.
 
 모두 `C:/Users/night/Desktop/바이브코딩/` 에 있다. 같은 학생 19명을 세 번 스캔한 것이고,
 선별검사는 세 세트 모두 학생 순서 그대로다.
