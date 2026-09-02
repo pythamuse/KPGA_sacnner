@@ -1079,7 +1079,7 @@ export function hasUsableFormBounds(
  * half refused it unless this one is re-checked, and the two halves live in
  * different files and want different fixes.
  */
-function resolveFormBoundsStatus(
+export function resolveFormBoundsStatus(
   image: Pick<ImageAnalysisData, 'width' | 'height' | 'contentBounds' | 'contentBoundsSource' | 'pageBounds'>,
 ): { usable: boolean; reason: string } {
   if (image.contentBoundsSource === 'dark') {

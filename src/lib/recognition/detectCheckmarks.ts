@@ -3,6 +3,7 @@ import {
   applyTemplateRegistrationFrame,
   getRegistrationBounds,
   hasUsableFormBounds,
+  resolveFormBoundsStatus,
   loadImageAnalysisData,
   type ChoiceGroupResult,
   type ImageAnalysisData,
@@ -140,6 +141,15 @@ export interface RecognitionDraft {
   warnings?: string[];
 }
 
+// Instrument only: counts how often the form-bounds gate is reached through
+// a fallback (frame / legacy) rather than paper bounds. Audit finding B-1 --
+// nobody has measured whether that path fires on real scans.
+function traceBoundsGate(sheet: 'cagi' | 'satisfaction', image: ImageAnalysisData): void {
+  if (!process.env.MARK_BOUNDS_TRACE) return;
+  const status = resolveFormBoundsStatus(image);
+  console.info(`[bounds-gate] sheet=${sheet} source=${image.contentBoundsSource ?? 'none'} confident=${image.contentBoundsConfident ? 1 : 0} usable=${status.usable ? 1 : 0} reason=${status.reason}`);
+}
+
 const RECOGNITION_FIELDS = [
   'basic.age', 'basic.gender', 'basic.schoolType', 'basic.grade',
   'cagi.q01', 'cagi.q02', 'cagi.q03', 'cagi.q04', 'cagi.q05', 'cagi.q06', 'cagi.q07', 'cagi.q08', 'cagi.q09',
@@ -190,6 +200,7 @@ export async function recognizeStudentForms(
     ]);
     const cagiRegisteredImage = applyTemplateRegistrationFrame(cagiImageData, cagiTemplate.registrationFrame);
     const cagiImageBuffer = await fs.readFile(cagiPath);
+    traceBoundsGate('cagi', cagiRegisteredImage);
     const canAutoRecognizeCagi = hasUsableFormBounds(cagiRegisteredImage);
     const cagiGridStream = await selectGridDetectionStream(
       cagiRegisteredImage,
@@ -438,6 +449,7 @@ export async function recognizeStudentForms(
     ]);
     const satisfactionRegisteredImage = applyTemplateRegistrationFrame(satisfactionImageData, satisfactionTemplate.registrationFrame);
     const satisfactionImageBuffer = await fs.readFile(satisfactionPath);
+    traceBoundsGate('satisfaction', satisfactionRegisteredImage);
     const canAutoRecognizeSatisfaction = hasUsableFormBounds(satisfactionRegisteredImage);
     // Row detection stays ahead of the stream selection: it owns the shared
     // OCR worker and runs against a deadline, so the flatten must not be
