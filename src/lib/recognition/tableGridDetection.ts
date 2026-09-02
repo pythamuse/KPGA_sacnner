@@ -39,6 +39,12 @@ const GRID_MAX_UNIFORM_CANDIDATE_OFFSET_Y = 0.02;
 const GRID_MAX_CANDIDATE_CENTER_SPREAD = 0.012;
 const GRID_MAX_INTRA_TABLE_OFFSET_DELTA = 0.02;
 const GRID_MAX_RECOVERED_LINE_SCALE_DEVIATION = 0.15;
+const GRID_MAX_RECOVERED_LINE_RESIDUAL_RATIO = 0.4;
+const GRID_MAX_RECOVERED_LINE_ANCHOR_RATIO = 0.5;
+const GRID_V2_AFFINE_POSITION_LAMBDA = 2;
+const GRID_V2_UNIFORM_OFFSET_FACTOR = 0.45;
+const GRID_V2_DEFAULT_ANCHOR_FACTOR = 0.45;
+const GRID_V2_SATISFACTION_SCALE_ANCHOR_Y_FACTOR = 0.55;
 const DEFAULT_VERTICAL_LINE_DARK_RATIO = 0.32;
 const DEFAULT_HORIZONTAL_LINE_DARK_RATIO = 0.3;
 const DEFAULT_DARK_THRESHOLD = 200;
@@ -71,6 +77,7 @@ export interface FieldRegistration {
   candidateCenterSpread?: { x: number; y: number };
   candidateCenterScale?: { x: number; y: number };
   candidateCenterResidualSpread?: { x: number; y: number };
+  missingExpected?: { rows: number[]; columns: number[] };
   qualityScore?: number;
   independentRegistration?: boolean;
   diagnostic?: string;
@@ -81,6 +88,126 @@ export interface GridDetectionResult {
   fieldRects: Record<string, PixelRect>;
   registrations: Record<string, FieldRegistration>;
   diagnostics?: Record<string, string>;
+}
+
+export type AutomaticGridMissingKind = 'none' | 'interior' | 'end' | 'multi';
+
+/**
+ * Classifies only missing horizontal boundaries because automatic entry reads
+ * choices across a recovered row. Missing columns remain safe after affine
+ * reconstruction, while a missing first/last row boundary requires extrapolation.
+ */
+export function getAutomaticGridMissingKind(
+  registration?: Pick<FieldRegistration, 'missingExpected' | 'horizontalLines' | 'inferredHorizontalLines'>,
+): AutomaticGridMissingKind {
+  const missingRows = registration?.missingExpected?.rows ?? [];
+  if (missingRows.length === 0) {
+    return 'none';
+  }
+  if (missingRows.length > 1) {
+    return 'multi';
+  }
+
+  const expectedRowCount = registration?.inferredHorizontalLines?.expected
+    ?? registration?.horizontalLines?.expected;
+  const missingIndex = missingRows[0];
+  const isInterior = Number.isInteger(missingIndex)
+    && expectedRowCount !== undefined
+    && Number.isInteger(expectedRowCount)
+    && expectedRowCount > 2
+    && missingIndex > 0
+    && missingIndex < expectedRowCount - 1;
+  return isInterior ? 'interior' : 'end';
+}
+
+/**
+ * A verified grid may auto-fill with one recovered interior boundary. The
+ * affine fit is bounded by both neighbouring observed boundaries there; the
+ * first/last boundary is an extrapolation and stays manual-only.
+ */
+export function isAutomaticGridEligible(registration?: FieldRegistration): boolean {
+  if (registration?.source !== 'grid' || registration.status !== 'verified') {
+    return false;
+  }
+
+  const missingKind = getAutomaticGridMissingKind(registration);
+  return missingKind === 'none' || missingKind === 'interior';
+}
+
+/**
+ * The line correspondence used by the optional matcher revision. Indexes are
+ * indexes in the sorted detected/expected arrays passed to the matcher.
+ * `lines` is always a complete expected-length pattern: a missing expected
+ * boundary is reconstructed from the fitted affine transform.
+ */
+export interface TemplateLineMatch {
+  lines: number[];
+  matchedExpected: number[];
+  matchedDetected: number[];
+  missingExpected: number[];
+  scale: number;
+  offset: number;
+  anchorResidual: number;
+  gapDeviation: number;
+  /** Max correspondence residual in minimum-spacing units. */
+  correspondenceResidual?: number;
+  /** Absolute fitted-template movement, in the input coordinate units. */
+  absoluteCenterShift?: number;
+  absoluteSpanChange?: number;
+  /** Signed offsets of the fitted first/last template boundaries. */
+  firstOffset?: number;
+  lastOffset?: number;
+  /** correspondenceResidual + lambda * absolute position penalty. */
+  score?: number;
+}
+
+export interface DerivedGridTolerances {
+  minimumColumnSpacing: number;
+  minimumRowSpacing: number;
+  maxUniformCandidateOffsetX: number;
+  maxUniformCandidateOffsetY: number;
+  maxAnchorCandidateDeviationX: number;
+  maxAnchorCandidateDeviationY: number;
+}
+
+function isGridMatchV2Enabled(): boolean {
+  // Default on since 2026-09-03 (Task/B3_GRID_FIT_MEASUREMENT_2026-09-03.md §6);
+  // GRID_MATCH_V2=0 restores the choose-k matcher for comparison runs.
+  return process.env.GRID_MATCH_V2 !== '0';
+}
+
+/**
+ * Derives registration limits from the actual line spacing of one table.
+ * Spacing and offsets are expressed in the same page-relative units as the
+ * candidate-center measurements.
+ */
+export function deriveTemplateGridTolerances(
+  tableId: string,
+  expectedColumns: number[],
+  expectedRows: number[],
+  pageWidth: number,
+  pageHeight: number,
+  templateColumnCenters: number[] = expectedColumns,
+  templateRowCenters: number[] = expectedRows,
+): DerivedGridTolerances {
+  const minimumColumnSpacing = getMinimumPositiveSpacing(
+    templateColumnCenters.length > 1 ? templateColumnCenters : expectedColumns,
+  ) / Math.max(pageWidth, 1);
+  const minimumRowSpacing = getMinimumPositiveSpacing(
+    templateRowCenters.length > 1 ? templateRowCenters : expectedRows,
+  ) / Math.max(pageHeight, 1);
+  const anchorYFactor = tableId === 'satisfaction.scale'
+    ? GRID_V2_SATISFACTION_SCALE_ANCHOR_Y_FACTOR
+    : GRID_V2_DEFAULT_ANCHOR_FACTOR;
+
+  return {
+    minimumColumnSpacing,
+    minimumRowSpacing,
+    maxUniformCandidateOffsetX: GRID_V2_UNIFORM_OFFSET_FACTOR * minimumColumnSpacing,
+    maxUniformCandidateOffsetY: GRID_V2_UNIFORM_OFFSET_FACTOR * minimumRowSpacing,
+    maxAnchorCandidateDeviationX: GRID_V2_DEFAULT_ANCHOR_FACTOR * minimumColumnSpacing,
+    maxAnchorCandidateDeviationY: anchorYFactor * minimumRowSpacing,
+  };
 }
 
 /**
@@ -349,8 +476,12 @@ export function buildSatisfactionGridDetection(image: ImageAnalysisData): GridDe
 }
 
 function mergeGridDetection(image: ImageAnalysisData, specs: TableGridSpec[]): GridDetectionResult {
+  const traces: GridTraceData[] = [];
   const merged = specs.reduce<GridDetectionResult>((result, spec) => {
     const exact = buildGridOverrides(image, spec);
+    if (exact.trace) {
+      traces.push(exact.trace);
+    }
     const diagnostics = { ...result.diagnostics, ...exact.diagnostics };
 
     return {
@@ -361,7 +492,142 @@ function mergeGridDetection(image: ImageAnalysisData, specs: TableGridSpec[]): G
     };
   }, { overrides: {}, fieldRects: {}, registrations: {} });
 
-  return applyCrossTableRegistrationCheck(merged);
+  const checked = applyCrossTableRegistrationCheck(merged);
+  traces.forEach((trace) => emitGridTrace(trace, checked.registrations));
+  return checked;
+}
+
+function getRegistrationsStatus(
+  registrations: Record<string, FieldRegistration>,
+): RegistrationStatus {
+  const values = Object.values(registrations);
+  if (values.some((registration) => registration.status === 'failed')) {
+    return 'failed';
+  }
+  if (values.some((registration) => registration.status === 'candidate')) {
+    return 'candidate';
+  }
+  return 'verified';
+}
+
+function emitGridTrace(
+  trace: GridTraceData,
+  registrations: Record<string, FieldRegistration>,
+): void {
+  if (process.env.GRID_TRACE !== '1') {
+    return;
+  }
+
+  const tableRegistrations = Object.values(registrations)
+    .filter((registration) => registration.tableId === trace.tableId);
+  const status = tableRegistrations.length > 0
+    ? getRegistrationsStatus(Object.fromEntries(tableRegistrations.map((registration, index) => [
+      `${registration.tableId}:${index}`,
+      registration,
+    ])))
+    : trace.status;
+  const autoEligible = tableRegistrations.length > 0
+    && tableRegistrations.every((registration) => isAutomaticGridEligible(registration));
+  const missingKind = getAutomaticGridMissingKind(tableRegistrations[0] ?? {
+    missingExpected: {
+      rows: trace.rowMatch?.missingExpected ?? [],
+      columns: trace.columnMatch?.missingExpected ?? [],
+    },
+    inferredHorizontalLines: {
+      found: trace.rowMatch?.matchedExpected.length ?? 0,
+      expected: trace.expectedRows,
+    },
+  });
+  const eligibilityTrace = trace.mode === 'v2'
+    ? ` autoEligible=${autoEligible ? 1 : 0} missingKind=${missingKind}`
+    : '';
+  const refusedBy = status === 'verified'
+    ? 'none'
+    : trace.status === 'verified' && trace.refusedBy === 'none'
+      ? 'post-registration-check'
+      : trace.refusedBy === 'none' ? 'quality' : trace.refusedBy;
+  const format = (value: number | undefined): string => (
+    value !== undefined && Number.isFinite(value) ? value.toFixed(4) : '-'
+  );
+  const formatIndexes = (values: number[] | undefined): string => `[${values?.join(',') ?? ''}]`;
+  const rowScale = trace.rowMatch?.scale ?? trace.quality?.rowScale;
+  const columnScale = trace.columnMatch?.scale ?? trace.quality?.columnScale;
+  const rowOffset = trace.rowMatch
+    ? trace.rowMatch.offset / Math.max(trace.pageHeight, 1)
+    : trace.quality?.rowOffsetRatio;
+  const columnOffset = trace.columnMatch
+    ? trace.columnMatch.offset / Math.max(trace.pageWidth, 1)
+    : trace.quality?.columnOffsetRatio;
+  const rowAnchorResidual = trace.rowMatch
+    ? trace.rowMatch.anchorResidual / Math.max(trace.pageHeight, 1)
+    : undefined;
+  const columnAnchorResidual = trace.columnMatch
+    ? trace.columnMatch.anchorResidual / Math.max(trace.pageWidth, 1)
+    : undefined;
+  const rowGapDeviation = trace.quality?.rowGapDeviation ?? trace.rowMatch?.gapDeviation;
+  const columnGapDeviation = trace.quality?.columnGapDeviation ?? trace.columnMatch?.gapDeviation;
+  const meanX = trace.candidateCenter?.meanX;
+  const meanY = trace.candidateCenter?.meanY;
+  const spreadX = trace.candidateCenter?.spreadX;
+  const spreadY = trace.candidateCenter?.spreadY;
+  const rowCenterShift = trace.rowMatch?.absoluteCenterShift !== undefined
+    ? trace.rowMatch.absoluteCenterShift / Math.max(trace.pageHeight, 1)
+    : undefined;
+  const columnCenterShift = trace.columnMatch?.absoluteCenterShift !== undefined
+    ? trace.columnMatch.absoluteCenterShift / Math.max(trace.pageWidth, 1)
+    : undefined;
+  const rowSpanChange = trace.rowMatch?.absoluteSpanChange !== undefined
+    ? trace.rowMatch.absoluteSpanChange / Math.max(trace.pageHeight, 1)
+    : undefined;
+  const columnSpanChange = trace.columnMatch?.absoluteSpanChange !== undefined
+    ? trace.columnMatch.absoluteSpanChange / Math.max(trace.pageWidth, 1)
+    : undefined;
+  const rowFirstOffset = trace.rowMatch?.firstOffset !== undefined
+    ? trace.rowMatch.firstOffset / Math.max(trace.pageHeight, 1)
+    : undefined;
+  const rowLastOffset = trace.rowMatch?.lastOffset !== undefined
+    ? trace.rowMatch.lastOffset / Math.max(trace.pageHeight, 1)
+    : undefined;
+  const columnFirstOffset = trace.columnMatch?.firstOffset !== undefined
+    ? trace.columnMatch.firstOffset / Math.max(trace.pageWidth, 1)
+    : undefined;
+  const columnLastOffset = trace.columnMatch?.lastOffset !== undefined
+    ? trace.columnMatch.lastOffset / Math.max(trace.pageWidth, 1)
+    : undefined;
+  const rowScore = trace.rowMatch?.score;
+  const columnScore = trace.columnMatch?.score;
+  const positionTrace = trace.mode === 'v2'
+    && (rowScore !== undefined || columnScore !== undefined)
+    ? ` absCenter=row:${format(rowCenterShift)},col:${format(columnCenterShift)}`
+      + ` absSpan=row:${format(rowSpanChange)},col:${format(columnSpanChange)}`
+      + ` absEnds=row:${format(rowFirstOffset)},${format(rowLastOffset)},col:${format(columnFirstOffset)},${format(columnLastOffset)}`
+      + ` score=row:${format(rowScore)},col:${format(columnScore)}`
+    : '';
+
+  console.log(
+    `[grid-fit] table=${trace.tableId}`
+      + ` mode=${trace.mode}`
+      + ` detectedRows=${trace.detectedRows}`
+      + ` expectedRows=${trace.expectedRows}`
+      + ` matched=${formatIndexes(trace.rowMatch?.matchedExpected)}`
+      + ` missing=${formatIndexes(trace.rowMatch?.missingExpected)}`
+      + ` scale=row:${format(rowScale)},col:${format(columnScale)}`
+      + ` offset=row:${format(rowOffset)},col:${format(columnOffset)}`
+      + ` anchorResidual=row:${format(rowAnchorResidual)},col:${format(columnAnchorResidual)}`
+      + ` gapDev=row:${format(rowGapDeviation)},col:${format(columnGapDeviation)}`
+      + ` meanX=${format(meanX)}`
+      + ` meanY=${format(meanY)}`
+      + ` spreadX=${format(spreadX)}`
+      + ` spreadY=${format(spreadY)}`
+      + positionTrace
+      + ` tolX=${format(trace.maxUniformCandidateOffsetX)}`
+      + ` tolY=${format(trace.maxUniformCandidateOffsetY)}`
+      + ` status=${status}`
+      + ` refusedBy=${refusedBy}`
+      + eligibilityTrace
+      + ` matchedCols=${formatIndexes(trace.columnMatch?.matchedExpected)}`
+      + ` missingCols=${formatIndexes(trace.columnMatch?.missingExpected)}`,
+  );
 }
 
 interface GridSpecDetectionResult {
@@ -369,6 +635,24 @@ interface GridSpecDetectionResult {
   fieldRects: Record<string, PixelRect>;
   registrations: Record<string, FieldRegistration>;
   diagnostics?: Record<string, string>;
+  trace?: GridTraceData;
+}
+
+interface GridTraceData {
+  tableId: string;
+  mode: 'v1' | 'v2';
+  detectedRows: number;
+  expectedRows: number;
+  pageWidth: number;
+  pageHeight: number;
+  rowMatch?: TemplateLineMatch;
+  columnMatch?: TemplateLineMatch;
+  quality?: GridQuality;
+  candidateCenter?: CandidateCenterQuality;
+  maxUniformCandidateOffsetX: number;
+  maxUniformCandidateOffsetY: number;
+  status: RegistrationStatus;
+  refusedBy: string;
 }
 
 function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): GridSpecDetectionResult {
@@ -393,6 +677,18 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
 
   const expectedX = expectedColumnLines.map((value) => bounds.left + value * baseWidth);
   const expectedY = expectedRowLines.map((value) => bounds.top + value * baseHeight);
+  const templateColumnCenters = columnCenters.map((value) => bounds.left + value * baseWidth);
+  const templateRowCenters = rowCenters.map((value) => bounds.top + value * baseHeight);
+  const v2Enabled = isGridMatchV2Enabled();
+  const derivedTolerances = deriveTemplateGridTolerances(
+    spec.id,
+    expectedX,
+    expectedY,
+    baseWidth,
+    baseHeight,
+    templateColumnCenters,
+    templateRowCenters,
+  );
   const verticalLineDarkRatio = spec.verticalLineDarkRatio ?? DEFAULT_VERTICAL_LINE_DARK_RATIO;
   const horizontalLineDarkRatio = spec.horizontalLineDarkRatio ?? DEFAULT_HORIZONTAL_LINE_DARK_RATIO;
   const darkThreshold = spec.darkThreshold ?? DEFAULT_DARK_THRESHOLD;
@@ -410,14 +706,24 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
     verticalLineDarkRatio,
     darkThreshold,
   ).map((line) => line.x);
-  const matchedColumns = matchTemplateLinePattern(verticalLines, expectedX);
+  const columnV2Match = matchTemplateLinePattern(verticalLines, expectedX);
+  const columnLegacyMatch = v2Enabled && !columnV2Match
+    ? matchTemplateLinePatternV1(verticalLines, expectedX)
+    : null;
+  const columnLineMatch = columnV2Match
+    || (columnLegacyMatch ? buildCompleteTemplateLineMatch(columnLegacyMatch, verticalLines, expectedX) : null);
+  const columnV2MatchRefused = v2Enabled && !columnV2Match && Boolean(columnLegacyMatch);
+  const matchedColumns = columnLineMatch?.lines;
   const partialColumnMatch = matchedColumns
     ? undefined
     : inferPartialTemplateLinePattern(
       verticalLines,
       expectedX,
       baseWidth,
-      GRID_MAX_UNIFORM_CANDIDATE_OFFSET_X,
+      v2Enabled
+        ? derivedTolerances.maxUniformCandidateOffsetX
+        : GRID_MAX_UNIFORM_CANDIDATE_OFFSET_X,
+      v2Enabled,
     );
   // Some scanner PDFs preserve the inner table rules but lose one printed
   // outer edge during rasterization. A partial match is only accepted below
@@ -436,7 +742,19 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
     horizontalLineDarkRatio,
     darkThreshold,
   ).map((line) => line.y);
-  const matchedRows = matchTemplateLinePattern(horizontalLines, expectedY);
+  const rowV2Match = matchTemplateLinePattern(horizontalLines, expectedY);
+  const rowLegacyMatch = v2Enabled && !rowV2Match
+    ? matchTemplateLinePatternV1(horizontalLines, expectedY)
+    : null;
+  const rowLineMatch = rowV2Match
+    || (rowLegacyMatch ? buildCompleteTemplateLineMatch(rowLegacyMatch, horizontalLines, expectedY) : null);
+  const rowV2MatchRefused = v2Enabled && !rowV2Match && Boolean(rowLegacyMatch);
+  const v2LineMatchRefused = columnV2MatchRefused || rowV2MatchRefused;
+  const allowLegacySingleRow = v2Enabled
+    && spec.id === 'satisfaction.frequency'
+    && expectedY.length === 2
+    && rowV2MatchRefused;
+  const matchedRows = rowLineMatch?.lines;
   const partialRowMatch = shouldRecoverPartialTemplateLinePattern(
     matchedRows,
     expectedY,
@@ -447,7 +765,10 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
       horizontalLines,
       expectedY,
       baseHeight,
-      spec.maxUniformCandidateOffsetY ?? GRID_MAX_UNIFORM_CANDIDATE_OFFSET_Y,
+      v2Enabled
+        ? derivedTolerances.maxUniformCandidateOffsetY
+        : spec.maxUniformCandidateOffsetY ?? GRID_MAX_UNIFORM_CANDIDATE_OFFSET_Y,
+      v2Enabled,
     )
     : undefined;
   const resolvedRows = partialRowMatch?.lines || matchedRows;
@@ -471,6 +792,35 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
   const lineEvidenceSuffix = horizontalLines.length > 0 || verticalLines.length > 0
     ? lineEvidence
     : '';
+  const rowRecovery = rowLineMatch || partialRowMatch || undefined;
+  const columnRecovery = columnLineMatch || partialColumnMatch || undefined;
+  const activeMaxUniformCandidateOffsetX = v2Enabled
+    ? derivedTolerances.maxUniformCandidateOffsetX
+    : GRID_MAX_UNIFORM_CANDIDATE_OFFSET_X;
+  const activeMaxUniformCandidateOffsetY = v2Enabled
+    ? derivedTolerances.maxUniformCandidateOffsetY
+    : spec.maxUniformCandidateOffsetY ?? GRID_MAX_UNIFORM_CANDIDATE_OFFSET_Y;
+  const makeTrace = (
+    status: RegistrationStatus,
+    refusedBy: string,
+    quality?: GridQuality,
+    candidateCenter?: CandidateCenterQuality,
+  ): GridTraceData => ({
+    tableId: spec.id,
+    mode: v2Enabled ? 'v2' : 'v1',
+    detectedRows: horizontalLines.length,
+    expectedRows: expectedY.length,
+    pageWidth: baseWidth,
+    pageHeight: baseHeight,
+    rowMatch: rowRecovery,
+    columnMatch: columnRecovery,
+    quality,
+    candidateCenter,
+    maxUniformCandidateOffsetX: activeMaxUniformCandidateOffsetX,
+    maxUniformCandidateOffsetY: activeMaxUniformCandidateOffsetY,
+    status,
+    refusedBy,
+  });
 
   const lineFailure = classifyGridLineFailure(
     horizontalLines.length,
@@ -492,6 +842,7 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
         diagnostic: lineFailure + lineEvidenceSuffix,
       }),
       diagnostics: diagnosticsForGroups(groups, lineFailure + lineEvidenceSuffix),
+      trace: makeTrace('failed', 'line-match'),
     };
   }
 
@@ -513,6 +864,7 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
         groups,
         diagnostic + lineEvidenceSuffix,
       ),
+      trace: makeTrace('failed', 'line-match'),
     };
   }
 
@@ -541,6 +893,7 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
     if (candidates.some((rect) => rect.right - rect.left < 4 || rect.bottom - rect.top < 4)) {
       const diagnostic = 'grid: invalid_cell_size';
       return {
+        trace: makeTrace('failed', 'cell-size'),
         overrides: {},
         fieldRects: fallbackFieldRects,
         registrations: registrationsForGroups(groups, spec.id, {
@@ -567,6 +920,7 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
           diagnostic,
         }),
         diagnostics: diagnosticsForGroups(groups, 'grid: duplicate_candidate_rects'),
+        trace: makeTrace('failed', 'duplicate-candidate'),
       };
     }
 
@@ -582,46 +936,52 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
     baseWidth,
     rowCenters.map((value) => bounds.top + value * baseHeight),
   );
+  const missingRows = v2Enabled ? rowRecovery?.missingExpected ?? [] : [];
+  const missingColumns = v2Enabled ? columnRecovery?.missingExpected ?? [] : [];
+  const hasMissingExpected = missingRows.length > 0 || missingColumns.length > 0;
+  const forceCandidateForV2Refusal = v2LineMatchRefused && !allowLegacySingleRow;
+  const missingDiagnostic = hasMissingExpected
+    ? `missing expected rows [${missingRows.join(',')}] columns [${missingColumns.join(',')}] (affine reconstruction)`
+    : '';
+  const registrationLimits = v2Enabled ? {
+    maxUniformCandidateOffsetX: derivedTolerances.maxUniformCandidateOffsetX,
+    maxUniformCandidateOffsetY: derivedTolerances.maxUniformCandidateOffsetY,
+    maxAnchorCandidateDeviationX: derivedTolerances.maxAnchorCandidateDeviationX,
+    maxAnchorCandidateDeviationY: derivedTolerances.maxAnchorCandidateDeviationY,
+  } : undefined;
   const registrations: Record<string, FieldRegistration> = Object.fromEntries(groups.map((group) => {
     const candidateCenter = getCandidateCenterQuality(group, overrides[group.field], bounds);
-    const status: RegistrationStatus = isVerifiedGridQuality(
+    const geometryVerified = isVerifiedGridQuality(
       quality,
       candidateCenter,
       spec.maxUniformCandidateOffsetY,
-    ) ? 'verified' : 'candidate';
+      registrationLimits,
+    );
+    const status: RegistrationStatus = !forceCandidateForV2Refusal
+      && geometryVerified ? 'verified' : 'candidate';
     const diagnostic = status === 'candidate'
-      ? formatGridQualityDiagnostic(quality, candidateCenter, spec.maxUniformCandidateOffsetY) + lineEvidence
-      : undefined;
-    if (process.env.GRID_TRACE) {
-      // Instrument only (audit B-3/B-4/B-9): the numbers each verified-grid
-      // clause saw, so tolerance changes can be judged against the measured
-      // distribution instead of a constant.
-      console.info(
-        `[grid-fit] table=${spec.id} field=${group.field} status=${status}`
-        + ` hLines=${horizontalLines.length}/${expectedY.length} vLines=${verticalLines.length}/${expectedX.length}`
-        + ` rowGap=${quality.rowGapDeviation.toFixed(4)} colGap=${quality.columnGapDeviation.toFixed(4)}`
-        + ` rowRes=${quality.rowResidualRatio.toFixed(4)} colRes=${quality.columnResidualRatio.toFixed(4)}`
-        + ` meanX=${candidateCenter.meanX.toFixed(4)} meanY=${candidateCenter.meanY.toFixed(4)}`
-        + ` spreadX=${candidateCenter.spreadX.toFixed(4)} spreadY=${candidateCenter.spreadY.toFixed(4)}`
-        + ` maxX=${candidateCenter.maxX.toFixed(4)} maxY=${candidateCenter.maxY.toFixed(4)}`
-        + ` tolY=${(spec.maxUniformCandidateOffsetY ?? GRID_MAX_UNIFORM_CANDIDATE_OFFSET_Y).toFixed(3)}`,
-      );
-    }
+      ? formatGridQualityDiagnostic(quality, candidateCenter, spec.maxUniformCandidateOffsetY, registrationLimits)
+        + (missingDiagnostic ? `; ${missingDiagnostic}` : '')
+        + (forceCandidateForV2Refusal
+          ? '; V2 line match refused; review-only V1 geometry retained'
+          : '')
+        + lineEvidence
+      : (missingDiagnostic ? `grid: ${missingDiagnostic}` : undefined);
     return [group.field, {
       tableId: spec.id,
       source: 'grid',
       status,
       horizontalLines: { found: horizontalLines.length, expected: expectedY.length },
       verticalLines: { found: verticalLines.length, expected: expectedX.length },
-      ...(partialRowMatch ? {
+      ...(rowRecovery && (partialRowMatch || missingRows.length > 0) ? {
         inferredHorizontalLines: {
-          found: partialRowMatch.matchedCount,
+          found: partialRowMatch?.matchedCount ?? rowLineMatch?.matchedExpected.length ?? 0,
           expected: expectedY.length,
         },
       } : {}),
-      ...(partialColumnMatch ? {
+      ...(columnRecovery && (partialColumnMatch || missingColumns.length > 0) ? {
         inferredVerticalLines: {
-          found: partialColumnMatch.matchedCount,
+          found: partialColumnMatch?.matchedCount ?? columnLineMatch?.matchedExpected.length ?? 0,
           expected: expectedX.length,
         },
       } : {}),
@@ -635,6 +995,9 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
       candidateCenterSpread: { x: candidateCenter.spreadX, y: candidateCenter.spreadY },
       candidateCenterScale: { x: candidateCenter.scaleX, y: candidateCenter.scaleY },
       candidateCenterResidualSpread: { x: candidateCenter.residualSpreadX, y: candidateCenter.residualSpreadY },
+      ...(v2Enabled && (missingRows.length > 0 || missingColumns.length > 0) ? {
+        missingExpected: { rows: missingRows, columns: missingColumns },
+      } : {}),
       qualityScore: Math.max(quality.score, candidateCenter.maxX, candidateCenter.maxY),
       ...(spec.independentRegistration ? { independentRegistration: true } : {}),
       diagnostic,
@@ -644,12 +1007,27 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
   const diagnostics = Object.fromEntries(Object.entries(checkedRegistrations)
     .filter(([, registration]) => registration.diagnostic)
     .map(([field, registration]) => [field, registration.diagnostic!]));
+  const representativeRegistration = checkedRegistrations[groups[0].field];
+  const traceStatus = getRegistrationsStatus(checkedRegistrations);
+  const traceRefusedBy = forceCandidateForV2Refusal
+    ? 'v2-line-match'
+    : representativeRegistration?.diagnostic?.includes('table offset varies')
+      ? 'intra-table-offset'
+      : traceStatus === 'verified' ? 'none' : 'quality';
 
   return {
     overrides,
     fieldRects: fallbackFieldRects,
     registrations: checkedRegistrations,
     ...(Object.keys(diagnostics).length > 0 ? { diagnostics } : {}),
+    trace: makeTrace(
+      traceStatus,
+      traceRefusedBy,
+      quality,
+      summarizeCandidateCenterQuality(groups.map((group) => (
+        getCandidateCenterQuality(group, overrides[group.field], bounds)
+      ))),
+    ),
   };
 }
 
@@ -711,6 +1089,13 @@ interface CandidateCenterQuality {
   scaleY: number;
   residualSpreadX: number;
   residualSpreadY: number;
+}
+
+interface GridQualityLimits {
+  maxUniformCandidateOffsetX: number;
+  maxUniformCandidateOffsetY: number;
+  maxAnchorCandidateDeviationX: number;
+  maxAnchorCandidateDeviationY: number;
 }
 
 function calculateGridQuality(
@@ -842,18 +1227,23 @@ function isVerifiedGridQuality(
   quality: GridQuality,
   candidateCenter: CandidateCenterQuality,
   maxUniformCandidateOffsetY = GRID_MAX_UNIFORM_CANDIDATE_OFFSET_Y,
+  limits?: GridQualityLimits,
 ): boolean {
+  const maxAnchorX = limits?.maxAnchorCandidateDeviationX ?? GRID_MAX_CANDIDATE_CENTER_DEVIATION;
+  const maxAnchorY = limits?.maxAnchorCandidateDeviationY ?? GRID_MAX_CANDIDATE_CENTER_DEVIATION;
+  const maxUniformX = limits?.maxUniformCandidateOffsetX ?? GRID_MAX_UNIFORM_CANDIDATE_OFFSET_X;
+  const maxUniformY = limits?.maxUniformCandidateOffsetY ?? maxUniformCandidateOffsetY;
   const anchoredToTemplate = (
-    candidateCenter.maxX <= GRID_MAX_CANDIDATE_CENTER_DEVIATION &&
-    candidateCenter.maxY <= GRID_MAX_CANDIDATE_CENTER_DEVIATION
+    candidateCenter.maxX <= maxAnchorX &&
+    candidateCenter.maxY <= maxAnchorY
   );
   // The source photo may have a different content-boundary crop than the
   // blank template. A consistent translation of every option cell is still a
   // valid local table registration, while a wrongly selected table produces
   // option-to-option or row-to-row drift.
   const uniformlyTranslated = (
-    Math.abs(candidateCenter.meanX) <= GRID_MAX_UNIFORM_CANDIDATE_OFFSET_X &&
-    Math.abs(candidateCenter.meanY) <= maxUniformCandidateOffsetY &&
+    Math.abs(candidateCenter.meanX) <= maxUniformX &&
+    Math.abs(candidateCenter.meanY) <= maxUniformY &&
     candidateCenter.spreadX <= GRID_MAX_CANDIDATE_CENTER_SPREAD &&
     candidateCenter.spreadY <= GRID_MAX_CANDIDATE_CENTER_SPREAD
   );
@@ -878,7 +1268,12 @@ function describeFailingClauses(
   quality: GridQuality,
   candidateCenter?: CandidateCenterQuality,
   maxUniformCandidateOffsetY = GRID_MAX_UNIFORM_CANDIDATE_OFFSET_Y,
+  limits?: GridQualityLimits,
 ): string {
+  const maxAnchorX = limits?.maxAnchorCandidateDeviationX ?? GRID_MAX_CANDIDATE_CENTER_DEVIATION;
+  const maxAnchorY = limits?.maxAnchorCandidateDeviationY ?? GRID_MAX_CANDIDATE_CENTER_DEVIATION;
+  const maxUniformX = limits?.maxUniformCandidateOffsetX ?? GRID_MAX_UNIFORM_CANDIDATE_OFFSET_X;
+  const maxUniformY = limits?.maxUniformCandidateOffsetY ?? maxUniformCandidateOffsetY;
   const failing: string[] = [];
   const over = (name: string, value: number, limit: number) => {
     if (value > limit) failing.push(`${name} ${(value * 100).toFixed(1)}>${(limit * 100).toFixed(1)}`);
@@ -888,10 +1283,10 @@ function describeFailingClauses(
   over('resRows', quality.rowResidualRatio, GRID_MAX_LINE_RESIDUAL_RATIO);
   over('resCols', quality.columnResidualRatio, GRID_MAX_LINE_RESIDUAL_RATIO);
   if (candidateCenter) {
-    const anchored = candidateCenter.maxX <= GRID_MAX_CANDIDATE_CENTER_DEVIATION
-      && candidateCenter.maxY <= GRID_MAX_CANDIDATE_CENTER_DEVIATION;
-    const uniform = Math.abs(candidateCenter.meanX) <= GRID_MAX_UNIFORM_CANDIDATE_OFFSET_X
-      && Math.abs(candidateCenter.meanY) <= maxUniformCandidateOffsetY
+    const anchored = candidateCenter.maxX <= maxAnchorX
+      && candidateCenter.maxY <= maxAnchorY;
+    const uniform = Math.abs(candidateCenter.meanX) <= maxUniformX
+      && Math.abs(candidateCenter.meanY) <= maxUniformY
       && candidateCenter.spreadX <= GRID_MAX_CANDIDATE_CENTER_SPREAD
       && candidateCenter.spreadY <= GRID_MAX_CANDIDATE_CENTER_SPREAD;
     if (!anchored && !uniform) failing.push('center');
@@ -1020,6 +1415,7 @@ function formatGridQualityDiagnostic(
   quality: GridQuality,
   candidateCenter?: CandidateCenterQuality,
   maxUniformCandidateOffsetY?: number,
+  limits?: GridQualityLimits,
 ): string {
   const percent = (value: number) => `${Math.round(value * 100)}%`;
   const signedPercent = (value: number) => `${value >= 0 ? '+' : ''}${Math.round(value * 100)}%`;
@@ -1027,7 +1423,7 @@ function formatGridQualityDiagnostic(
     ? `; choice center delta x ${percent(candidateCenter.maxX)}, y ${percent(candidateCenter.maxY)}; offset x ${signedPercent(candidateCenter.meanX)}, y ${signedPercent(candidateCenter.meanY)}; spread x ${percent(candidateCenter.spreadX)}, y ${percent(candidateCenter.spreadY)}`
     : '';
   return `grid candidate: gap rows ${percent(quality.rowGapDeviation)}, columns ${percent(quality.columnGapDeviation)}; residual rows ${percent(quality.rowResidualRatio)}, columns ${percent(quality.columnResidualRatio)}${centerDiagnostic}`
-    + describeFailingClauses(quality, candidateCenter, maxUniformCandidateOffsetY);
+    + describeFailingClauses(quality, candidateCenter, maxUniformCandidateOffsetY, limits);
 }
 
 function registrationsForGroups(
@@ -1176,7 +1572,20 @@ function classifyGridLineFailure(
 interface PartialTemplateLinePattern {
   lines: number[];
   matchedCount: number;
+  matchedExpected: number[];
+  matchedDetected: number[];
+  missingExpected: number[];
+  scale: number;
+  offset: number;
+  anchorResidual: number;
+  gapDeviation: number;
   residualRatio: number;
+  correspondenceResidual?: number;
+  absoluteCenterShift?: number;
+  absoluteSpanChange?: number;
+  firstOffset?: number;
+  lastOffset?: number;
+  score?: number;
 }
 
 /**
@@ -1190,6 +1599,7 @@ function inferPartialTemplateLinePattern(
   expected: number[],
   pageSize: number,
   maxOffsetRatio: number,
+  v2Enabled = false,
 ): PartialTemplateLinePattern | null {
   if (detected.length < 2 || expected.length < 3) {
     return null;
@@ -1201,8 +1611,13 @@ function inferPartialTemplateLinePattern(
   // can turn a nearby description divider into a missing row separator. Keep
   // the tolerance proportional to the table's own span, with a small floor
   // for rasterization noise.
-  const lineTolerance = Math.max(3, Math.min(pageSize * 0.012, expectedSpan * 0.18));
-  const minimumMatchedLines = Math.max(2, expected.length - 2);
+  const minimumSpacing = getMinimumPositiveSpacing(expected);
+  const lineTolerance = v2Enabled
+    ? minimumSpacing * GRID_MAX_RECOVERED_LINE_RESIDUAL_RATIO
+    : Math.max(3, Math.min(pageSize * 0.012, expectedSpan * 0.18));
+  const minimumMatchedLines = v2Enabled
+    ? Math.max(2, expected.length - Math.floor(expected.length / 3))
+    : Math.max(2, expected.length - 2);
   let best: (PartialTemplateLinePattern & { score: number; offsetRatio: number }) | undefined;
 
   for (let detectedStart = 0; detectedStart < sortedDetected.length - 1; detectedStart++) {
@@ -1225,20 +1640,73 @@ function inferPartialTemplateLinePattern(
           const offsetRatio = Math.abs(offset) / Math.max(pageSize, 1);
           if (offsetRatio > maxOffsetRatio) continue;
 
-          const lines = expected.map((line) => scale * line + offset);
-          const match = matchTransformedLines(lines, sortedDetected, lineTolerance);
+          let lines = expected.map((line) => scale * line + offset);
+          let match = matchTransformedLines(lines, sortedDetected, lineTolerance);
           if (match.count < minimumMatchedLines) continue;
 
+          let fittedScale = scale;
+          let fittedOffset = offset;
+          if (v2Enabled) {
+            const fit = fitAffineTransform(
+              match.matchedExpected.map((index) => expected[index]),
+              match.matchedDetected.map((index) => sortedDetected[index]),
+            );
+            if (!fit) continue;
+            fittedScale = fit.scale;
+            fittedOffset = fit.offset;
+            lines = expected.map((line) => fittedScale * line + fittedOffset);
+            match = matchTransformedLines(lines, sortedDetected, lineTolerance);
+            if (match.count < minimumMatchedLines) continue;
+          }
+
+          const missingExpected = expected
+            .map((_, index) => index)
+            .filter((index) => !match.matchedExpected.includes(index));
+          const anchorResidual = getAffineAnchorResidual(fittedScale, fittedOffset, expected);
+          const position = getAffinePositionMetrics(fittedScale, fittedOffset, expected);
+          if (
+            v2Enabled
+            && (
+              match.maxDeviation > minimumSpacing * GRID_MAX_RECOVERED_LINE_RESIDUAL_RATIO
+              || isAffinePositionRefused(fittedScale, fittedOffset, expected, minimumSpacing)
+              || missingExpected.length > Math.floor(expected.length / 3)
+            )
+          ) continue;
+
           const residualRatio = match.totalDeviation / Math.max(match.count * expectedSpan, 1);
-          const score = match.count * 10 - residualRatio * 100 - offsetRatio;
-          if (!best || score > best.score) {
-            best = {
-              lines,
-              matchedCount: match.count,
-              residualRatio,
-              score,
-              offsetRatio,
-            };
+          const fittedOffsetRatio = Math.abs(fittedOffset) / Math.max(pageSize, 1);
+          const correspondenceResidual = v2Enabled
+            ? match.maxDeviation / minimumSpacing
+            : match.maxDeviation / Math.max(minimumSpacing, 1);
+          const score = v2Enabled
+            ? getAffineCandidateScore(correspondenceResidual, position, minimumSpacing)
+            : match.count * 10 - residualRatio * 100 - fittedOffsetRatio;
+          const candidate = {
+            lines,
+            matchedCount: match.count,
+            matchedExpected: match.matchedExpected,
+            matchedDetected: match.matchedDetected,
+            missingExpected,
+            scale: fittedScale,
+            offset: fittedOffset,
+            anchorResidual,
+            gapDeviation: getRelativeGapDeviation(lines, expected) ?? Number.POSITIVE_INFINITY,
+            residualRatio,
+            correspondenceResidual,
+            absoluteCenterShift: position.absoluteCenterShift,
+            absoluteSpanChange: position.absoluteSpanChange,
+            firstOffset: position.firstOffset,
+            lastOffset: position.lastOffset,
+            score,
+            offsetRatio: fittedOffsetRatio,
+          };
+          if (
+            !best
+            || (v2Enabled
+              ? isBetterV2LineCandidate(candidate, best)
+              : score > best.score)
+          ) {
+            best = candidate;
           }
         }
       }
@@ -1248,12 +1716,25 @@ function inferPartialTemplateLinePattern(
   return best ? {
     lines: best.lines,
     matchedCount: best.matchedCount,
+    matchedExpected: best.matchedExpected,
+    matchedDetected: best.matchedDetected,
+    missingExpected: best.missingExpected,
+    scale: best.scale,
+    offset: best.offset,
+    anchorResidual: best.anchorResidual,
+    gapDeviation: best.gapDeviation,
+    correspondenceResidual: best.correspondenceResidual,
+    absoluteCenterShift: best.absoluteCenterShift,
+    absoluteSpanChange: best.absoluteSpanChange,
+    firstOffset: best.firstOffset,
+    lastOffset: best.lastOffset,
+    score: best.score,
     residualRatio: best.residualRatio,
   } : null;
 }
 
 function shouldRecoverPartialTemplateLinePattern(
-  completeMatch: number[] | null,
+  completeMatch: number[] | null | undefined,
   expected: number[],
   pageSize: number,
   detectedCount: number,
@@ -1284,12 +1765,22 @@ function matchTransformedLines(
   transformed: number[],
   detected: number[],
   tolerance: number,
-): { count: number; totalDeviation: number } {
+): {
+  count: number;
+  totalDeviation: number;
+  maxDeviation: number;
+  matchedExpected: number[];
+  matchedDetected: number[];
+} {
   const remaining = new Set(detected.map((_, index) => index));
   let count = 0;
   let totalDeviation = 0;
+  let maxDeviation = 0;
+  const matchedExpected: number[] = [];
+  const matchedDetected: number[] = [];
 
-  for (const expectedLine of transformed) {
+  for (let expectedIndex = 0; expectedIndex < transformed.length; expectedIndex++) {
+    const expectedLine = transformed[expectedIndex];
     let closestIndex: number | undefined;
     let closestDeviation = Number.POSITIVE_INFINITY;
     // Keep this as Set#forEach rather than `for...of Set`: the project emits
@@ -1306,10 +1797,13 @@ function matchTransformedLines(
       remaining.delete(closestIndex);
       count++;
       totalDeviation += closestDeviation;
+      maxDeviation = Math.max(maxDeviation, closestDeviation);
+      matchedExpected.push(expectedIndex);
+      matchedDetected.push(closestIndex);
     }
   }
 
-  return { count, totalDeviation };
+  return { count, totalDeviation, maxDeviation, matchedExpected, matchedDetected };
 }
 
 function diagnosticsForGroups(groups: ChoiceGroup[], diagnostic: string): Record<string, string> {
@@ -1429,7 +1923,26 @@ function deriveCellBoundaries(centers: number[], fallbackSize: number): number[]
  */
 const TEMPLATE_LINE_MATCH_BUDGET = 200_000;
 
-function matchTemplateLinePattern(detected: number[], expected: number[]): number[] | null {
+export function matchTemplateLinePattern(
+  detected: number[],
+  expected: number[],
+): TemplateLineMatch | null {
+  const lines = isGridMatchV2Enabled()
+    ? matchTemplateLinePatternV2(detected, expected)
+    : matchTemplateLinePatternV1(detected, expected);
+  return lines
+    ? isTemplateLineMatch(lines)
+      ? lines
+      : buildCompleteTemplateLineMatch(lines, detected, expected)
+    : null;
+}
+
+function isTemplateLineMatch(value: number[] | TemplateLineMatch): value is TemplateLineMatch {
+  return !Array.isArray(value);
+}
+
+/** The pre-V2 choose-k search. Keep this body stable for the flag-off path. */
+function matchTemplateLinePatternV1(detected: number[], expected: number[]): number[] | null {
   if (detected.length < expected.length || expected.length < 2) {
     return null;
   }
@@ -1487,6 +2000,468 @@ function matchTemplateLinePattern(detected: number[], expected: number[]): numbe
     return null;
   }
   return best || null;
+}
+
+interface LineAlignmentPair {
+  expectedIndex: number;
+  detectedIndex: number;
+  deviation: number;
+}
+
+interface LineAlignment {
+  count: number;
+  totalDeviation: number;
+  maxDeviation: number;
+  pairs: LineAlignmentPair[];
+}
+
+interface AffineTransform {
+  scale: number;
+  offset: number;
+}
+
+/**
+ * V2 searches affine candidates defined by two ordered line pairs, then uses
+ * an order-preserving DP alignment to skip spurious detections and missing
+ * expected rules. Re-fitting the chosen pairs makes the residual and anchor
+ * checks apply to the final transform rather than to the seed pair.
+ */
+function matchTemplateLinePatternV2(
+  detected: number[],
+  expected: number[],
+): TemplateLineMatch | null {
+  if (detected.length < 2 || expected.length < 2) {
+    return null;
+  }
+
+  const sortedDetected = [...detected].sort((first, second) => first - second);
+  const minimumSpacing = getMinimumPositiveSpacing(expected);
+  if (minimumSpacing <= 0) {
+    return null;
+  }
+
+  const residualTolerance = minimumSpacing * GRID_MAX_RECOVERED_LINE_RESIDUAL_RATIO;
+  const maxMissing = Math.floor(expected.length / 3);
+  const minimumMatchedLines = expected.length - maxMissing;
+  let best: TemplateLineMatch | undefined;
+
+  for (let expectedFirst = 0; expectedFirst < expected.length - 1; expectedFirst++) {
+    for (let expectedSecond = expectedFirst + 1; expectedSecond < expected.length; expectedSecond++) {
+      const expectedGap = expected[expectedSecond] - expected[expectedFirst];
+      if (expectedGap <= 0) continue;
+
+      for (let detectedFirst = 0; detectedFirst < sortedDetected.length - 1; detectedFirst++) {
+        for (let detectedSecond = detectedFirst + 1; detectedSecond < sortedDetected.length; detectedSecond++) {
+          const detectedGap = sortedDetected[detectedSecond] - sortedDetected[detectedFirst];
+          if (detectedGap <= 0) continue;
+
+          const seed: AffineTransform = {
+            scale: detectedGap / expectedGap,
+            offset: sortedDetected[detectedFirst]
+              - (detectedGap / expectedGap) * expected[expectedFirst],
+          };
+          if (!isAllowedRecoveredScale(seed.scale)) continue;
+
+          const candidate = fitAndAlignTemplateLines(
+            expected,
+            sortedDetected,
+            seed,
+            residualTolerance,
+            minimumMatchedLines,
+            maxMissing,
+          );
+          if (!candidate) continue;
+
+          if (
+            !best
+            || isBetterV2LineCandidate(candidate, best)
+          ) {
+            best = candidate;
+          }
+        }
+      }
+    }
+  }
+
+  return best || null;
+}
+
+function fitAndAlignTemplateLines(
+  expected: number[],
+  detected: number[],
+  seed: AffineTransform,
+  residualTolerance: number,
+  minimumMatchedLines: number,
+  maxMissing: number,
+): TemplateLineMatch | null {
+  let transform = seed;
+  let alignment: LineAlignment | undefined;
+
+  // The first alignment is made from the two-pair seed. Re-fitting and
+  // re-aligning a couple of times is enough for the small line sets here and
+  // keeps every accepted pair subject to the final residual check.
+  for (let iteration = 0; iteration < 3; iteration++) {
+    alignment = alignTemplateLinesDP(
+      expected.map((line) => transform.scale * line + transform.offset),
+      detected,
+      residualTolerance,
+    );
+    if (alignment.count < minimumMatchedLines) {
+      return null;
+    }
+
+    const fit = fitAffineTransform(
+      alignment.pairs.map((pair) => expected[pair.expectedIndex]),
+      alignment.pairs.map((pair) => detected[pair.detectedIndex]),
+    );
+    if (!fit || !isAllowedRecoveredScale(fit.scale)) {
+      return null;
+    }
+
+    const unchanged = Math.abs(fit.scale - transform.scale) < 1e-9
+      && Math.abs(fit.offset - transform.offset) < 1e-7;
+    transform = fit;
+    if (unchanged) break;
+  }
+
+  alignment = alignTemplateLinesDP(
+    expected.map((line) => transform.scale * line + transform.offset),
+    detected,
+    residualTolerance,
+  );
+  if (!alignment || alignment.count < minimumMatchedLines) {
+    return null;
+  }
+
+  const missingExpected = expected
+    .map((_, index) => index)
+    .filter((index) => !alignment!.pairs.some((pair) => pair.expectedIndex === index));
+  if (missingExpected.length > maxMissing) {
+    return null;
+  }
+
+  const anchorResidual = getAffineAnchorResidual(transform.scale, transform.offset, expected);
+  const minimumSpacing = getMinimumPositiveSpacing(expected);
+  if (isAffinePositionRefused(transform.scale, transform.offset, expected, minimumSpacing)) {
+    return null;
+  }
+
+  const transformed = expected.map((line) => transform.scale * line + transform.offset);
+  const observedByExpected = new Map<number, number>();
+  alignment.pairs.forEach((pair) => observedByExpected.set(pair.expectedIndex, detected[pair.detectedIndex]));
+  const lines = transformed.map((line, index) => observedByExpected.get(index) ?? line);
+  if (!getPositiveGaps(lines)) {
+    return null;
+  }
+
+  const position = getAffinePositionMetrics(transform.scale, transform.offset, expected);
+  const correspondenceResidual = alignment.maxDeviation / minimumSpacing;
+
+  return {
+    lines,
+    matchedExpected: alignment.pairs.map((pair) => pair.expectedIndex),
+    matchedDetected: alignment.pairs.map((pair) => pair.detectedIndex),
+    missingExpected,
+    scale: transform.scale,
+    offset: transform.offset,
+    anchorResidual,
+    gapDeviation: getRelativeGapDeviation(lines, expected) ?? Number.POSITIVE_INFINITY,
+    correspondenceResidual,
+    absoluteCenterShift: position.absoluteCenterShift,
+    absoluteSpanChange: position.absoluteSpanChange,
+    firstOffset: position.firstOffset,
+    lastOffset: position.lastOffset,
+    score: getAffineCandidateScore(correspondenceResidual, position, minimumSpacing),
+  };
+}
+
+function summarizeCandidateCenterQuality(
+  qualities: CandidateCenterQuality[],
+): CandidateCenterQuality {
+  const first = qualities[0];
+  if (!first) {
+    return {
+      maxX: Number.POSITIVE_INFINITY,
+      maxY: Number.POSITIVE_INFINITY,
+      meanX: Number.POSITIVE_INFINITY,
+      meanY: Number.POSITIVE_INFINITY,
+      spreadX: Number.POSITIVE_INFINITY,
+      spreadY: Number.POSITIVE_INFINITY,
+      scaleX: Number.NaN,
+      scaleY: Number.NaN,
+      residualSpreadX: Number.POSITIVE_INFINITY,
+      residualSpreadY: Number.POSITIVE_INFINITY,
+    };
+  }
+
+  const largestAbsolute = (selector: (quality: CandidateCenterQuality) => number): number => (
+    qualities.reduce((best, quality) => (
+      Math.abs(selector(quality)) > Math.abs(best) ? selector(quality) : best
+    ), selector(first))
+  );
+
+  return {
+    maxX: Math.max(...qualities.map((quality) => quality.maxX)),
+    maxY: Math.max(...qualities.map((quality) => quality.maxY)),
+    meanX: largestAbsolute((quality) => quality.meanX),
+    meanY: largestAbsolute((quality) => quality.meanY),
+    spreadX: Math.max(...qualities.map((quality) => quality.spreadX)),
+    spreadY: Math.max(...qualities.map((quality) => quality.spreadY)),
+    scaleX: first.scaleX,
+    scaleY: first.scaleY,
+    residualSpreadX: Math.max(...qualities.map((quality) => quality.residualSpreadX)),
+    residualSpreadY: Math.max(...qualities.map((quality) => quality.residualSpreadY)),
+  };
+}
+
+/**
+ * Computes the best order-preserving one-to-one alignment for one affine
+ * candidate. Skipping a detected value costs nothing (spurious rule); skipping
+ * an expected value is counted in the final missingExpected list.
+ */
+function alignTemplateLinesDP(
+  transformed: number[],
+  detected: number[],
+  tolerance: number,
+): LineAlignment {
+  const table: Array<Array<LineAlignment | undefined>> = [];
+  for (let index = 0; index <= transformed.length; index++) {
+    table.push(new Array<LineAlignment | undefined>(detected.length + 1));
+  }
+
+  for (let expectedIndex = transformed.length; expectedIndex >= 0; expectedIndex--) {
+    for (let detectedIndex = detected.length; detectedIndex >= 0; detectedIndex--) {
+      if (expectedIndex === transformed.length || detectedIndex === detected.length) {
+        table[expectedIndex][detectedIndex] = {
+          count: 0,
+          totalDeviation: 0,
+          maxDeviation: 0,
+          pairs: [],
+        };
+        continue;
+      }
+
+      const choices: LineAlignment[] = [
+        table[expectedIndex + 1][detectedIndex]!,
+        table[expectedIndex][detectedIndex + 1]!,
+      ];
+      const deviation = Math.abs(detected[detectedIndex] - transformed[expectedIndex]);
+      if (deviation <= tolerance) {
+        const next = table[expectedIndex + 1][detectedIndex + 1]!;
+        choices.push({
+          count: next.count + 1,
+          totalDeviation: next.totalDeviation + deviation,
+          maxDeviation: Math.max(next.maxDeviation, deviation),
+          pairs: [{ expectedIndex, detectedIndex, deviation }, ...next.pairs],
+        });
+      }
+
+      table[expectedIndex][detectedIndex] = chooseBetterAlignment(choices);
+    }
+  }
+
+  return table[0][0]!;
+}
+
+function chooseBetterAlignment(choices: LineAlignment[]): LineAlignment {
+  return choices.reduce((best, candidate) => {
+    if (candidate.count !== best.count) {
+      return candidate.count > best.count ? candidate : best;
+    }
+    if (candidate.totalDeviation !== best.totalDeviation) {
+      return candidate.totalDeviation < best.totalDeviation ? candidate : best;
+    }
+    return candidate.maxDeviation < best.maxDeviation ? candidate : best;
+  });
+}
+
+function buildCompleteTemplateLineMatch(
+  lines: number[],
+  detected: number[],
+  expected: number[],
+): TemplateLineMatch {
+  const sortedDetected = [...detected].sort((first, second) => first - second);
+  const matchedDetected: number[] = [];
+  let searchStart = 0;
+  for (const line of lines) {
+    let matchedIndex = searchStart;
+    while (matchedIndex < sortedDetected.length && sortedDetected[matchedIndex] !== line) {
+      matchedIndex++;
+    }
+    if (matchedIndex < sortedDetected.length) {
+      matchedDetected.push(matchedIndex);
+      searchStart = matchedIndex + 1;
+    }
+  }
+  const fit = fitAffineTransform(expected, lines);
+  const scale = fit?.scale ?? 1;
+  const offset = fit?.offset ?? 0;
+  const minimumSpacing = getMinimumPositiveSpacing(expected);
+  const position = getAffinePositionMetrics(scale, offset, expected);
+  const correspondenceResidual = minimumSpacing > 0
+    ? Math.max(...lines.map((line, index) => Math.abs(line - (scale * expected[index] + offset)))) / minimumSpacing
+    : Number.POSITIVE_INFINITY;
+  return {
+    lines,
+    matchedExpected: expected.map((_, index) => index),
+    matchedDetected,
+    missingExpected: [],
+    scale,
+    offset,
+    anchorResidual: getAffineAnchorResidual(scale, offset, expected),
+    gapDeviation: getRelativeGapDeviation(lines, expected) ?? Number.POSITIVE_INFINITY,
+    ...(isGridMatchV2Enabled() ? {
+      correspondenceResidual,
+      absoluteCenterShift: position.absoluteCenterShift,
+      absoluteSpanChange: position.absoluteSpanChange,
+      firstOffset: position.firstOffset,
+      lastOffset: position.lastOffset,
+      score: minimumSpacing > 0
+        ? getAffineCandidateScore(correspondenceResidual, position, minimumSpacing)
+        : Number.POSITIVE_INFINITY,
+    } : {}),
+  };
+}
+
+function fitAffineTransform(expected: number[], actual: number[]): AffineTransform | null {
+  if (expected.length !== actual.length || expected.length < 2) {
+    return null;
+  }
+
+  const expectedMean = average(expected);
+  const actualMean = average(actual);
+  const denominator = expected.reduce((sum, value) => sum + (value - expectedMean) ** 2, 0);
+  if (denominator <= 0) {
+    return null;
+  }
+  const numerator = expected.reduce(
+    (sum, value, index) => sum + (value - expectedMean) * (actual[index] - actualMean),
+    0,
+  );
+  const scale = numerator / denominator;
+  return { scale, offset: actualMean - scale * expectedMean };
+}
+
+function isAllowedRecoveredScale(scale: number): boolean {
+  return scale >= 1 - GRID_MAX_RECOVERED_LINE_SCALE_DEVIATION
+    && scale <= 1 + GRID_MAX_RECOVERED_LINE_SCALE_DEVIATION;
+}
+
+interface AffinePositionMetrics {
+  absoluteCenterShift: number;
+  absoluteSpanChange: number;
+  firstOffset: number;
+  lastOffset: number;
+}
+
+function getAffinePositionMetrics(
+  scale: number,
+  offset: number,
+  expected: number[],
+): AffinePositionMetrics {
+  const firstExpected = expected[0];
+  const lastExpected = expected[expected.length - 1];
+  const firstTransformed = scale * firstExpected + offset;
+  const lastTransformed = scale * lastExpected + offset;
+  const expectedCenter = (firstExpected + lastExpected) / 2;
+  const expectedSpan = lastExpected - firstExpected;
+  const firstOffset = firstTransformed - firstExpected;
+  const lastOffset = lastTransformed - lastExpected;
+
+  return {
+    absoluteCenterShift: Math.abs((firstTransformed + lastTransformed) / 2 - expectedCenter),
+    absoluteSpanChange: Math.abs((lastTransformed - firstTransformed) - expectedSpan),
+    firstOffset,
+    lastOffset,
+  };
+}
+
+function isAffinePositionRefused(
+  scale: number,
+  offset: number,
+  expected: number[],
+  minimumSpacing: number,
+): boolean {
+  const position = getAffinePositionMetrics(scale, offset, expected);
+  const limit = minimumSpacing * GRID_MAX_RECOVERED_LINE_ANCHOR_RATIO;
+  return (
+    position.absoluteCenterShift > limit
+    || position.absoluteSpanChange > limit
+    // Checking both ends prevents a scale change from hiding a bad anchor at
+    // the center of the table.
+    || Math.abs(position.firstOffset) > limit
+    || Math.abs(position.lastOffset) > limit
+  );
+}
+
+function getAffineCandidateScore(
+  correspondenceResidual: number,
+  position: AffinePositionMetrics,
+  minimumSpacing: number,
+): number {
+  const lambda = GRID_V2_AFFINE_POSITION_LAMBDA / minimumSpacing;
+  return correspondenceResidual + lambda * (
+    position.absoluteCenterShift + position.absoluteSpanChange
+  );
+}
+
+function isBetterV2LineCandidate(
+  candidate: Pick<TemplateLineMatch, 'score' | 'missingExpected' | 'matchedExpected' | 'absoluteCenterShift' | 'absoluteSpanChange' | 'correspondenceResidual' | 'gapDeviation'>,
+  best: Pick<TemplateLineMatch, 'score' | 'missingExpected' | 'matchedExpected' | 'absoluteCenterShift' | 'absoluteSpanChange' | 'correspondenceResidual' | 'gapDeviation'>,
+): boolean {
+  const nearlyEqual = (first: number, second: number): boolean => Math.abs(first - second) <= 1e-9;
+  const candidateScore = candidate.score ?? Number.POSITIVE_INFINITY;
+  const bestScore = best.score ?? Number.POSITIVE_INFINITY;
+  const candidateCenterShift = candidate.absoluteCenterShift ?? Number.POSITIVE_INFINITY;
+  const bestCenterShift = best.absoluteCenterShift ?? Number.POSITIVE_INFINITY;
+  const candidateSpanChange = candidate.absoluteSpanChange ?? Number.POSITIVE_INFINITY;
+  const bestSpanChange = best.absoluteSpanChange ?? Number.POSITIVE_INFINITY;
+  const candidateResidual = candidate.correspondenceResidual ?? Number.POSITIVE_INFINITY;
+  const bestResidual = best.correspondenceResidual ?? Number.POSITIVE_INFINITY;
+  if (!nearlyEqual(candidateScore, bestScore)) {
+    return candidateScore < bestScore;
+  }
+  if (candidate.missingExpected.length !== best.missingExpected.length) {
+    return candidate.missingExpected.length < best.missingExpected.length;
+  }
+  if (!nearlyEqual(candidateCenterShift, bestCenterShift)) {
+    return candidateCenterShift < bestCenterShift;
+  }
+  if (!nearlyEqual(candidateSpanChange, bestSpanChange)) {
+    return candidateSpanChange < bestSpanChange;
+  }
+  if (!nearlyEqual(candidateResidual, bestResidual)) {
+    return candidateResidual < bestResidual;
+  }
+  if (candidate.matchedExpected.length !== best.matchedExpected.length) {
+    return candidate.matchedExpected.length > best.matchedExpected.length;
+  }
+  return candidate.gapDeviation < best.gapDeviation;
+}
+
+function getAffineAnchorResidual(scale: number, offset: number, expected: number[]): number {
+  if (expected.length < 2) {
+    return Number.POSITIVE_INFINITY;
+  }
+  const expectedCenter = (expected[0] + expected[expected.length - 1]) / 2;
+  const expectedSpan = expected[expected.length - 1] - expected[0];
+  const transformedCenter = scale * expectedCenter + offset;
+  const transformedSpan = scale * expectedSpan;
+  return Math.max(
+    Math.abs(transformedCenter - expectedCenter),
+    Math.abs(transformedSpan - expectedSpan),
+  );
+}
+
+function getMinimumPositiveSpacing(values: number[]): number {
+  let minimum = Number.POSITIVE_INFINITY;
+  for (let index = 1; index < values.length; index++) {
+    const gap = values[index] - values[index - 1];
+    if (gap > 0) {
+      minimum = Math.min(minimum, gap);
+    }
+  }
+  return Number.isFinite(minimum) ? minimum : 0;
 }
 
 function formatGapMismatchDiagnostic(

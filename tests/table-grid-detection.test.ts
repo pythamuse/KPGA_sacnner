@@ -8,7 +8,12 @@ import {
   buildCagiGridOverrides,
   buildSatisfactionGridDetection,
   buildSatisfactionGridOverrides,
+  deriveTemplateGridTolerances,
   detectVerticalLines,
+  getAutomaticGridMissingKind,
+  isAutomaticGridEligible,
+  matchTemplateLinePattern,
+  type FieldRegistration,
 } from '../src/lib/recognition/tableGridDetection';
 import { cagiTemplate, satisfactionTemplate, type ChoiceGroup } from '../src/lib/recognition/roiTemplates';
 
@@ -61,9 +66,16 @@ describe('table grid detection', () => {
     const detection = buildCagiGridDetection(await loadImageAnalysisData(filePath));
     const registration = detection.registrations['cagi.q01'];
 
-    expect(registration).toMatchObject({ source: 'grid', status: 'verified' });
-    expect(registration.candidateCenterOffset?.x).toBeLessThan(-0.03);
-    expect(registration.candidateCenterSpread?.x).toBeLessThan(0.01);
+    expect(registration).toMatchObject({
+      source: 'grid',
+      status: process.env.GRID_MATCH_V2 !== '0' ? 'candidate' : 'verified',
+    });
+    if (process.env.GRID_MATCH_V2 !== '0') {
+      expect(registration.diagnostic).toContain('V2 line match refused');
+    } else {
+      expect(registration.candidateCenterOffset?.x).toBeLessThan(-0.03);
+      expect(registration.candidateCenterSpread?.x).toBeLessThan(0.01);
+    }
     expect(detection.overrides['cagi.q01']).toHaveLength(4);
   });
 
@@ -96,8 +108,15 @@ describe('table grid detection', () => {
     const registration = detection.registrations['satisfaction.q02'];
 
     expect(detection.overrides['satisfaction.q02']).toHaveLength(2);
-    expect(registration).toMatchObject({ source: 'grid', status: 'verified' });
+    expect(registration).toMatchObject({
+      source: 'grid',
+      status: 'verified',
+    });
     expect(registration.inferredVerticalLines).toMatchObject({ found: 2, expected: 3 });
+    if (process.env.GRID_MATCH_V2 !== '0') {
+      expect(registration.missingExpected?.columns).toEqual([2]);
+      expect(registration.diagnostic).toContain('affine reconstruction');
+    }
   });
 
   it('recovers a five-point scale from four measured internal column rules', async () => {
@@ -113,8 +132,15 @@ describe('table grid detection', () => {
     const registration = detection.registrations['satisfaction.q07'];
 
     expect(detection.overrides['satisfaction.q07']).toHaveLength(5);
-    expect(registration).toMatchObject({ source: 'grid', status: 'verified' });
+    expect(registration).toMatchObject({
+      source: 'grid',
+      status: 'verified',
+    });
     expect(registration.inferredVerticalLines).toMatchObject({ found: 4, expected: 6 });
+    if (process.env.GRID_MATCH_V2 !== '0') {
+      expect(registration.missingExpected?.columns).toEqual([0, 5]);
+      expect(registration.diagnostic).toContain('affine reconstruction');
+    }
   });
 
   it('recovers a CAGI late-table row when the internal horizontal rule is faint', async () => {
@@ -131,8 +157,15 @@ describe('table grid detection', () => {
     const registration = detection.registrations['cagi.q08'];
 
     expect(detection.overrides['cagi.q08']).toHaveLength(4);
-    expect(registration).toMatchObject({ source: 'grid', status: 'verified' });
+    expect(registration).toMatchObject({
+      source: 'grid',
+      status: 'verified',
+    });
     expect(registration.inferredHorizontalLines).toMatchObject({ found: 2, expected: 3 });
+    if (process.env.GRID_MATCH_V2 !== '0') {
+      expect(registration.missingExpected?.rows).toEqual([1]);
+      expect(registration.diagnostic).toContain('affine reconstruction');
+    }
   });
 
   it('verifies a locally translated lower satisfaction scale without requiring the upper table to match', async () => {
@@ -153,7 +186,12 @@ describe('table grid detection', () => {
       status: 'verified',
       independentRegistration: true,
     });
-    expect(registration.candidateCenterOffset?.y).toBeLessThan(-0.02);
+    if (process.env.GRID_MATCH_V2 !== '0') {
+      expect(registration.missingExpected?.rows).toEqual([4]);
+      expect(registration.diagnostic).toContain('affine reconstruction');
+    } else {
+      expect(registration.candidateCenterOffset?.y).toBeLessThan(-0.02);
+    }
   });
 
   it('does not fabricate cells from dark printed content when table rules are absent', () => {
@@ -202,6 +240,16 @@ describe('table grid detection', () => {
     const detection = buildCagiGridDetection(await loadImageAnalysisData(filePath));
     const diagnostic = detection.diagnostics?.['cagi.q01'];
 
+    if (process.env.GRID_MATCH_V2 !== '0') {
+      expect(detection.overrides['cagi.q01']).toHaveLength(4);
+      expect(detection.registrations['cagi.q01']).toMatchObject({
+        source: 'grid',
+        status: 'candidate',
+      });
+      expect(diagnostic).toContain('V2 line match refused');
+      return;
+    }
+
     expect(detection.overrides['cagi.q01']).toHaveLength(4);
     expect(detection.registrations['cagi.q01']).toMatchObject({
       source: 'grid',
@@ -209,6 +257,136 @@ describe('table grid detection', () => {
     });
     expect(diagnostic).toContain('grid candidate');
     expect(detection.registrations['cagi.q01'].gapDeviation?.rows).toBeGreaterThan(0.08);
+  });
+
+  it('V2 rejects the set 4 p4 line shift when its absolute endpoints are out of bounds', () => {
+    const groups = groupsFor(cagiTemplate.choiceGroups, [
+      'cagi.q01', 'cagi.q02', 'cagi.q03', 'cagi.q04', 'cagi.q05', 'cagi.q06', 'cagi.q07',
+    ]);
+    const expected = deriveBoundaries(groups.map((group) => average(group.candidates.map(
+      (candidate) => candidate.rect.y + candidate.rect.height / 2,
+    )))).map((value) => value * 100);
+    const detected = [29.47, 33.62, 38.70, 40.58, 42.37, 44.16, 45.95, 47.79];
+
+    const match = withGridMatchV2(() => matchTemplateLinePattern(detected, expected));
+
+    expect(match).toBeNull();
+  });
+
+  it('V2 ranks the unshifted OLD p4 subset ahead of a one-row-shifted subset', () => {
+    const expected = [32, 34.5, 37, 39, 41, 43, 45, 47];
+    const unshifted = [32.08, 34.42, 37.11, 38.93, 41.12, 42.91, 45.09, 46.94];
+    const shifted = expected.map((line) => line * 1.02 - 1.3);
+    const detected = [29.47, ...unshifted, ...shifted, 49.8].sort((a, b) => a - b);
+
+    const match = withGridMatchV2(() => matchTemplateLinePattern(detected, expected));
+
+    expect(detected).toHaveLength(18);
+    expect(match).not.toBeNull();
+    expect(match?.missingExpected).toEqual([]);
+    expect(match?.absoluteCenterShift).toBeLessThan(0.2);
+    expect(match?.score).toBeLessThan(0.5);
+    expect(match?.lines).toEqual(unshifted);
+  });
+
+  it('V2 records one missing expected boundary while reconstructing the complete pattern', () => {
+    const match = withGridMatchV2(() => matchTemplateLinePattern(
+      [100, 140, 220, 260, 300],
+      [100, 140, 180, 220, 260, 300],
+    ));
+
+    expect(match).not.toBeNull();
+    expect(match?.matchedExpected).toHaveLength(5);
+    expect(match?.missingExpected).toEqual([2]);
+    expect(match?.lines).toHaveLength(6);
+    expect(match?.lines[2]).toBeCloseTo(180, 6);
+  });
+
+  it('allows one missing interior boundary for a verified eight-boundary grid', () => {
+    const registration = makeVerifiedGridRegistration([2]);
+
+    expect(registration.status).toBe('verified');
+    expect(getAutomaticGridMissingKind(registration)).toBe('interior');
+    expect(isAutomaticGridEligible(registration)).toBe(true);
+  });
+
+  it('blocks a verified grid when either end boundary is missing', () => {
+    for (const missingRows of [[0], [7]]) {
+      const registration = makeVerifiedGridRegistration(missingRows);
+
+      expect(getAutomaticGridMissingKind(registration)).toBe('end');
+      expect(isAutomaticGridEligible(registration)).toBe(false);
+    }
+  });
+
+  it('blocks a verified grid when two boundaries are missing', () => {
+    const registration = makeVerifiedGridRegistration([2, 5]);
+
+    expect(getAutomaticGridMissingKind(registration)).toBe('multi');
+    expect(isAutomaticGridEligible(registration)).toBe(false);
+  });
+
+  it('keeps a verified grid with only a missing column eligible', () => {
+    const registration = makeVerifiedGridRegistration([]);
+    registration.missingExpected = { rows: [], columns: [2] };
+
+    expect(getAutomaticGridMissingKind(registration)).toBe('none');
+    expect(isAutomaticGridEligible(registration)).toBe(true);
+  });
+
+  it('V2 ignores one spurious detected boundary without losing expected matches', () => {
+    const match = withGridMatchV2(() => matchTemplateLinePattern(
+      [100, 120, 140, 180, 220],
+      [100, 140, 180, 220],
+    ));
+
+    expect(match).not.toBeNull();
+    expect(match?.matchedExpected).toEqual([0, 1, 2, 3]);
+    expect(match?.matchedDetected).toEqual([0, 2, 3, 4]);
+    expect(match?.missingExpected).toEqual([]);
+  });
+
+  it('derives V2 uniform offset limits from each table minimum spacing', () => {
+    const cagiGroups = groupsFor(cagiTemplate.choiceGroups, [
+      'cagi.q01', 'cagi.q02', 'cagi.q03', 'cagi.q04', 'cagi.q05', 'cagi.q06', 'cagi.q07',
+    ]);
+    const cagiColumnCenters = cagiGroups[0].candidates.map(
+      (candidate) => candidate.rect.x + candidate.rect.width / 2,
+    );
+    const cagiRowCenters = cagiGroups.map((group) => average(group.candidates.map(
+      (candidate) => candidate.rect.y + candidate.rect.height / 2,
+    )));
+    const cagiTolerances = deriveTemplateGridTolerances(
+      'cagi.primary',
+      deriveBoundaries(cagiColumnCenters),
+      deriveBoundaries(cagiRowCenters),
+      1,
+      1,
+      cagiColumnCenters,
+      cagiRowCenters,
+    );
+    const scaleGroups = groupsFor(satisfactionTemplate.choiceGroups, [
+      'satisfaction.q07', 'satisfaction.q08', 'satisfaction.q09', 'satisfaction.q10',
+    ]);
+    const scaleColumnCenters = scaleGroups[0].candidates.map(
+      (candidate) => candidate.rect.x + candidate.rect.width / 2,
+    );
+    const scaleRowCenters = scaleGroups.map((group) => average(group.candidates.map(
+      (candidate) => candidate.rect.y + candidate.rect.height / 2,
+    )));
+    const scaleTolerances = deriveTemplateGridTolerances(
+      'satisfaction.scale',
+      deriveBoundaries(scaleColumnCenters),
+      deriveBoundaries(scaleRowCenters),
+      1,
+      1,
+      scaleColumnCenters,
+      scaleRowCenters,
+    );
+
+    expect(cagiTolerances.maxUniformCandidateOffsetX).toBeCloseTo(0.02565, 5);
+    expect(scaleTolerances.maxUniformCandidateOffsetY).toBeCloseTo(0.0135, 5);
+    expect(scaleTolerances.maxAnchorCandidateDeviationY).toBeCloseTo(0.0165, 5);
   });
 });
 
@@ -327,4 +505,30 @@ async function loadWithFixtureBounds(filePath: string): Promise<ImageAnalysisDat
 
 function average(values: number[]): number {
   return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function withGridMatchV2<T>(callback: () => T): T {
+  const previous = process.env.GRID_MATCH_V2;
+  process.env.GRID_MATCH_V2 = '1';
+  try {
+    return callback();
+  } finally {
+    if (previous === undefined) {
+      delete process.env.GRID_MATCH_V2;
+    } else {
+      process.env.GRID_MATCH_V2 = previous;
+    }
+  }
+}
+
+function makeVerifiedGridRegistration(missingRows: number[]): FieldRegistration {
+  const expected = 8;
+  return {
+    tableId: 'cagi.primary',
+    source: 'grid',
+    status: 'verified',
+    horizontalLines: { found: expected - missingRows.length, expected },
+    inferredHorizontalLines: { found: expected - missingRows.length, expected },
+    missingExpected: { rows: missingRows, columns: [] },
+  };
 }
