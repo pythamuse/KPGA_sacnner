@@ -1,3 +1,5 @@
+import type { RecognitionValueSource } from '../recognition/detectCheckmarks';
+
 export interface StudentBasic {
   age?: number;
   gender?: string;
@@ -35,6 +37,7 @@ export interface StudentSatisfaction {
 export interface StudentSource {
   cagiImageId?: string;
   satisfactionImageId?: string;
+  recognitionValueSource?: Record<string, RecognitionValueSource>;
 }
 
 export interface StudentData {

@@ -9,6 +9,7 @@ import {
 import { generateWorkbookPair } from '../../../lib/excel/generateWorkbookPair';
 import { StudentData } from '../../../lib/validation/types';
 import { appendRecognitionLabels } from '../../../lib/labelExport/labelStore';
+import { unconfirmedMachineFields } from '../../../lib/review/settlement';
 
 export async function POST(req: Request) {
   try {
@@ -28,6 +29,13 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: '저장 위치가 올바르지 않습니다.' }, { status: 400 });
     }
     const newStudent = students[newIndex];
+    const unconfirmedFields = unconfirmedMachineFields(newStudent);
+    if (unconfirmedFields.length > 0) {
+      return NextResponse.json({
+        error: `확인되지 않은 자동 입력은 저장할 수 없습니다. 확인이 필요한 필드: ${unconfirmedFields.join(', ')}`,
+        fields: unconfirmedFields,
+      }, { status: 400 });
+    }
 
     // 1. 새로 저장하려는 학생 데이터 유효성 검증
     const validation = validateStudent(newStudent);
@@ -51,16 +59,23 @@ export async function POST(req: Request) {
     // it whole on the next save, and the seventh student pushed the request
     // past the platform's body limit. See
     // Task/STUDENT_SAVE_PAYLOAD_GROWTH_AND_NON_JSON_RESPONSE_2026-08-12.md.
+    const recognitionValueSource = newStudent.source?.recognitionValueSource;
+    const hasRecognitionValueSource = Boolean(
+      recognitionValueSource
+      && typeof recognitionValueSource === 'object'
+      && !Array.isArray(recognitionValueSource),
+    );
     const savedStudent: StudentData = {
       studentIndex: targetRow,
       source: {
         cagiImageId: newStudent.source?.cagiImageId,
         satisfactionImageId: newStudent.source?.satisfactionImageId,
+        ...(hasRecognitionValueSource ? { recognitionValueSource } : {}),
       },
       basic: newStudent.basic,
       cagi: newStudent.cagi,
       satisfaction: newStudent.satisfaction,
-      status: 'confirmed',
+      status: hasRecognitionValueSource ? 'confirmed' : 'saved',
     };
     students[newIndex] = savedStudent;
 

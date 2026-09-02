@@ -7,8 +7,9 @@ import type { UploadInventory } from '@/lib/uploadInventory';
 import RecognitionReview from '@/components/RecognitionReview';
 import StudentTable from '@/components/StudentTable';
 import ErrorSummary from '@/components/ErrorSummary';
-import { RecognitionDraft } from '@/lib/recognition/detectCheckmarks';
+import { RecognitionDraft, type RecognitionValueSource } from '@/lib/recognition/detectCheckmarks';
 import { StudentData, ValidationError } from '@/lib/validation/types';
+import { isSettledSource, unconfirmedMachineFields } from '@/lib/review/settlement';
 import {
   buildReviewSnapshot,
   clearReviewSnapshot,
@@ -43,6 +44,25 @@ async function readJsonResponse(res: Response): Promise<any> {
   }
   throw new Error(`서버가 JSON이 아닌 응답을 보냈습니다 (HTTP ${res.status}). ${body}`);
 }
+
+const hasReviewValue = (value: unknown): boolean => (
+  value !== undefined && value !== null && value !== ''
+);
+
+/**
+ * A saved source is authoritative for a field that has a value. A missing
+ * source (or an impossible unresolved/value combination) is the legacy case:
+ * keep the value visible, but make the reviewer look at it again.
+ */
+const sourceForRestoredField = (
+  source: RecognitionValueSource | undefined,
+  hasSavedValue: boolean,
+): RecognitionValueSource | undefined => {
+  if (isSettledSource(source) || source === 'auto' || source === 'restored') {
+    return source;
+  }
+  return hasSavedValue ? 'restored' : undefined;
+};
 
 function UsageModal({ onClose }: { onClose: () => void }) {
   return (
@@ -392,6 +412,11 @@ export default function Home() {
     if (!jobId || !drafts) return;
 
     const currentDraft = drafts[currentDraftIndex];
+    const unconfirmedFields = unconfirmedMachineFields(currentDraft);
+    if (unconfirmedFields.length > 0) {
+      setNotices([`확인되지 않은 자동 입력 ${unconfirmedFields.length}개 — 확인 후 저장할 수 있습니다.`]);
+      return;
+    }
     const existingRow = savedRowForDraft(currentDraftIndex);
     const outgoing = existingRow >= 0
       ? students.map((student, i) => (i === existingRow ? stripDraftImages(currentDraft) : student))
@@ -511,12 +536,10 @@ export default function Home() {
    * Puts the saved row's values back on screen when the reviewer returns to a
    * student who already has one.
    *
-   * The draft carries what the recognizer produced; the row carries what a
-   * person confirmed. Coming back showed the recognizer's version again --
-   * blanks and all -- so fields that had already been answered by hand were
-   * outstanding a second time, and the card reported unsaved edits that were
-   * really just the older, worse values. Saving a student means a person
-   * accepted every value in it, so on return the whole row reads as settled.
+   * The draft carries what the recognizer produced; the row carries the value
+   * and its review source. Coming back must restore both: a confirmed/manual
+   * field stays settled, while an automatic or legacy value still asks for a
+   * person to check it.
    *
    * Fields the reviewer has touched in this session are left alone. Those are
    * deliberate edits not yet saved, and overwriting them is the one way this
@@ -532,42 +555,59 @@ export default function Home() {
     const valueSource = { ...(draft.source?.recognitionValueSource || {}) };
     const editedAt = { ...(draft.source?.recognitionManualEditedAt || {}) };
     const groups: Array<'basic' | 'cagi' | 'satisfaction'> = ['basic', 'cagi', 'satisfaction'];
-    const rebuilt: Record<string, Record<string, unknown>> = {};
-    let changed = false;
-
+    const savedValueSources = saved.source?.recognitionValueSource;
+    const rebuilt: Record<string, Record<string, unknown>> = {
+      basic: { ...((draft.basic || {}) as Record<string, unknown>) },
+      cagi: { ...((draft.cagi || {}) as Record<string, unknown>) },
+      satisfaction: { ...((draft.satisfaction || {}) as Record<string, unknown>) },
+    };
+    const fieldKeys = new Set<string>();
     groups.forEach((group) => {
       const savedGroup = (saved[group] || {}) as Record<string, unknown>;
-      const draftGroup = { ...((draft[group] || {}) as Record<string, unknown>) };
-      Object.keys(savedGroup).forEach((name) => {
-        const key = `${group}.${name}`;
-        // Already the reviewer's own answer this session -- theirs wins. A
-        // saved row is not a manual edit or an explicit confirmation, so an
-        // automatic or unresolved draft value must still be restored below.
-        if (valueSource[key] === 'manual' || valueSource[key] === 'confirmed' || valueSource[key] === 'blank_ok') return;
-        const savedValue = savedGroup[name];
-        if (savedValue === undefined || savedValue === null || savedValue === '') return;
-        if (draftGroup[name] !== savedValue) {
-          draftGroup[name] = savedValue;
-          changed = true;
-        }
-        // Restored values are settled for the screen, but they were not
-        // explicitly confirmed by a reviewer and must remain weak labels.
-        if (valueSource[key] !== 'restored') {
-          valueSource[key] = 'restored';
-          changed = true;
-        }
-        // A restored value is not a manual edit. Normally this entry is absent,
-        // but remove a stale timestamp so the badge cannot call it hand-edited.
-        if (editedAt[key] !== undefined) {
-          delete editedAt[key];
-          changed = true;
-        }
-      });
-      rebuilt[group] = draftGroup;
+      Object.keys(savedGroup).forEach((name) => fieldKeys.add(`${group}.${name}`));
+    });
+    Object.keys(savedValueSources || {}).forEach((key) => fieldKeys.add(key));
+    let changed = false;
+
+    fieldKeys.forEach((key) => {
+      const [group, name] = key.split('.');
+      if (!groups.includes(group as typeof groups[number]) || !name) return;
+
+      // Already the reviewer's own answer this session -- theirs wins over the
+      // older saved row, including when the saved row carries a different source.
+      if (isSettledSource(valueSource[key])) return;
+
+      const savedGroup = (saved[group as typeof groups[number]] || {}) as Record<string, unknown>;
+      const draftGroup = rebuilt[group];
+      const savedValue = savedGroup[name];
+      const hasSavedValue = hasReviewValue(savedValue);
+      const nextSource = sourceForRestoredField(savedValueSources?.[key], hasSavedValue);
+
+      if (hasSavedValue && draftGroup[name] !== savedValue) {
+        draftGroup[name] = savedValue;
+        changed = true;
+      }
+      // An explicit blank confirmation is persisted without a group value. If
+      // recognition produced a value again, the saved blank still wins.
+      if (!hasSavedValue && savedValueSources?.[key] === 'blank_ok' && hasReviewValue(draftGroup[name])) {
+        delete draftGroup[name];
+        changed = true;
+      }
+      if (nextSource && valueSource[key] !== nextSource) {
+        valueSource[key] = nextSource;
+        changed = true;
+      }
+      // The save whitelist carries the source map, not the edit timestamp.
+      // Do not let a stale draft timestamp make a restored field look newly
+      // hand-edited.
+      if (nextSource && editedAt[key] !== undefined) {
+        delete editedAt[key];
+        changed = true;
+      }
     });
 
-    // Every field it touches becomes `restored`, so a second pass finds nothing
-    // left to do and this cannot drive itself in a loop.
+    // A second pass finds nothing left to do and this cannot drive itself in a
+    // loop: values, sources, and timestamps are all stable after this merge.
     if (!changed) return;
     const updated = {
       ...draft,

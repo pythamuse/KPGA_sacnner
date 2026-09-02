@@ -167,6 +167,38 @@ describe('review snapshot', () => {
     expect(isRestorableSnapshot(snapshot)).toBe(true);
   });
 
+  it('keeps field-level value sources for both saved rows and drafts', () => {
+    const draft = makeDraft();
+    draft.source = {
+      ...(draft.source || {}),
+      recognitionValueSource: {
+        'basic.gender': 'confirmed',
+        'cagi.q01': 'auto',
+      },
+    };
+    const saved: StudentData = {
+      ...student,
+      source: {
+        ...student.source,
+        recognitionValueSource: { 'basic.gender': 'manual' },
+      },
+    };
+
+    const snapshot = buildReviewSnapshot({
+      jobId: 'job-1',
+      uploadMode: 'batch',
+      students: [saved],
+      drafts: [draft],
+      currentDraftIndex: 0,
+    });
+
+    expect(snapshot.students[0].source.recognitionValueSource).toEqual({ 'basic.gender': 'manual' });
+    expect(snapshot.drafts[0].source?.recognitionValueSource).toEqual({
+      'basic.gender': 'confirmed',
+      'cagi.q01': 'auto',
+    });
+  });
+
   it('refuses to offer a resume that carries no work', () => {
     const empty = buildReviewSnapshot({
       jobId: 'job-1',
@@ -219,6 +251,23 @@ describe('contested runner-up badge', () => {
     };
 
     expect(renderReview(draft)).not.toContain('경합');
+  });
+});
+
+describe('machine-value settlement on the review screen', () => {
+  it('keeps a restored value pending and disables saving until it is confirmed', () => {
+    const draft = stripDraftImages(makeDraft());
+    draft.source = {
+      ...(draft.source || {}),
+      recognitionValueSource: { 'basic.gender': 'restored' },
+    };
+
+    const html = renderReview(draft);
+
+    expect(html).toContain('저장된 값이지만 확인이 필요합니다.');
+    expect(html).toContain('확인되지 않은 자동 입력 1개 — 확인 후 저장할 수 있습니다');
+    expect(html).toContain('이 값이 맞음');
+    expect(html).toContain('disabled="">검수 완료 및 엑셀 반영</button>');
   });
 });
 

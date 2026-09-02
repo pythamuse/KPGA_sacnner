@@ -5,6 +5,7 @@ import {
   type SheetQualityLevel,
 } from '../lib/recognition/sheetQualityDisplay';
 import { ValidationError } from '../lib/validation/types';
+import { isSettledSource, unconfirmedMachineFields } from '../lib/review/settlement';
 
 interface RecognitionReviewProps {
   draft: RecognitionDraft;
@@ -113,6 +114,8 @@ export default function RecognitionReview({
   // the wall of numbers is what a reviewer has to read past to find the four
   // fields that actually need them. Off by default, one click away.
   const [showDiagnostics, setShowDiagnostics] = React.useState(false);
+  const unconfirmedMachineFieldKeys = unconfirmedMachineFields(draft);
+  const unconfirmedMachineFieldSet = new Set(unconfirmedMachineFieldKeys);
 
   const buildReviewSource = (field: string, valueSource: RecognitionValueSource) => {
     const priorTrace = draft.source?.recognitionDecisionTrace?.[field];
@@ -188,8 +191,7 @@ export default function RecognitionReview({
    * remainder in their head across nineteen students.
    */
   const isSettled = (key: string) => {
-    const source = draft.source?.recognitionValueSource?.[key];
-    return source === 'manual' || source === 'confirmed' || source === 'blank_ok' || source === 'restored';
+    return isSettledSource(draft.source?.recognitionValueSource?.[key]);
   };
 
   const fieldDomId = (key: string) => `review-field-${key.replace(/\./g, '-')}`;
@@ -494,7 +496,7 @@ export default function RecognitionReview({
    * and picking one already marks it settled through the normal change path.
    */
   const renderConfirmButton = (key: string) => {
-    if (confidenceRank[getConfidenceLevel(key)] === 0 && !needsValue(key)) return null;
+    if (confidenceRank[getConfidenceLevel(key)] === 0 && !needsValue(key) && !unconfirmedMachineFieldSet.has(key)) return null;
     if (isSettled(key)) return null;
     const empty = needsValue(key);
 
@@ -678,10 +680,10 @@ export default function RecognitionReview({
     const contested = source === 'auto' && draft.source?.recognitionContested?.[key] === true;
     const manualEditedAt = draft.source?.recognitionManualEditedAt?.[key];
     const styleMap: Record<string, { border: string; text: string; bg: string; label: string }> = {
-      auto: { border: '#9fdfc5', text: '#177245', bg: '#eefaf3', label: '자동 인식' },
+      auto: { border: '#9fdfc5', text: '#177245', bg: '#eefaf3', label: '자동 인식 · 확인 필요' },
       manual: { border: '#b9c8f3', text: '#405aa8', bg: '#f2f5ff', label: '수기 수정' },
       unresolved: { border: '#d8dde8', text: '#667085', bg: '#f6f8fb', label: '미확정' },
-      restored: { border: '#c7ced8', text: '#52606d', bg: '#f1f4f7', label: '저장값 복원' },
+      restored: { border: '#c7ced8', text: '#52606d', bg: '#f1f4f7', label: '저장값 복원 · 확인 필요' },
     };
     Object.assign(styleMap, {
       confirmed: { ...styleMap.manual, label: '\uD655\uC778 \uC644\uB8CC' },
@@ -691,9 +693,9 @@ export default function RecognitionReview({
     const title = manualEditedAt
       ? `수기 수정 시각: ${new Date(manualEditedAt).toLocaleString('ko-KR')}`
       : source === 'auto'
-        ? '자동 인식값으로 확정되었습니다.'
+        ? '자동 인식값이므로 사람이 확인해야 저장할 수 있습니다.'
         : source === 'restored'
-          ? '저장된 값으로 복원되었습니다. 사람이 명시적으로 확인한 라벨은 아닙니다.'
+          ? '저장된 값이지만 확인이 필요합니다.'
           : '자동 인식값이 확정되지 않아 검수가 필요합니다.';
 
     return (
@@ -902,7 +904,7 @@ export default function RecognitionReview({
     return value === undefined || value === null || value === '';
   };
   const attentionFields = reviewKeys.filter(
-    (key) => confidenceRank[getConfidenceLevel(key)] > 0 || needsValue(key),
+    (key) => confidenceRank[getConfidenceLevel(key)] > 0 || needsValue(key) || unconfirmedMachineFieldSet.has(key),
   );
   // What is still outstanding, in the order the fields appear on the page, so
   // "next" always moves down the screen and never jumps backwards.
@@ -1108,9 +1110,9 @@ export default function RecognitionReview({
                 <strong>{fieldLabel(key)}</strong>
                 <span style={{ color: 'var(--text-muted)' }}>
                   {' '}| {source ? cropSourceLabel[source] : '좌표 정보 없음'}
-                  {' '}| {
+                    {' '}| {
                     valueSource === 'auto'
-                      ? '자동 인식'
+                      ? '자동 인식 · 확인 필요'
                       : valueSource === 'manual'
                         ? '수기 수정'
                         : valueSource === 'confirmed'
@@ -1118,7 +1120,7 @@ export default function RecognitionReview({
                           : valueSource === 'blank_ok'
                             ? '빈칸 확인'
                             : valueSource === 'restored'
-                              ? '저장값 복원'
+                              ? '저장값 복원 · 확인 필요'
                               : '미확정'
                   }
                   {registration ? ` | ${registration.tableId} / ${registration.status}` : ''}
@@ -1225,6 +1227,9 @@ export default function RecognitionReview({
               </strong>
               <span>
                 낮은 신뢰도 {lowCount}개, 확인 권장 {mediumCount}개입니다. 아래에서 항목을 눌러 바로 이동할 수 있습니다.
+                {unconfirmedMachineFieldKeys.length > 0 && (
+                  <> 확인되지 않은 자동 입력 {unconfirmedMachineFieldKeys.length}개도 포함되어 있습니다.</>
+                )}
               </span>
               {/* The whole point of this row. Nineteen students at four or five
                   fields each is a lot of scrolling to find highlighted cards
@@ -1459,7 +1464,32 @@ export default function RecognitionReview({
         </div>
       )}
 
-      <button className="btn-primary" style={{ width: '100%' }} disabled={isSaving} onClick={onSave}>
+      {unconfirmedMachineFieldKeys.length > 0 && (
+        <div
+          className="error-box"
+          role="alert"
+          style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 10 }}
+        >
+          <strong>
+            확인되지 않은 자동 입력 {unconfirmedMachineFieldKeys.length}개 — 확인 후 저장할 수 있습니다
+          </strong>
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={() => focusField(unconfirmedMachineFieldKeys[0])}
+            style={{ padding: '6px 10px', fontSize: 12, whiteSpace: 'nowrap' }}
+          >
+            첫 번째 미확정 항목으로 이동
+          </button>
+        </div>
+      )}
+
+      <button
+        className="btn-primary"
+        style={{ width: '100%' }}
+        disabled={isSaving || unconfirmedMachineFieldKeys.length > 0}
+        onClick={onSave}
+      >
         {isSaving
           ? '엑셀 반영 및 검증 중'
           : savedRow >= 0

@@ -23,6 +23,7 @@ function makeFatDraft(): RecognitionDraft {
     source: {
       cagiImageId: 'cagi_page_0001',
       satisfactionImageId: 'satisfaction_page_0001',
+      recognitionValueSource: { 'basic.age': 'confirmed' },
       cagiImageDataUrl: bigImage,
       satisfactionImageDataUrl: bigImage,
       cropDataUrls: crops,
@@ -54,6 +55,7 @@ describe('student save payload', () => {
 
     expect(source.cagiImageId).toBe('cagi_page_0001');
     expect(source.satisfactionImageId).toBe('satisfaction_page_0001');
+    expect(source.recognitionValueSource).toEqual({ 'basic.age': 'confirmed' });
     expect(slim.basic).toEqual({ age: 14, gender: '여', schoolType: '중학교', grade: '2학년' });
     expect(slim.satisfaction).toEqual({ q01: 4 });
   });

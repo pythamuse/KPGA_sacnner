@@ -9,6 +9,7 @@ import {
   storeRecognitionMeasurements,
 } from '../src/lib/labelExport/labelStore';
 import type { RecognitionCandidateMeasurement } from '../src/lib/labelExport/types';
+import type { RecognitionValueSource } from '../src/lib/recognition/detectCheckmarks';
 
 const jobId = `job_label_export_${process.pid}`;
 const cagiImageId = 'cagi_page_0001';
@@ -46,7 +47,7 @@ const measurements = {
   ],
 };
 
-function studentWithSource(source: string) {
+function studentWithSource(source: RecognitionValueSource) {
   return {
     source: {
       cagiImageId,
