@@ -119,6 +119,11 @@
 **원인**: `detectFrameBounds`가 실패해 `detectDarkPixelBounds`로 대체된 경우에도 `recognizeStudentForms`가 정규화 ROI를 계속 채점했다. 후보 점수만 우연히 높아져도 실제 위치와 다른 값이 자동 확정될 가능성이 있었다.
 **대응**: 프레임 크기·여백·종횡비 검증을 추가하고, `contentBoundsConfident === false`이면 후보 점수와 low confidence만 전달한다. 자동값은 확정하지 않으며 검수 화면에 원본 대조 안내를 표시한다. 조기개입 ROI 감지도 같은 조건에서 건너뛴다.
 **상태**: 코드 및 합성 회귀 테스트 완료. 실제 휴대폰 사진과 배포본에서는 재검증 필요.
+**재발(2026-09-02)**: 새 촬영 3세트에서 같은 실패가 `conf=high` 오답 7건으로 재현됐다(`cagi.q01 → "3"`).
+근본 원인은 이 항목의 대응이 조건으로 삼은 `contentBoundsConfident`가 `paperContentBounds !== null || frameBounds !== null`
+(`markDensity.ts:476`)로 정의돼 **프레임 대체(책상 테두리 포함)도 "확신"으로 계산**된다는 것 — 종이 경계가 실패해도
+게이트가 열린다. 촉발 조건(종이 경계의 절대 밝기 문턱)은 수정·병합됐으나 이 정의 자체는 남아 있다.
+[Task/CAPTURE_GUIDANCE_2026-08-27.md](../Task/CAPTURE_GUIDANCE_2026-08-27.md) §17.1, 설계 감사 [Docs/16_RECOGNITION_DESIGN_AUDIT.md](16_RECOGNITION_DESIGN_AUDIT.md).
 
 ## 12. 실사용 촬영 이미지에서 원근 보정 후에도 문서 좌표가 어긋남
 
