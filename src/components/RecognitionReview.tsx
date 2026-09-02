@@ -5,7 +5,11 @@ import {
   type SheetQualityLevel,
 } from '../lib/recognition/sheetQualityDisplay';
 import { ValidationError } from '../lib/validation/types';
-import { isSettledSource, unconfirmedMachineFields } from '../lib/review/settlement';
+import {
+  contestedUnconfirmedFields,
+  isSettledSource,
+  unconfirmedMachineFields,
+} from '../lib/review/settlement';
 
 interface RecognitionReviewProps {
   draft: RecognitionDraft;
@@ -52,6 +56,29 @@ const cropSourceLabel = {
   'row-fallback': '격자 후보 -> 행 폴백',
   fixed: '위치 특정 실패 (구역 전체 표시)',
 };
+
+export function describeCropSource(
+  draft: RecognitionDraft,
+  key: string,
+): { sourceLabel?: string; registrationLabel?: string; registrationStatus?: string } | null {
+  const source = draft.source?.recognitionCropSource?.[key];
+  if (!source) return null;
+
+  const registration = draft.source?.recognitionRegistration?.[key];
+  const registrationLabel = registration?.status === 'verified'
+    ? '좌표 검증'
+    : registration?.status === 'candidate'
+      ? '좌표 후보'
+      : registration?.status === 'failed'
+        ? '좌표 실패'
+        : undefined;
+
+  return {
+    sourceLabel: cropSourceLabel[source],
+    ...(registrationLabel ? { registrationLabel } : {}),
+    ...(registration?.status ? { registrationStatus: registration.status } : {}),
+  };
+}
 
 /**
  * How each field's options read, so a suggestion can name the option the way
@@ -116,6 +143,8 @@ export default function RecognitionReview({
   const [showDiagnostics, setShowDiagnostics] = React.useState(false);
   const unconfirmedMachineFieldKeys = unconfirmedMachineFields(draft);
   const unconfirmedMachineFieldSet = new Set(unconfirmedMachineFieldKeys);
+  const contestedUnconfirmedFieldKeys = contestedUnconfirmedFields(draft);
+  const contestedUnconfirmedFieldSet = new Set(contestedUnconfirmedFieldKeys);
 
   const buildReviewSource = (field: string, valueSource: RecognitionValueSource) => {
     const priorTrace = draft.source?.recognitionDecisionTrace?.[field];
@@ -322,6 +351,15 @@ export default function RecognitionReview({
         background: '#eef1f5',
         borderRadius: 8,
         padding: 12,
+      };
+    }
+
+    if (contestedUnconfirmedFieldSet.has(key)) {
+      return {
+        border: '2px solid #d97706',
+        background: '#fff7ed',
+        borderRadius: 8,
+        padding: 11,
       };
     }
 
@@ -615,17 +653,10 @@ export default function RecognitionReview({
   };
 
   const renderCropSourceBadge = (key: string) => {
-    const source = draft.source?.recognitionCropSource?.[key];
-    if (!source) return null;
+    const description = describeCropSource(draft, key);
+    if (!description) return null;
     const diagnostic = showDiagnostics ? draft.source?.recognitionCropDiagnostic?.[key] : undefined;
     const registration = draft.source?.recognitionRegistration?.[key];
-    const registrationLabel = registration?.status === 'verified'
-      ? '좌표 검증'
-      : registration?.status === 'candidate'
-        ? '좌표 후보'
-        : registration?.status === 'failed'
-          ? '좌표 실패'
-          : undefined;
 
     return (
       <span style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 6, minWidth: 0 }}>
@@ -644,9 +675,9 @@ export default function RecognitionReview({
             whiteSpace: 'nowrap',
           }}
         >
-          {cropSourceLabel[source]}
+          {description.sourceLabel}
         </span>
-        {registrationLabel && (
+        {description.registrationLabel && (
           <span
             style={{
               display: 'inline-flex',
@@ -654,16 +685,16 @@ export default function RecognitionReview({
               minHeight: 22,
               padding: '2px 7px',
               borderRadius: 999,
-              border: registration?.status === 'verified' ? '1px solid #9fdfc5' : '1px solid #f3c38f',
-              color: registration?.status === 'verified' ? '#177245' : '#9a5a11',
-              background: registration?.status === 'verified' ? '#eefaf3' : '#fff8e7',
+              border: description.registrationStatus === 'verified' ? '1px solid #9fdfc5' : '1px solid #f3c38f',
+              color: description.registrationStatus === 'verified' ? '#177245' : '#9a5a11',
+              background: description.registrationStatus === 'verified' ? '#eefaf3' : '#fff8e7',
               fontSize: 11,
               fontWeight: 800,
               whiteSpace: 'nowrap',
             }}
             title={registration?.tableId}
           >
-            {registrationLabel}
+            {description.registrationLabel}
           </span>
         )}
         {diagnostic && (
@@ -677,7 +708,8 @@ export default function RecognitionReview({
 
   const renderValueSourceBadge = (key: string) => {
     const source = draft.source?.recognitionValueSource?.[key] || 'unresolved';
-    const contested = source === 'auto' && draft.source?.recognitionContested?.[key] === true;
+    const contested = (source === 'auto' || source === 'restored')
+      && draft.source?.recognitionContested?.[key] === true;
     const manualEditedAt = draft.source?.recognitionManualEditedAt?.[key];
     const styleMap: Record<string, { border: string; text: string; bg: string; label: string }> = {
       auto: { border: '#9fdfc5', text: '#177245', bg: '#eefaf3', label: '자동 인식 · 확인 필요' },
@@ -773,7 +805,26 @@ export default function RecognitionReview({
     // Both crops are already in the response, so neither costs extra payload.
     const inlineUrl = (showRoiBoxes ? debugUrl : url) || debugUrl || url;
     const roiUrl = debugUrl || url;
-    if (!inlineUrl) return null;
+    if (!inlineUrl) {
+      return (
+        <div
+          role="note"
+          style={{
+            marginTop: 8,
+            padding: '7px 9px',
+            border: '1px dashed #d8dde8',
+            borderRadius: 6,
+            background: '#f6f8fb',
+            color: '#667085',
+            fontSize: 11,
+            fontWeight: 600,
+            lineHeight: 1.4,
+          }}
+        >
+          원본 크롭이 캐시에 없습니다(4시간 경과 또는 새 기기). 원본 이미지에서 확인하세요.
+        </div>
+      );
+    }
 
     return (
       <div style={{ marginTop: 8 }}>
@@ -803,8 +854,7 @@ export default function RecognitionReview({
             }}
           />
         </a>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginTop: 5 }}>
-          {renderCropSourceBadge(key)}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 8, marginTop: 5 }}>
           <a
             href={roiUrl}
             target="_blank"
@@ -912,6 +962,7 @@ export default function RecognitionReview({
   const settledCount = attentionFields.length - pendingFields.length;
   const lowCount = pendingFields.filter((key) => getConfidenceLevel(key) === 'low').length;
   const mediumCount = pendingFields.filter((key) => getConfidenceLevel(key) === 'medium').length;
+  const firstUnconfirmedFieldKey = contestedUnconfirmedFieldKeys[0] || unconfirmedMachineFieldKeys[0];
   const saveErrorKeys = Array.from(
     new Set(saveErrors.flatMap((error) => (error.field ? [error.field] : []))),
   );
@@ -1159,6 +1210,7 @@ export default function RecognitionReview({
       </label>
       {control}
       {renderCandidateSummary(badgeKey)}
+      {renderCropSourceBadge(badgeKey)}
       {renderFieldCropPreview(badgeKey)}
       {renderReviewSuggestion(badgeKey)}
       {renderDecisionTrace(badgeKey)}
@@ -1225,6 +1277,11 @@ export default function RecognitionReview({
               <strong>
                 확인 필요 항목 {attentionFields.length}개 중 {settledCount}개 완료 · {pendingFields.length}개 남음
               </strong>
+              {contestedUnconfirmedFieldKeys.length > 0 && (
+                <span style={{ color: '#b45309', fontWeight: 700 }}>
+                  <strong>경합 {contestedUnconfirmedFieldKeys.length}개</strong> — 표시가 비슷해 잘못 고를 수 있었던 항목입니다. 먼저 확인하세요.
+                </span>
+              )}
               <span>
                 낮은 신뢰도 {lowCount}개, 확인 권장 {mediumCount}개입니다. 아래에서 항목을 눌러 바로 이동할 수 있습니다.
                 {unconfirmedMachineFieldKeys.length > 0 && (
@@ -1244,27 +1301,36 @@ export default function RecognitionReview({
                 >
                   남은 항목으로 이동
                 </button>
-                {pendingFields.map((key) => (
-                  <button
-                    key={key}
-                    type="button"
-                    onClick={() => focusField(key)}
-                    title={`${fieldLabel(key)}(으)로 이동`}
-                    style={{
-                      padding: '4px 10px',
-                      fontSize: 12,
-                      fontWeight: 700,
-                      borderRadius: 999,
-                      cursor: 'pointer',
-                      whiteSpace: 'nowrap',
-                      border: `1px solid ${getConfidenceLevel(key) === 'low' ? '#f0b7b2' : '#f5d29a'}`,
-                      color: getConfidenceLevel(key) === 'low' ? 'var(--error)' : 'var(--warning)',
-                      background: getConfidenceLevel(key) === 'low' ? 'var(--error-bg)' : 'var(--warning-bg)',
-                    }}
-                  >
-                    {fieldLabel(key)}
-                  </button>
-                ))}
+                {pendingFields.map((key) => {
+                  const contested = contestedUnconfirmedFieldSet.has(key);
+                  return (
+                    <button
+                      key={key}
+                      type="button"
+                      onClick={() => focusField(key)}
+                      title={`${fieldLabel(key)}${contested ? ' · 경합' : ''}(으)로 이동`}
+                      style={{
+                        padding: '4px 10px',
+                        fontSize: 12,
+                        fontWeight: contested ? 800 : 700,
+                        borderRadius: 999,
+                        cursor: 'pointer',
+                        whiteSpace: 'nowrap',
+                        border: contested
+                          ? '2px solid #d97706'
+                          : `1px solid ${getConfidenceLevel(key) === 'low' ? '#f0b7b2' : '#f5d29a'}`,
+                        color: contested
+                          ? '#b45309'
+                          : getConfidenceLevel(key) === 'low' ? 'var(--error)' : 'var(--warning)',
+                        background: contested
+                          ? '#fff7ed'
+                          : getConfidenceLevel(key) === 'low' ? 'var(--error-bg)' : 'var(--warning-bg)',
+                      }}
+                    >
+                      {contested ? `경합 · ${fieldLabel(key)}` : fieldLabel(key)}
+                    </button>
+                  );
+                })}
               </div>
             </>
           )}
@@ -1354,6 +1420,7 @@ export default function RecognitionReview({
                   <option value="3">3 거의 항상 있다</option>
                 </select>
                 {renderCandidateSummary(`cagi.q${num}`)}
+                {renderCropSourceBadge(`cagi.q${num}`)}
                 {renderFieldCropPreview(`cagi.q${num}`)}
                 {renderReviewSuggestion(`cagi.q${num}`)}
                 {renderDecisionTrace(`cagi.q${num}`)}
@@ -1381,6 +1448,7 @@ export default function RecognitionReview({
               <option value="4">4 3회 이상</option>
             </select>
             {renderCandidateSummary('satisfaction.q01')}
+            {renderCropSourceBadge('satisfaction.q01')}
             {renderFieldCropPreview('satisfaction.q01')}
             {renderReviewSuggestion('satisfaction.q01')}
             {renderDecisionTrace('satisfaction.q01')}
@@ -1405,6 +1473,7 @@ export default function RecognitionReview({
                   <option value="1">1 예</option>
                 </select>
                 {renderCandidateSummary(`satisfaction.q0${num}`)}
+                {renderCropSourceBadge(`satisfaction.q0${num}`)}
                 {renderFieldCropPreview(`satisfaction.q0${num}`)}
                 {renderReviewSuggestion(`satisfaction.q0${num}`)}
                 {renderDecisionTrace(`satisfaction.q0${num}`)}
@@ -1434,6 +1503,7 @@ export default function RecognitionReview({
                   <option value="4">4 매우 그렇다</option>
                 </select>
                 {renderCandidateSummary(`satisfaction.${key}`)}
+                {renderCropSourceBadge(`satisfaction.${key}`)}
                 {renderFieldCropPreview(`satisfaction.${key}`)}
                 {renderReviewSuggestion(`satisfaction.${key}`)}
                 {renderDecisionTrace(`satisfaction.${key}`)}
@@ -1476,10 +1546,14 @@ export default function RecognitionReview({
           <button
             type="button"
             className="btn-secondary"
-            onClick={() => focusField(unconfirmedMachineFieldKeys[0])}
+            onClick={() => {
+              if (firstUnconfirmedFieldKey) focusField(firstUnconfirmedFieldKey);
+            }}
             style={{ padding: '6px 10px', fontSize: 12, whiteSpace: 'nowrap' }}
           >
-            첫 번째 미확정 항목으로 이동
+            {contestedUnconfirmedFieldKeys.length > 0
+              ? '첫 번째 경합 항목으로 이동'
+              : '첫 번째 미확정 항목으로 이동'}
           </button>
         </div>
       )}

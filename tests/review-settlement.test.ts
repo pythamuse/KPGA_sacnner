@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  contestedUnconfirmedFields,
   isSettledSource,
   unconfirmedMachineFields,
 } from '../src/lib/review/settlement';
@@ -43,6 +44,38 @@ describe('review settlement sources', () => {
       'basic.age',
       'basic.gender',
       'cagi.q05',
+    ]);
+  });
+
+  it('keeps only unconfirmed contested values, in review order', () => {
+    const draft = {
+      basic: { age: 14, gender: '여' },
+      cagi: { q01: 0, q02: 1, q03: 2 },
+      satisfaction: {},
+      source: {
+        recognitionValueSource: {
+          'basic.age': 'auto',
+          'basic.gender': 'restored',
+          'cagi.q01': 'confirmed',
+          'cagi.q02': 'auto',
+          'cagi.q03': 'restored',
+          'cagi.q04': 'auto',
+        },
+        recognitionContested: {
+          'basic.age': true,
+          'basic.gender': true,
+          'cagi.q01': true,
+          'cagi.q02': false,
+          'cagi.q03': true,
+          'cagi.q04': true,
+        },
+      },
+    } as unknown as RecognitionDraft;
+
+    expect(contestedUnconfirmedFields(draft)).toEqual([
+      'basic.age',
+      'basic.gender',
+      'cagi.q03',
     ]);
   });
 });

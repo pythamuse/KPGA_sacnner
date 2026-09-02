@@ -13,6 +13,7 @@ export const REVIEW_FIELD_KEYS = [
 type SettlementDraft = Pick<RecognitionDraft, 'basic' | 'cagi' | 'satisfaction'> & {
   source?: {
     recognitionValueSource?: Record<string, RecognitionValueSource>;
+    recognitionContested?: Record<string, boolean>;
   };
 };
 
@@ -41,4 +42,14 @@ export function unconfirmedMachineFields(draft: SettlementDraft): string[] {
       && value !== ''
       && (source === 'auto' || source === 'restored');
   });
+}
+
+/**
+ * Returns unresolved machine values whose recognition evidence was contested,
+ * in the same page order as the general settlement list.
+ */
+export function contestedUnconfirmedFields(draft: SettlementDraft): string[] {
+  return unconfirmedMachineFields(draft).filter(
+    (key) => draft.source?.recognitionContested?.[key] === true,
+  );
 }
