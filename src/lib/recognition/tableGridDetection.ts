@@ -41,6 +41,7 @@ const GRID_MAX_INTRA_TABLE_OFFSET_DELTA = 0.02;
 const GRID_MAX_RECOVERED_LINE_SCALE_DEVIATION = 0.15;
 const GRID_MAX_RECOVERED_LINE_RESIDUAL_RATIO = 0.4;
 const GRID_MAX_RECOVERED_LINE_ANCHOR_RATIO = 0.5;
+const GRID_V2_AFFINE_POSITION_LAMBDA = 2;
 const GRID_V2_UNIFORM_OFFSET_FACTOR = 0.45;
 const GRID_V2_DEFAULT_ANCHOR_FACTOR = 0.45;
 const GRID_V2_SATISFACTION_SCALE_ANCHOR_Y_FACTOR = 0.55;
@@ -104,6 +105,16 @@ export interface TemplateLineMatch {
   offset: number;
   anchorResidual: number;
   gapDeviation: number;
+  /** Max correspondence residual in minimum-spacing units. */
+  correspondenceResidual?: number;
+  /** Absolute fitted-template movement, in the input coordinate units. */
+  absoluteCenterShift?: number;
+  absoluteSpanChange?: number;
+  /** Signed offsets of the fitted first/last template boundaries. */
+  firstOffset?: number;
+  lastOffset?: number;
+  /** correspondenceResidual + lambda * absolute position penalty. */
+  score?: number;
 }
 
 export interface DerivedGridTolerances {
@@ -498,6 +509,39 @@ function emitGridTrace(
   const meanY = trace.candidateCenter?.meanY;
   const spreadX = trace.candidateCenter?.spreadX;
   const spreadY = trace.candidateCenter?.spreadY;
+  const rowCenterShift = trace.rowMatch?.absoluteCenterShift !== undefined
+    ? trace.rowMatch.absoluteCenterShift / Math.max(trace.pageHeight, 1)
+    : undefined;
+  const columnCenterShift = trace.columnMatch?.absoluteCenterShift !== undefined
+    ? trace.columnMatch.absoluteCenterShift / Math.max(trace.pageWidth, 1)
+    : undefined;
+  const rowSpanChange = trace.rowMatch?.absoluteSpanChange !== undefined
+    ? trace.rowMatch.absoluteSpanChange / Math.max(trace.pageHeight, 1)
+    : undefined;
+  const columnSpanChange = trace.columnMatch?.absoluteSpanChange !== undefined
+    ? trace.columnMatch.absoluteSpanChange / Math.max(trace.pageWidth, 1)
+    : undefined;
+  const rowFirstOffset = trace.rowMatch?.firstOffset !== undefined
+    ? trace.rowMatch.firstOffset / Math.max(trace.pageHeight, 1)
+    : undefined;
+  const rowLastOffset = trace.rowMatch?.lastOffset !== undefined
+    ? trace.rowMatch.lastOffset / Math.max(trace.pageHeight, 1)
+    : undefined;
+  const columnFirstOffset = trace.columnMatch?.firstOffset !== undefined
+    ? trace.columnMatch.firstOffset / Math.max(trace.pageWidth, 1)
+    : undefined;
+  const columnLastOffset = trace.columnMatch?.lastOffset !== undefined
+    ? trace.columnMatch.lastOffset / Math.max(trace.pageWidth, 1)
+    : undefined;
+  const rowScore = trace.rowMatch?.score;
+  const columnScore = trace.columnMatch?.score;
+  const positionTrace = trace.mode === 'v2'
+    && (rowScore !== undefined || columnScore !== undefined)
+    ? ` absCenter=row:${format(rowCenterShift)},col:${format(columnCenterShift)}`
+      + ` absSpan=row:${format(rowSpanChange)},col:${format(columnSpanChange)}`
+      + ` absEnds=row:${format(rowFirstOffset)},${format(rowLastOffset)},col:${format(columnFirstOffset)},${format(columnLastOffset)}`
+      + ` score=row:${format(rowScore)},col:${format(columnScore)}`
+    : '';
 
   console.log(
     `[grid-fit] table=${trace.tableId}`
@@ -514,6 +558,7 @@ function emitGridTrace(
       + ` meanY=${format(meanY)}`
       + ` spreadX=${format(spreadX)}`
       + ` spreadY=${format(spreadY)}`
+      + positionTrace
       + ` tolX=${format(trace.maxUniformCandidateOffsetX)}`
       + ` tolY=${format(trace.maxUniformCandidateOffsetY)}`
       + ` status=${status}`
@@ -833,6 +878,9 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
   const missingColumns = v2Enabled ? columnRecovery?.missingExpected ?? [] : [];
   const hasMissingExpected = missingRows.length > 0 || missingColumns.length > 0;
   const forceCandidateForV2Refusal = v2LineMatchRefused && !allowLegacySingleRow;
+  const missingDiagnostic = hasMissingExpected
+    ? `missing expected rows [${missingRows.join(',')}] columns [${missingColumns.join(',')}] (affine reconstruction)`
+    : '';
   const registrationLimits = v2Enabled ? {
     maxUniformCandidateOffsetX: derivedTolerances.maxUniformCandidateOffsetX,
     maxUniformCandidateOffsetY: derivedTolerances.maxUniformCandidateOffsetY,
@@ -847,19 +895,16 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
       spec.maxUniformCandidateOffsetY,
       registrationLimits,
     );
-    const status: RegistrationStatus = !hasMissingExpected
-      && !forceCandidateForV2Refusal
+    const status: RegistrationStatus = !forceCandidateForV2Refusal
       && geometryVerified ? 'verified' : 'candidate';
     const diagnostic = status === 'candidate'
       ? formatGridQualityDiagnostic(quality, candidateCenter, spec.maxUniformCandidateOffsetY, registrationLimits)
-        + (hasMissingExpected
-          ? `; missing expected rows [${missingRows.join(',')}] columns [${missingColumns.join(',')}]`
-          : '')
+        + (missingDiagnostic ? `; ${missingDiagnostic}` : '')
         + (forceCandidateForV2Refusal
           ? '; V2 line match refused; review-only V1 geometry retained'
           : '')
         + lineEvidence
-      : undefined;
+      : (missingDiagnostic ? `grid: ${missingDiagnostic}` : undefined);
     return [group.field, {
       tableId: spec.id,
       source: 'grid',
@@ -902,10 +947,8 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
     .map(([field, registration]) => [field, registration.diagnostic!]));
   const representativeRegistration = checkedRegistrations[groups[0].field];
   const traceStatus = getRegistrationsStatus(checkedRegistrations);
-  const traceRefusedBy = hasMissingExpected
-    ? 'missingExpected'
-    : forceCandidateForV2Refusal
-      ? 'v2-line-match'
+  const traceRefusedBy = forceCandidateForV2Refusal
+    ? 'v2-line-match'
     : representativeRegistration?.diagnostic?.includes('table offset varies')
       ? 'intra-table-offset'
       : traceStatus === 'verified' ? 'none' : 'quality';
@@ -1475,6 +1518,12 @@ interface PartialTemplateLinePattern {
   anchorResidual: number;
   gapDeviation: number;
   residualRatio: number;
+  correspondenceResidual?: number;
+  absoluteCenterShift?: number;
+  absoluteSpanChange?: number;
+  firstOffset?: number;
+  lastOffset?: number;
+  score?: number;
 }
 
 /**
@@ -1552,33 +1601,50 @@ function inferPartialTemplateLinePattern(
             .map((_, index) => index)
             .filter((index) => !match.matchedExpected.includes(index));
           const anchorResidual = getAffineAnchorResidual(fittedScale, fittedOffset, expected);
+          const position = getAffinePositionMetrics(fittedScale, fittedOffset, expected);
           if (
             v2Enabled
             && (
               match.maxDeviation > minimumSpacing * GRID_MAX_RECOVERED_LINE_RESIDUAL_RATIO
-              || anchorResidual > minimumSpacing * GRID_MAX_RECOVERED_LINE_ANCHOR_RATIO
+              || isAffinePositionRefused(fittedScale, fittedOffset, expected, minimumSpacing)
               || missingExpected.length > Math.floor(expected.length / 3)
             )
           ) continue;
 
           const residualRatio = match.totalDeviation / Math.max(match.count * expectedSpan, 1);
           const fittedOffsetRatio = Math.abs(fittedOffset) / Math.max(pageSize, 1);
-          const score = match.count * 10 - residualRatio * 100 - fittedOffsetRatio;
-          if (!best || score > best.score) {
-            best = {
-              lines,
-              matchedCount: match.count,
-              matchedExpected: match.matchedExpected,
-              matchedDetected: match.matchedDetected,
-              missingExpected,
-              scale: fittedScale,
-              offset: fittedOffset,
-              anchorResidual,
-              gapDeviation: getRelativeGapDeviation(lines, expected) ?? Number.POSITIVE_INFINITY,
-              residualRatio,
-              score,
-              offsetRatio: fittedOffsetRatio,
-            };
+          const correspondenceResidual = v2Enabled
+            ? match.maxDeviation / minimumSpacing
+            : match.maxDeviation / Math.max(minimumSpacing, 1);
+          const score = v2Enabled
+            ? getAffineCandidateScore(correspondenceResidual, position, minimumSpacing)
+            : match.count * 10 - residualRatio * 100 - fittedOffsetRatio;
+          const candidate = {
+            lines,
+            matchedCount: match.count,
+            matchedExpected: match.matchedExpected,
+            matchedDetected: match.matchedDetected,
+            missingExpected,
+            scale: fittedScale,
+            offset: fittedOffset,
+            anchorResidual,
+            gapDeviation: getRelativeGapDeviation(lines, expected) ?? Number.POSITIVE_INFINITY,
+            residualRatio,
+            correspondenceResidual,
+            absoluteCenterShift: position.absoluteCenterShift,
+            absoluteSpanChange: position.absoluteSpanChange,
+            firstOffset: position.firstOffset,
+            lastOffset: position.lastOffset,
+            score,
+            offsetRatio: fittedOffsetRatio,
+          };
+          if (
+            !best
+            || (v2Enabled
+              ? isBetterV2LineCandidate(candidate, best)
+              : score > best.score)
+          ) {
+            best = candidate;
           }
         }
       }
@@ -1595,6 +1661,12 @@ function inferPartialTemplateLinePattern(
     offset: best.offset,
     anchorResidual: best.anchorResidual,
     gapDeviation: best.gapDeviation,
+    correspondenceResidual: best.correspondenceResidual,
+    absoluteCenterShift: best.absoluteCenterShift,
+    absoluteSpanChange: best.absoluteSpanChange,
+    firstOffset: best.firstOffset,
+    lastOffset: best.lastOffset,
+    score: best.score,
     residualRatio: best.residualRatio,
   } : null;
 }
@@ -1940,16 +2012,7 @@ function matchTemplateLinePatternV2(
 
           if (
             !best
-            || candidate.matchedExpected.length > best.matchedExpected.length
-            || (
-              candidate.matchedExpected.length === best.matchedExpected.length
-              && candidate.anchorResidual < best.anchorResidual
-            )
-            || (
-              candidate.matchedExpected.length === best.matchedExpected.length
-              && candidate.anchorResidual === best.anchorResidual
-              && candidate.gapDeviation < best.gapDeviation
-            )
+            || isBetterV2LineCandidate(candidate, best)
           ) {
             best = candidate;
           }
@@ -2016,7 +2079,8 @@ function fitAndAlignTemplateLines(
   }
 
   const anchorResidual = getAffineAnchorResidual(transform.scale, transform.offset, expected);
-  if (anchorResidual > getMinimumPositiveSpacing(expected) * GRID_MAX_RECOVERED_LINE_ANCHOR_RATIO) {
+  const minimumSpacing = getMinimumPositiveSpacing(expected);
+  if (isAffinePositionRefused(transform.scale, transform.offset, expected, minimumSpacing)) {
     return null;
   }
 
@@ -2028,6 +2092,9 @@ function fitAndAlignTemplateLines(
     return null;
   }
 
+  const position = getAffinePositionMetrics(transform.scale, transform.offset, expected);
+  const correspondenceResidual = alignment.maxDeviation / minimumSpacing;
+
   return {
     lines,
     matchedExpected: alignment.pairs.map((pair) => pair.expectedIndex),
@@ -2037,6 +2104,12 @@ function fitAndAlignTemplateLines(
     offset: transform.offset,
     anchorResidual,
     gapDeviation: getRelativeGapDeviation(lines, expected) ?? Number.POSITIVE_INFINITY,
+    correspondenceResidual,
+    absoluteCenterShift: position.absoluteCenterShift,
+    absoluteSpanChange: position.absoluteSpanChange,
+    firstOffset: position.firstOffset,
+    lastOffset: position.lastOffset,
+    score: getAffineCandidateScore(correspondenceResidual, position, minimumSpacing),
   };
 }
 
@@ -2161,6 +2234,11 @@ function buildCompleteTemplateLineMatch(
   const fit = fitAffineTransform(expected, lines);
   const scale = fit?.scale ?? 1;
   const offset = fit?.offset ?? 0;
+  const minimumSpacing = getMinimumPositiveSpacing(expected);
+  const position = getAffinePositionMetrics(scale, offset, expected);
+  const correspondenceResidual = minimumSpacing > 0
+    ? Math.max(...lines.map((line, index) => Math.abs(line - (scale * expected[index] + offset)))) / minimumSpacing
+    : Number.POSITIVE_INFINITY;
   return {
     lines,
     matchedExpected: expected.map((_, index) => index),
@@ -2170,6 +2248,16 @@ function buildCompleteTemplateLineMatch(
     offset,
     anchorResidual: getAffineAnchorResidual(scale, offset, expected),
     gapDeviation: getRelativeGapDeviation(lines, expected) ?? Number.POSITIVE_INFINITY,
+    ...(isGridMatchV2Enabled() ? {
+      correspondenceResidual,
+      absoluteCenterShift: position.absoluteCenterShift,
+      absoluteSpanChange: position.absoluteSpanChange,
+      firstOffset: position.firstOffset,
+      lastOffset: position.lastOffset,
+      score: minimumSpacing > 0
+        ? getAffineCandidateScore(correspondenceResidual, position, minimumSpacing)
+        : Number.POSITIVE_INFINITY,
+    } : {}),
   };
 }
 
@@ -2195,6 +2283,98 @@ function fitAffineTransform(expected: number[], actual: number[]): AffineTransfo
 function isAllowedRecoveredScale(scale: number): boolean {
   return scale >= 1 - GRID_MAX_RECOVERED_LINE_SCALE_DEVIATION
     && scale <= 1 + GRID_MAX_RECOVERED_LINE_SCALE_DEVIATION;
+}
+
+interface AffinePositionMetrics {
+  absoluteCenterShift: number;
+  absoluteSpanChange: number;
+  firstOffset: number;
+  lastOffset: number;
+}
+
+function getAffinePositionMetrics(
+  scale: number,
+  offset: number,
+  expected: number[],
+): AffinePositionMetrics {
+  const firstExpected = expected[0];
+  const lastExpected = expected[expected.length - 1];
+  const firstTransformed = scale * firstExpected + offset;
+  const lastTransformed = scale * lastExpected + offset;
+  const expectedCenter = (firstExpected + lastExpected) / 2;
+  const expectedSpan = lastExpected - firstExpected;
+  const firstOffset = firstTransformed - firstExpected;
+  const lastOffset = lastTransformed - lastExpected;
+
+  return {
+    absoluteCenterShift: Math.abs((firstTransformed + lastTransformed) / 2 - expectedCenter),
+    absoluteSpanChange: Math.abs((lastTransformed - firstTransformed) - expectedSpan),
+    firstOffset,
+    lastOffset,
+  };
+}
+
+function isAffinePositionRefused(
+  scale: number,
+  offset: number,
+  expected: number[],
+  minimumSpacing: number,
+): boolean {
+  const position = getAffinePositionMetrics(scale, offset, expected);
+  const limit = minimumSpacing * GRID_MAX_RECOVERED_LINE_ANCHOR_RATIO;
+  return (
+    position.absoluteCenterShift > limit
+    || position.absoluteSpanChange > limit
+    // Checking both ends prevents a scale change from hiding a bad anchor at
+    // the center of the table.
+    || Math.abs(position.firstOffset) > limit
+    || Math.abs(position.lastOffset) > limit
+  );
+}
+
+function getAffineCandidateScore(
+  correspondenceResidual: number,
+  position: AffinePositionMetrics,
+  minimumSpacing: number,
+): number {
+  const lambda = GRID_V2_AFFINE_POSITION_LAMBDA / minimumSpacing;
+  return correspondenceResidual + lambda * (
+    position.absoluteCenterShift + position.absoluteSpanChange
+  );
+}
+
+function isBetterV2LineCandidate(
+  candidate: Pick<TemplateLineMatch, 'score' | 'missingExpected' | 'matchedExpected' | 'absoluteCenterShift' | 'absoluteSpanChange' | 'correspondenceResidual' | 'gapDeviation'>,
+  best: Pick<TemplateLineMatch, 'score' | 'missingExpected' | 'matchedExpected' | 'absoluteCenterShift' | 'absoluteSpanChange' | 'correspondenceResidual' | 'gapDeviation'>,
+): boolean {
+  const nearlyEqual = (first: number, second: number): boolean => Math.abs(first - second) <= 1e-9;
+  const candidateScore = candidate.score ?? Number.POSITIVE_INFINITY;
+  const bestScore = best.score ?? Number.POSITIVE_INFINITY;
+  const candidateCenterShift = candidate.absoluteCenterShift ?? Number.POSITIVE_INFINITY;
+  const bestCenterShift = best.absoluteCenterShift ?? Number.POSITIVE_INFINITY;
+  const candidateSpanChange = candidate.absoluteSpanChange ?? Number.POSITIVE_INFINITY;
+  const bestSpanChange = best.absoluteSpanChange ?? Number.POSITIVE_INFINITY;
+  const candidateResidual = candidate.correspondenceResidual ?? Number.POSITIVE_INFINITY;
+  const bestResidual = best.correspondenceResidual ?? Number.POSITIVE_INFINITY;
+  if (!nearlyEqual(candidateScore, bestScore)) {
+    return candidateScore < bestScore;
+  }
+  if (candidate.missingExpected.length !== best.missingExpected.length) {
+    return candidate.missingExpected.length < best.missingExpected.length;
+  }
+  if (!nearlyEqual(candidateCenterShift, bestCenterShift)) {
+    return candidateCenterShift < bestCenterShift;
+  }
+  if (!nearlyEqual(candidateSpanChange, bestSpanChange)) {
+    return candidateSpanChange < bestSpanChange;
+  }
+  if (!nearlyEqual(candidateResidual, bestResidual)) {
+    return candidateResidual < bestResidual;
+  }
+  if (candidate.matchedExpected.length !== best.matchedExpected.length) {
+    return candidate.matchedExpected.length > best.matchedExpected.length;
+  }
+  return candidate.gapDeviation < best.gapDeviation;
 }
 
 function getAffineAnchorResidual(scale: number, offset: number, expected: number[]): number {

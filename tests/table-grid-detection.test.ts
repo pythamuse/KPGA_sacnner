@@ -68,7 +68,7 @@ describe('table grid detection', () => {
       status: process.env.GRID_MATCH_V2 === '1' ? 'candidate' : 'verified',
     });
     if (process.env.GRID_MATCH_V2 === '1') {
-      expect(registration.missingExpected?.columns).toContain(4);
+      expect(registration.diagnostic).toContain('V2 line match refused');
     } else {
       expect(registration.candidateCenterOffset?.x).toBeLessThan(-0.03);
       expect(registration.candidateCenterSpread?.x).toBeLessThan(0.01);
@@ -107,9 +107,13 @@ describe('table grid detection', () => {
     expect(detection.overrides['satisfaction.q02']).toHaveLength(2);
     expect(registration).toMatchObject({
       source: 'grid',
-      status: process.env.GRID_MATCH_V2 === '1' ? 'candidate' : 'verified',
+      status: 'verified',
     });
     expect(registration.inferredVerticalLines).toMatchObject({ found: 2, expected: 3 });
+    if (process.env.GRID_MATCH_V2 === '1') {
+      expect(registration.missingExpected?.columns).toEqual([2]);
+      expect(registration.diagnostic).toContain('affine reconstruction');
+    }
   });
 
   it('recovers a five-point scale from four measured internal column rules', async () => {
@@ -127,9 +131,13 @@ describe('table grid detection', () => {
     expect(detection.overrides['satisfaction.q07']).toHaveLength(5);
     expect(registration).toMatchObject({
       source: 'grid',
-      status: process.env.GRID_MATCH_V2 === '1' ? 'candidate' : 'verified',
+      status: 'verified',
     });
     expect(registration.inferredVerticalLines).toMatchObject({ found: 4, expected: 6 });
+    if (process.env.GRID_MATCH_V2 === '1') {
+      expect(registration.missingExpected?.columns).toEqual([0, 5]);
+      expect(registration.diagnostic).toContain('affine reconstruction');
+    }
   });
 
   it('recovers a CAGI late-table row when the internal horizontal rule is faint', async () => {
@@ -148,9 +156,13 @@ describe('table grid detection', () => {
     expect(detection.overrides['cagi.q08']).toHaveLength(4);
     expect(registration).toMatchObject({
       source: 'grid',
-      status: process.env.GRID_MATCH_V2 === '1' ? 'candidate' : 'verified',
+      status: 'verified',
     });
     expect(registration.inferredHorizontalLines).toMatchObject({ found: 2, expected: 3 });
+    if (process.env.GRID_MATCH_V2 === '1') {
+      expect(registration.missingExpected?.rows).toEqual([1]);
+      expect(registration.diagnostic).toContain('affine reconstruction');
+    }
   });
 
   it('verifies a locally translated lower satisfaction scale without requiring the upper table to match', async () => {
@@ -168,11 +180,12 @@ describe('table grid detection', () => {
     expect(registration).toMatchObject({
       tableId: 'satisfaction.scale',
       source: 'grid',
-      status: process.env.GRID_MATCH_V2 === '1' ? 'candidate' : 'verified',
+      status: 'verified',
       independentRegistration: true,
     });
     if (process.env.GRID_MATCH_V2 === '1') {
-      expect(registration.missingExpected?.rows).toContain(4);
+      expect(registration.missingExpected?.rows).toEqual([4]);
+      expect(registration.diagnostic).toContain('affine reconstruction');
     } else {
       expect(registration.candidateCenterOffset?.y).toBeLessThan(-0.02);
     }
@@ -243,7 +256,7 @@ describe('table grid detection', () => {
     expect(detection.registrations['cagi.q01'].gapDeviation?.rows).toBeGreaterThan(0.08);
   });
 
-  it('V2 rejects the set 4 p4 line shift instead of mapping the header rule to q01', () => {
+  it('V2 rejects the set 4 p4 line shift when its absolute endpoints are out of bounds', () => {
     const groups = groupsFor(cagiTemplate.choiceGroups, [
       'cagi.q01', 'cagi.q02', 'cagi.q03', 'cagi.q04', 'cagi.q05', 'cagi.q06', 'cagi.q07',
     ]);
@@ -254,11 +267,23 @@ describe('table grid detection', () => {
 
     const match = withGridMatchV2(() => matchTemplateLinePattern(detected, expected));
 
+    expect(match).toBeNull();
+  });
+
+  it('V2 ranks the unshifted OLD p4 subset ahead of a one-row-shifted subset', () => {
+    const expected = [32, 34.5, 37, 39, 41, 43, 45, 47];
+    const unshifted = [32.08, 34.42, 37.11, 38.93, 41.12, 42.91, 45.09, 46.94];
+    const shifted = expected.map((line) => line * 1.02 - 1.3);
+    const detected = [29.47, ...unshifted, ...shifted, 49.8].sort((a, b) => a - b);
+
+    const match = withGridMatchV2(() => matchTemplateLinePattern(detected, expected));
+
+    expect(detected).toHaveLength(18);
     expect(match).not.toBeNull();
-    expect(match?.matchedExpected).toEqual([1, 3, 4, 5, 6, 7]);
-    expect(match?.matchedDetected).toEqual([1, 2, 3, 4, 5, 6]);
-    expect(match?.matchedDetected).not.toContain(0);
-    expect(match?.missingExpected).toEqual([0, 2]);
+    expect(match?.missingExpected).toEqual([]);
+    expect(match?.absoluteCenterShift).toBeLessThan(0.2);
+    expect(match?.score).toBeLessThan(0.5);
+    expect(match?.lines).toEqual(unshifted);
   });
 
   it('V2 records one missing expected boundary while reconstructing the complete pattern', () => {

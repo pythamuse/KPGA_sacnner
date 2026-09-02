@@ -321,10 +321,11 @@ export async function recognizeStudentForms(
         recognitionRejectedCandidateRects[group.field] = detectedGridCells;
       }
 
-      // A candidate grid may contribute only its observed column positions to
-      // a row fallback. It is still manual-only and remains visible as
-      // rejected evidence in the debug overlay.
-      const verifiedGridCells = isVerifiedGrid(registration) ? gridCells : undefined;
+      // The affine-reconstructed row is valid registration geometry and is
+      // used for scoring, but it does not independently confirm the answer
+      // band. Keep automatic entry manual-only until the row detector supplies
+      // that second signal; the recovered grid remains visible as evidence.
+      const verifiedGridCells = isAutomaticGridEligible(registration) ? gridCells : undefined;
       const result = analyzeChoiceGroup(
         cagiImage,
         group,
@@ -385,7 +386,7 @@ export async function recognizeStudentForms(
             getRecognitionFieldLabel(result.field) + ': automatic entry deferred because direct checkbox ink evidence was absent or ambiguous.';
           continue;
         }
-        if (canAutoRecognizeCagi && isVerifiedGrid(registration)) {
+        if (canAutoRecognizeCagi && isAutomaticGridEligible(registration)) {
           recognitionDecisionTrace[result.field] =
             getRecognitionFieldLabel(result.field) + ': automatic entry deferred because high-confidence mark evidence was not found.';
         }
@@ -510,7 +511,7 @@ export async function recognizeStudentForms(
         recognitionRejectedCandidateRects[group.field] = detectedGridCells;
       }
 
-      const verifiedGridCells = isVerifiedGrid(registration) ? gridCells : undefined;
+      const verifiedGridCells = isAutomaticGridEligible(registration) ? gridCells : undefined;
       const result = analyzeChoiceGroup(
         satisfactionImage,
         group,
@@ -544,7 +545,7 @@ export async function recognizeStudentForms(
       draft.candidates![result.field] = result.candidates;
 
       if (result.value === undefined || result.confidence !== 'high') {
-        if (canAutoRecognizeSatisfaction && isVerifiedGrid(registration)) {
+        if (canAutoRecognizeSatisfaction && isAutomaticGridEligible(registration)) {
           recognitionDecisionTrace[result.field] =
             getRecognitionFieldLabel(result.field) + ': automatic entry deferred because high-confidence mark evidence was not found.';
         }
@@ -919,6 +920,9 @@ function getAutomaticDecisionTrace(
   if (!isVerifiedGrid(registration)) {
     return label + ': automatic entry blocked because ' + (registration?.diagnostic || 'the answer grid was not independently verified') + '.';
   }
+  if (!isAutomaticGridEligible(registration)) {
+    return label + ': automatic entry blocked because the horizontal grid geometry was affine-reconstructed without an independent row measurement.';
+  }
   return label + ': automatic entry is awaiting high-confidence mark evidence.';
 }
 
@@ -933,6 +937,10 @@ function getRecognitionFieldLabel(field: string): string {
 
 function isVerifiedGrid(registration?: FieldRegistration): boolean {
   return registration?.source === 'grid' && registration.status === 'verified';
+}
+
+function isAutomaticGridEligible(registration?: FieldRegistration): boolean {
+  return isVerifiedGrid(registration) && !Boolean(registration?.missingExpected?.rows.length);
 }
 
 function mergeBasicCheckboxDetection(
@@ -1216,7 +1224,11 @@ export function resolveScoringCells(
   registration?: FieldRegistration,
 ): PixelRect[] {
   const completeGridCells = completeOverrideOrNull(gridCells, group.candidates.length);
-  if (isVerifiedGrid(registration) && completeGridCells) return completeGridCells;
+  // A recovered horizontal rule remains complete grid geometry for scoring;
+  // missing rows never demote the registration to candidate.
+  if (isVerifiedGrid(registration) && completeGridCells) {
+    return completeGridCells;
+  }
   if (rowOverride) return buildRowFallbackCandidateRects(image, group, rowOverride);
   return buildFixedTemplateCandidateRects(image, group);
 }
