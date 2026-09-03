@@ -1538,7 +1538,12 @@ function renderStrokesForOcr(mask: InkMask, strokes: InkStroke[]): Promise<Buffe
 
 function getWorker(): Promise<Worker> {
   if (!workerPromise) {
-    workerPromise = createWorker('kor', OEM.DEFAULT, { cachePath: OCR_CACHE_PATH, workerPath: OCR_WORKER_PATH })
+    workerPromise = createWorker('kor', OEM.DEFAULT, {
+      cachePath: OCR_CACHE_PATH,
+      workerPath: OCR_WORKER_PATH,
+      langPath: DIGIT_OCR_LANG_PATH,
+      gzip: false,
+    })
       .then(async (worker) => {
         await worker.setParameters({
           tessedit_pageseg_mode: PSM.SPARSE_TEXT,

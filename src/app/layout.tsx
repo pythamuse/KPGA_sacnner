@@ -1,5 +1,6 @@
 import './globals.css';
 import type { Metadata } from 'next';
+import { PDFJS_MAIN_SRC } from '../lib/pdf/pdfRenderConfig';
 
 export const metadata: Metadata = {
   title: '도박예방교육 선별검사지·만족도조사 자동작성기',
@@ -18,7 +19,7 @@ export default function RootLayout({
           type="module"
           dangerouslySetInnerHTML={{
             __html: `
-import * as pdfjsLib from 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/6.1.200/pdf.min.mjs';
+import * as pdfjsLib from '${PDFJS_MAIN_SRC}';
 window.pdfjsLib = pdfjsLib;
             `,
           }}
