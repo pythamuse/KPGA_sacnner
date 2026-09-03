@@ -13,6 +13,7 @@ import {
   getAutomaticGridMissingKind,
   isAutomaticGridEligible,
   limitLinesToExpectedBands,
+  matchColumnLinesWithinExpectedBands,
   matchRowLinesWithinExpectedBands,
   matchTemplateLinePattern,
   type FieldRegistration,
@@ -475,6 +476,131 @@ describe('table grid detection', () => {
     expect(result.match).toBeNull();
   });
 
+  // The four fixtures below reproduce the browser raster of set 1 p5's
+  // satisfaction.scale columns: three boundaries found at the table's 0.3 dark
+  // ratio, three that only appear below it, and -- what the row case does not
+  // have -- vertical glyph edges inside the very bands the rescue rescans.
+  // Measured positions: the column instrument of commit e715cd6.
+  it('limits V2 column candidates to a band around each expected boundary', () => {
+    const detected = [425, ...p5StrongColumns, 870];
+
+    const band = limitLinesToExpectedBands(detected, p5ExpectedColumns);
+
+    // 0.75 x the 63px minimum pitch.
+    expect(band?.band).toBeCloseTo(47.25, 6);
+    expect(band?.lines).toEqual(p5StrongColumns);
+    expect(band?.outOfBand).toBe(2);
+    expect(band?.missingExpected).toEqual([2, 3, 5]);
+  });
+
+  it('rescues the three faint column boundaries and lets V2 pick the nearest in each band', () => {
+    const image = makeColumnProbeImage([
+      ...p5StrongColumns.map((x) => ({ x })),
+      ...p5FaintColumns.map((x) => ({ x, coverage: 0.22, width: 2 })),
+      ...p5GlyphEdgeColumns.map((x) => ({ x, coverage: 0.22 })),
+    ]);
+    const detected = detectVerticalLines(
+      image,
+      p5ColumnSearch.top,
+      p5ColumnSearch.bottom,
+      p5ColumnSearch.left,
+      p5ColumnSearch.right,
+      0.3,
+      200,
+    ).map((line) => line.x);
+
+    expect(detected).toEqual(p5StrongColumns);
+    // Flag off: the same detections give V2 nothing, because three of six
+    // expected boundaries are absent and the budget is two.
+    expect(withGridMatchV2(() => matchTemplateLinePattern(detected, p5ExpectedColumns))).toBeNull();
+
+    const result = withGridMatchV2(() => matchColumnLinesWithinExpectedBands(
+      image,
+      detected,
+      p5ExpectedColumns,
+      p5ColumnSearch,
+      0.3,
+      200,
+    ));
+
+    // Every glyph edge sits inside a missing band, so the band alone does not
+    // filter them; the V2 residual is what separates 610.5 from 635.
+    expect(result.rescued.map((line) => [line.expectedIndex, line.x])).toEqual([
+      [2, 610.5], [2, 635], [3, 665.5], [3, 696], [5, 786], [5, 807.5],
+    ]);
+    expect(result.rescued.every((line) => Math.abs(line.darkRatio - 0.18) < 1e-9)).toBe(true);
+    expect(result.match?.matchedExpected).toEqual([0, 1, 2, 3, 4, 5]);
+    expect(result.match?.missingExpected).toEqual([]);
+    expect(result.match?.lines).toEqual([475, 542, 610.5, 665.5, 731, 807.5]);
+  });
+
+  it('rescues nothing when the column bands hold no ink at all', () => {
+    const image = makeColumnProbeImage(p5StrongColumns.map((x) => ({ x })));
+    const detected = detectVerticalLines(
+      image,
+      p5ColumnSearch.top,
+      p5ColumnSearch.bottom,
+      p5ColumnSearch.left,
+      p5ColumnSearch.right,
+      0.3,
+      200,
+    ).map((line) => line.x);
+
+    const result = withGridMatchV2(() => matchColumnLinesWithinExpectedBands(
+      image,
+      detected,
+      p5ExpectedColumns,
+      p5ColumnSearch,
+      0.3,
+      200,
+    ));
+
+    expect(detected).toEqual(p5StrongColumns);
+    expect(result.rescued).toEqual([]);
+    expect(result.match).toBeNull();
+    expect(withGridMatchV2(() => matchTemplateLinePattern(detected, p5ExpectedColumns))).toBeNull();
+  });
+
+  it('drops a rescued column match that still leaves an expected column missing', () => {
+    // The binary table's case: two faint boundaries come back, the third is not
+    // printed at all, so accepting the rescue would mean inventing it.
+    const image = makeColumnProbeImage([
+      ...p5StrongColumns.map((x) => ({ x })),
+      { x: 610.5, coverage: 0.22, width: 2 },
+      { x: 665.5, coverage: 0.22, width: 2 },
+    ]);
+    const detected = detectVerticalLines(
+      image,
+      p5ColumnSearch.top,
+      p5ColumnSearch.bottom,
+      p5ColumnSearch.left,
+      p5ColumnSearch.right,
+      0.3,
+      200,
+    ).map((line) => line.x);
+
+    const result = withGridMatchV2(() => matchColumnLinesWithinExpectedBands(
+      image,
+      detected,
+      p5ExpectedColumns,
+      p5ColumnSearch,
+      0.3,
+      200,
+    ));
+
+    // Without the rule V2 would return a five-of-six match here.
+    const unguarded = withGridMatchV2(() => matchTemplateLinePattern(
+      [...p5StrongColumns, 610.5, 665.5].sort((first, second) => first - second),
+      p5ExpectedColumns,
+    ));
+    expect(unguarded?.missingExpected).toEqual([5]);
+
+    expect(result.rescued.map((line) => [line.expectedIndex, line.x])).toEqual([
+      [2, 610.5], [3, 665.5],
+    ]);
+    expect(result.match).toBeNull();
+  });
+
   it('registers the five-point scale by default and leaves it unregistered under GRID_BAND_V2=0', async () => {
     const groups = groupsFor(satisfactionTemplate.choiceGroups, [
       'satisfaction.q07', 'satisfaction.q08', 'satisfaction.q09', 'satisfaction.q10',
@@ -532,6 +658,32 @@ describe('table grid detection', () => {
 const p4ExpectedRows = [909.5, 942, 975.1, 1008.2, 1040.8];
 const p4SpuriousRows = [842, 861, 865, 873, 884, 891, 895];
 const p4RowSearch = { top: 830, bottom: 1100, left: 0, right: 200 };
+
+const p5ExpectedColumns = [476.4, 545.2, 611.4, 674.4, 739.9, 808.7];
+const p5StrongColumns = [475, 542, 731];
+/** Boundaries the table's own 0.3 dark ratio loses; the rescan's 0.18 finds them. */
+const p5FaintColumns = [610.5, 665.5, 807.5];
+/** Vertical glyph edges inside the missing bands, 21-24px off the boundary they sit near. */
+const p5GlyphEdgeColumns = [635, 696, 786];
+const p5ColumnSearch = { top: 0, bottom: 400, left: 420, right: 880 };
+
+function makeColumnProbeImage(
+  columns: Array<{ x: number; coverage?: number; width?: number }>,
+  width = 900,
+  height = 400,
+): { width: number; height: number; pixels: Buffer } {
+  const pixels = Buffer.alloc(width * height, 255);
+  for (const column of columns) {
+    const span = Math.round(height * (column.coverage ?? 1));
+    const half = ((column.width ?? 3) - 1) / 2;
+    for (let x = Math.round(column.x - half); x <= Math.round(column.x + half); x++) {
+      for (let y = 0; y < span; y++) {
+        pixels[y * width + x] = 0;
+      }
+    }
+  }
+  return { width, height, pixels };
+}
 
 function makeRowProbeImage(
   rows: Array<{ y: number; coverage?: number }>,
