@@ -6,6 +6,7 @@ import {
 } from '../src/lib/recognition/markDensity';
 import { ChoiceGroup } from '../src/lib/recognition/roiTemplates';
 import { withAffineTone } from './helpers/affineTone';
+import { pinShippedScorer } from './helpers/scorerVariants';
 
 /**
  * The raised floor a two-candidate group answers to on a photo sheet, from
@@ -188,6 +189,9 @@ const WRONG_HIGH = 31; // the highest wrong winner §9.1(b) measured
 const SURVIVING_CORRECT = 64; // the one correct winner the floor keeps
 const AT_FLOOR = 40; // the smallest block that still rounds to the floor itself
 const UNDER_FLOOR = 39;
+
+// Every number below is the shipped scorer's. See `pinShippedScorer`.
+pinShippedScorer();
 
 describe('the fixture reads as the measurement it stands in for', () => {
   it('produces the scores §9.1(b) named', () => {
