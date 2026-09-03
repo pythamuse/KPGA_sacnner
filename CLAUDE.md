@@ -198,7 +198,7 @@ REAL_SCAN_SAT_REVERSED=1   REAL_SCAN_CAGI_PDF=".../선별검사 샘플3반복.pd
 ```
 세트 1   CORRECT 361  WRONG 5  BLANK 71   OFF 30
 세트 2   CORRECT 346  WRONG 8  BLANK 83   OFF 21
-세트 3   CORRECT 344  WRONG 3  BLANK 90   OFF 12
+세트 3   CORRECT 348  WRONG 3  BLANK 86   OFF 9    (2026-09-03 열 밴드 병합 후; 그 전 344/3/90)
 세트 4   CORRECT 307  WRONG 9  BLANK 121  OFF 70   (회색조, 계급 보정 + 나이 바닥 90 — Task/GRAYSCALE_CLASS_2026-09-03.md)
 사진     OLD 61/0 · Set1 34/0 · Set2 42/0 · Set3 32/0
 ```
@@ -208,7 +208,7 @@ REAL_SCAN_SAT_REVERSED=1   REAL_SCAN_CAGI_PDF=".../선별검사 샘플3반복.pd
 잰다. `C:/Users/night/Desktop/사진샘플/`의 원본을 넣으면 **어느 커밋에서든** Set1 2/3 정도가 나온다 — 2026-09-03에 이것을 회귀로
 오진해 이분 탐색에 한 시간을 썼다. 스크래치패드가 사라졌으면 브라우저 경로로 다시 만든다(§5.2 절차로 업로드 보존).
 
-`GRID_MATCH_V2=0`을 주면 이전 대응기(V1)로 잰다 — 비교 실험 전용. `GRID_BAND_V2=0`은 기대 행 밴드+되찾기(2026-09-03 병합, [Task/V2_BAND_RESCUE_2026-09-03.md](Task/V2_BAND_RESCUE_2026-09-03.md))를 끈다 — 노드 스캔 수치는 셀 동일이고 OFF만 `30 · 16 · 9 · 64`로 준다.
+`GRID_MATCH_V2=0`을 주면 이전 대응기(V1)로 잰다 — 비교 실험 전용. `GRID_BAND_V2=0`은 기대 행 밴드+되찾기(2026-09-03 병합, [Task/V2_BAND_RESCUE_2026-09-03.md](Task/V2_BAND_RESCUE_2026-09-03.md))를 끈다 — 노드 스캔 수치는 셀 동일이고 OFF만 `30 · 16 · 9 · 64`로 준다. `GRID_BAND_V2_COLS=0`은 같은 것을 열에서 끈다([Task/V2_BAND_COLS_2026-09-03.md](Task/V2_BAND_COLS_2026-09-03.md); 세트 3이 344→348).
 
 **오답 칸이 세트마다 거의 겹치지 않는다.** 합치면 서로 다른 13칸인데 반복되는 것은 p16의
 다섯뿐이고, 그 다섯도 세트 3에서는 거절되어 빈칸이다. 즉 지금 남은 오답의 대부분은 고정된
@@ -262,7 +262,7 @@ REAL_SCAN_SAT_REVERSED=1   REAL_SCAN_CAGI_PDF=".../선별검사 샘플3반복.pd
 그 결과 "확인 필요 합계"에 자동값이 포함되므로 §5.2의 기준선 135는 **재설정 대상**이다. B-12·B-13도 같은 날 병합됐다([Task/B12_B13_VISIBILITY_2026-09-03.md](Task/B12_B13_VISIBILITY_2026-09-03.md)). B-1도 병합됐다([Task/B1_FRAME_BOUNDS_GATE_2026-09-03.md](Task/B1_FRAME_BOUNDS_GATE_2026-09-03.md)): 대체 경계는
 자동값을 못 만든다. **사진 4세트 기준선은 `59/0 · 34/0 · 36/0 · 24/0`(오답 0)**. B-7+B-2도 병합됐다([Task/B7_EVIDENCE_2026-09-03.md](Task/B7_EVIDENCE_2026-09-03.md)). B-3·B-4·B-9도 병합됐다(V2 선 대응 기본값 ON, [Task/B3_GRID_FIT_MEASUREMENT_2026-09-03.md](Task/B3_GRID_FIT_MEASUREMENT_2026-09-03.md) §6).
 §D 6순위(B-5·B-8)도 2026-09-03에 처리했다 — B-5는 회색조 계급 보정으로 병합, B-8은 계측 결과 선택지 표에서 실현되지 않음([Task/GRAYSCALE_CLASS_2026-09-03.md](Task/GRAYSCALE_CLASS_2026-09-03.md)). 앙상블 거부권은 계측으로
-기각됐다(Docs/17 §3.15). 남은 사용자 결정 5건은 Docs/17 §5, 남은 브라우저 오답 9건의 실체는 FIELD_TEST §34.1. 브라우저 래스터가 잃는 척도표 행 경계는 밴드+되찾기로 회복했다(§34.4–§34.5, [Task/V2_BAND_RESCUE_2026-09-03.md](Task/V2_BAND_RESCUE_2026-09-03.md)); p5 척도표는 **열** 대응 실패라 아직 남아 있다. 코드 작성은 코덱스 중단 중이라 오퍼스 서브에이전트가 한다(§0).
+기각됐다(Docs/17 §3.15). 남은 사용자 결정 5건은 Docs/17 §5, 남은 브라우저 오답 9건의 실체는 FIELD_TEST §34.1. 브라우저 래스터가 잃는 척도표 행 경계는 밴드+되찾기로 회복했다(§34.4–§34.5, [Task/V2_BAND_RESCUE_2026-09-03.md](Task/V2_BAND_RESCUE_2026-09-03.md)); p5 척도표의 열 대응도 같은 방식으로 회복했다([Task/V2_BAND_COLS_2026-09-03.md](Task/V2_BAND_COLS_2026-09-03.md)); 이제 척도표는 19장 모두 등록되며 남은 빈칸은 표시 판정 단계다. 코드 작성은 코덱스 중단 중이라 오퍼스 서브에이전트가 한다(§0).
 
 ### 5.1 판정자는 둘이고 역할이 다르다
 
@@ -312,6 +312,7 @@ REAL_SCAN_SAT_REVERSED=1   REAL_SCAN_CAGI_PDF=".../선별검사 샘플3반복.pd
 판정은 **자동 오답 · 자동 정답 · 경합 중 오답 비율**로 한다.
 **V2 선 대응 병합 후(2026-09-03 오후, dev, FIELD_TEST §34.1)**: 자동 339 · 정답 330 · **오답 9** · 미확정 빈칸 98 · 경합 99(오답 7/9).
 **밴드+되찾기 병합 후(2026-09-03 저녁, dev, [Task/V2_BAND_RESCUE_2026-09-03.md](Task/V2_BAND_RESCUE_2026-09-03.md) §3)**: 자동 345 · 정답 336 · **오답 9**(같은 칸) · 미확정 빈칸 92. 셀 diff는 빈칸→정답 6칸뿐(p4 q07~q10, p9 q01, p10 q08).
+**열 밴드 병합 후(같은 날 밤, [Task/V2_BAND_COLS_2026-09-03.md](Task/V2_BAND_COLS_2026-09-03.md))**: 자동 346 · 정답 337 · **오답 9** · 미확정 빈칸 91 (p5 q10 한 칸).
 
 ```
 ```
