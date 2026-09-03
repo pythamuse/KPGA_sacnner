@@ -10,7 +10,10 @@ SHA-256을 기록한 뒤 체크아웃에 넣어 줬다(`public/vendor/README.md`
 - 코드에서 외부 출처 문자열 0(`cdnjs`·`unpkg`·`docs.opencv.org`), CSP `script-src 'self' …`, `connect-src 'self' data: blob:`.
   `'unsafe-eval'`은 OpenCV emscripten 때문에 유지.
 - **dev 서버(브라우저)**: pdf.js가 `/vendor/pdfjs/6.1.200/pdf.min.mjs`로 로드, 리소스 타이밍에 외부 요청 0, HTML에 cdnjs 없음.
-- **프로덕션 빌드**: 아래 "§0.1"에 기록(빌드·`next start`·세트 1 업로드·서버 로그).
+- **프로덕션 빌드(같은 날)**: `npm run build` 통과, `.nft.json`에 kor·eng 모델과 워커 스크립트 추적됨. `next start`(3001)에서 세트 1
+  업로드·인식: 리소스는 `/vendor/pdfjs/6.1.200/pdf.min.mjs`·`pdf.worker.min.mjs`·`wasm/jbig2.wasm`뿐, 외부 요청 0,
+  `/vendor/opencv/4.9.0/opencv.js`(10,257,356B)·`wasm/openjpeg.wasm` HEAD 200. 서버 로그에 워커·모델·CDN 오류 없음, OCR 동작
+  (diacritics 로그 4). 결과 자동 339·나이 p1/p18=14 — dev 기준선과 동일.
 - 저장소 +13MB(`public/vendor`) + kor 모델 15MB(`src/lib/recognition/assets`, 번들 추적).
 - 남는 위험: 라이브러리 갱신은 수동(README의 절차). Vercel 정적 전송량이 첫 방문당 ≈12MB 늘지만 브라우저 캐시 뒤에는 0 —
   사용자가 확인한 Vercel 병목은 Blob 연산이라 이 변경과 무관.
