@@ -75,6 +75,22 @@ export interface CandidateMeasurement {
   largestComponentSize: number | null;
   largestComponentRatio: number | null;
   diagonalRatio: number | null;
+  /**
+   * Shape trace. Present ONLY under `MARK_SHAPE_TRACE`; with the variable
+   * unset these keys are absent from the object, so every serialization of a
+   * measurement -- `recognitionMeasurements` included -- is byte-identical to
+   * what this file produced before the trace existed. Read-only observations
+   * of the residual ink map: no scoring, gate or ranking reads them.
+   * See `MarkShapeTrace`.
+   */
+  componentCount?: number;
+  component2Size?: number;
+  inkBboxFill?: number;
+  diagonalPos?: number;
+  diagonalNeg?: number;
+  crossingScore?: number;
+  spanX?: number;
+  spanY?: number;
 }
 
 export interface DecisionEvidence {
@@ -256,7 +272,90 @@ interface TemplateInkShape {
   largestComponentSize: number;
   largestComponentRatio: number;
   diagonalRatio: number;
+  /** Only under `MARK_SHAPE_TRACE`; see `MarkShapeTrace`. */
+  shapeTrace?: MarkShapeTrace;
 }
+
+/**
+ * Instrument for FIELD_TEST §34.7's contested cells: the nine remaining browser
+ * wrong answers all have ink in two boxes, and several of them are a box the
+ * student marked and then CANCELLED with an X before marking another. The
+ * scorer has no measurement that could tell a cancelling stroke pair from a
+ * selecting mark, so this adds one -- as numbers only. Nothing here is read by
+ * `hasStructuredTemplateMark`, by `analyzeChoiceGroup`'s ranking, or by any
+ * gate; the delegator compares the distributions on real rasters and decides
+ * whether a rule is worth writing.
+ *
+ * Every field is computed on the SAME binary ink map the existing shape
+ * features use: `residual[y * width + x] > 0.08`, over the interior window
+ * `1 <= x < width - 1`, `1 <= y < height - 1` (the border ring is dropped so
+ * a 3x3 filter always has all eight neighbours). "Ink pixel" below always
+ * means a sample in that window that is over the threshold, and `activePixels`
+ * is how many there are.
+ */
+interface MarkShapeTrace {
+  /** 8-connected components of ink in the window. */
+  componentCount: number;
+  /** Pixel count of the SECOND largest component; 0 when there is only one. */
+  component2Size: number;
+  /** `activePixels` over the area of the ink's axis-aligned bounding box. */
+  inkBboxFill: number;
+  /**
+   * Share of ink pixels lying on a top-left -> bottom-right stroke: both
+   * `(x-1, y-1)` and `(x+1, y+1)` are ink. Divided by `activePixels`.
+   */
+  diagonalPos: number;
+  /**
+   * Share of ink pixels lying on a top-right -> bottom-left stroke: both
+   * `(x+1, y-1)` and `(x-1, y+1)` are ink. Divided by `activePixels`.
+   */
+  diagonalNeg: number;
+  /**
+   * How much the two diagonal directions occupy the same region, 0..1.
+   *
+   * Computed on the EXCLUSIVE sets -- `P` = pixels that are `diagonalPos` and
+   * not `diagonalNeg`, `N` = the converse -- because a solid blob satisfies
+   * both tests at every interior pixel and would otherwise read as a crossing.
+   * It is the IoU of the two sets' bounding boxes times their count balance:
+   *
+   *     iou = area(bbox(P) & bbox(N)) / area(bbox(P) | bbox(N))
+   *     balance = 2 * min(|P|, |N|) / (|P| + |N|)
+   *     crossingScore = iou * balance
+   *
+   * 0 when either set is empty. Measured on the synthetic fixtures in
+   * `tests/mark-shape-trace.test.ts`:
+   *
+   *     two crossing strokes   1.00   inkBboxFill 0.09
+   *     one stroke             0.00   inkBboxFill 0.05
+   *     a drawn ring           1.00   inkBboxFill 0.16
+   *     a straight-edged fill  0.00   inkBboxFill 1.00
+   *
+   * So it separates a crossing from a SINGLE stroke, which is what §34.7 asks
+   * of it, and nothing more. **It does not separate a crossing from a closed
+   * curve**: a ring's arcs run both ways over the same box, and so does the
+   * ragged boundary of a filled-in circle -- a real filled mark measured
+   * end-to-end read 0.98. Only a fill whose edges are straight and axis-aligned
+   * gives 0, and no hand-drawn mark is that. Read this WITH `inkBboxFill`,
+   * which is what tells a ring or a fill from a pair of strokes; the two
+   * columns are one measurement, not two.
+   */
+  crossingScore: number;
+  /** Ink bounding-box width over the window width (`width - 2`). */
+  spanX: number;
+  /** Ink bounding-box height over the window height (`height - 2`). */
+  spanY: number;
+}
+
+const EMPTY_MARK_SHAPE_TRACE: MarkShapeTrace = {
+  componentCount: 0,
+  component2Size: 0,
+  inkBboxFill: 0,
+  diagonalPos: 0,
+  diagonalNeg: 0,
+  crossingScore: 0,
+  spanX: 0,
+  spanY: 0,
+};
 
 interface ResidualEdges {
   /** Share of the disagreement carried by samples sitting on a printed edge. */
@@ -2006,6 +2105,10 @@ export function analyzeChoiceGroup(
     largestComponentSize: candidate.shape?.largestComponentSize ?? null,
     largestComponentRatio: candidate.shape?.largestComponentRatio ?? null,
     diagonalRatio: candidate.shape?.diagonalRatio ?? null,
+    // Spread, not eight `?? null` lines: with `MARK_SHAPE_TRACE` unset there
+    // is no `shapeTrace`, so the object has no such own properties and
+    // `JSON.stringify` of it is byte-for-byte what it was before.
+    ...(candidate.shape?.shapeTrace ?? {}),
   }));
 
   const best = scoredCandidates[0];
@@ -2784,6 +2887,10 @@ function calculateTemplateInkFeatures(
       largestComponentSize: 0,
       largestComponentRatio: 0,
       diagonalRatio: 0,
+      // Nothing was sampled, so there is no ink map to describe. The zeroed
+      // trace is emitted anyway so an armed run has the same columns on every
+      // candidate rather than a hole the reader has to explain.
+      ...(markShapeTraceEnabled() ? { shapeTrace: EMPTY_MARK_SHAPE_TRACE } : {}),
       actualInk: 0,
       baselineInk: 0,
       brightnessOffset: 0,
@@ -3285,6 +3392,145 @@ function analyzeResidualShape(
     largestComponentSize,
     largestComponentRatio: activePixels > 0 ? largestComponentSize / activePixels : 0,
     diagonalRatio: diagonalEdges / Math.max(diagonalEdges + orthogonalEdges, 1),
+    // Computed in its own pass, so the three numbers above still come off
+    // exactly the loops that have always produced them.
+    ...(markShapeTraceEnabled()
+      ? { shapeTrace: analyzeShapeTrace(residual, width, height, shapeThreshold) }
+      : {}),
+  };
+}
+
+/**
+ * The `MARK_SHAPE_TRACE` instrument. See `MarkShapeTrace` for what each field
+ * means; this function only counts. It reads `residual` and writes nothing.
+ */
+function analyzeShapeTrace(
+  residual: Float32Array,
+  width: number,
+  height: number,
+  shapeThreshold: number,
+): MarkShapeTrace {
+  const isInk = (x: number, y: number): boolean => (
+    x >= 1
+    && x < width - 1
+    && y >= 1
+    && y < height - 1
+    && residual[y * width + x] > shapeThreshold
+  );
+
+  const visited = new Uint8Array(residual.length);
+  const componentSizes: number[] = [];
+  let activePixels = 0;
+  let minX = width;
+  let maxX = -1;
+  let minY = height;
+  let maxY = -1;
+
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      const start = y * width + x;
+      if (visited[start] || !isInk(x, y)) continue;
+      const queue = [start];
+      visited[start] = 1;
+      let componentSize = 0;
+      while (queue.length > 0) {
+        const current = queue.pop()!;
+        const currentX = current % width;
+        const currentY = (current - currentX) / width;
+        componentSize += 1;
+        activePixels += 1;
+        if (currentX < minX) minX = currentX;
+        if (currentX > maxX) maxX = currentX;
+        if (currentY < minY) minY = currentY;
+        if (currentY > maxY) maxY = currentY;
+        for (let offsetY = -1; offsetY <= 1; offsetY++) {
+          for (let offsetX = -1; offsetX <= 1; offsetX++) {
+            if (offsetX === 0 && offsetY === 0) continue;
+            const neighborX = currentX + offsetX;
+            const neighborY = currentY + offsetY;
+            if (!isInk(neighborX, neighborY)) continue;
+            const neighbor = neighborY * width + neighborX;
+            if (visited[neighbor]) continue;
+            visited[neighbor] = 1;
+            queue.push(neighbor);
+          }
+        }
+      }
+      componentSizes.push(componentSize);
+    }
+  }
+
+  if (activePixels === 0) return { ...EMPTY_MARK_SHAPE_TRACE };
+  componentSizes.sort((a, b) => b - a);
+
+  // The exclusive direction sets. A pixel that answers to both is on neither:
+  // it is the inside of a fill, or the one point where two strokes cross.
+  let posCount = 0;
+  let posMinX = width;
+  let posMaxX = -1;
+  let posMinY = height;
+  let posMaxY = -1;
+  let negCount = 0;
+  let negMinX = width;
+  let negMaxX = -1;
+  let negMinY = height;
+  let negMaxY = -1;
+  let diagonalPosPixels = 0;
+  let diagonalNegPixels = 0;
+
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      if (!isInk(x, y)) continue;
+      const pos = isInk(x - 1, y - 1) && isInk(x + 1, y + 1);
+      const neg = isInk(x + 1, y - 1) && isInk(x - 1, y + 1);
+      if (pos) diagonalPosPixels += 1;
+      if (neg) diagonalNegPixels += 1;
+      if (pos && !neg) {
+        posCount += 1;
+        if (x < posMinX) posMinX = x;
+        if (x > posMaxX) posMaxX = x;
+        if (y < posMinY) posMinY = y;
+        if (y > posMaxY) posMaxY = y;
+      } else if (neg && !pos) {
+        negCount += 1;
+        if (x < negMinX) negMinX = x;
+        if (x > negMaxX) negMaxX = x;
+        if (y < negMinY) negMinY = y;
+        if (y > negMaxY) negMaxY = y;
+      }
+    }
+  }
+
+  let crossingScore = 0;
+  if (posCount > 0 && negCount > 0) {
+    const overlapWidth = Math.max(
+      0,
+      Math.min(posMaxX, negMaxX) - Math.max(posMinX, negMinX) + 1,
+    );
+    const overlapHeight = Math.max(
+      0,
+      Math.min(posMaxY, negMaxY) - Math.max(posMinY, negMinY) + 1,
+    );
+    const intersection = overlapWidth * overlapHeight;
+    const posArea = (posMaxX - posMinX + 1) * (posMaxY - posMinY + 1);
+    const negArea = (negMaxX - negMinX + 1) * (negMaxY - negMinY + 1);
+    const union = posArea + negArea - intersection;
+    const iou = union > 0 ? intersection / union : 0;
+    const balance = (2 * Math.min(posCount, negCount)) / (posCount + negCount);
+    crossingScore = iou * balance;
+  }
+
+  const bboxWidth = maxX - minX + 1;
+  const bboxHeight = maxY - minY + 1;
+  return {
+    componentCount: componentSizes.length,
+    component2Size: componentSizes.length > 1 ? componentSizes[1] : 0,
+    inkBboxFill: activePixels / (bboxWidth * bboxHeight),
+    diagonalPos: diagonalPosPixels / activePixels,
+    diagonalNeg: diagonalNegPixels / activePixels,
+    crossingScore,
+    spanX: bboxWidth / Math.max(width - 2, 1),
+    spanY: bboxHeight / Math.max(height - 2, 1),
   };
 }
 
@@ -3493,6 +3739,16 @@ function alignmentRadiusFloor(): number {
  */
 function baselineDilationEnabled(): boolean {
   return typeof process !== 'undefined' && Boolean(process.env?.MARK_BASELINE_DILATE);
+}
+
+/**
+ * `MARK_SHAPE_TRACE` -- pure instrumentation, read at call time like the flag
+ * above. Off it costs one boolean per cell and adds no key to any object; on it
+ * appends `MarkShapeTrace` to every candidate measurement and changes no score,
+ * no gate and no decision either way.
+ */
+function markShapeTraceEnabled(): boolean {
+  return typeof process !== 'undefined' && Boolean(process.env?.MARK_SHAPE_TRACE);
 }
 
 function dilatedBaselineInk(
