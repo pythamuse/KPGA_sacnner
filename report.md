@@ -135,3 +135,19 @@ off 쪽 진단 전문(등록 레코드에서):
    자료로만 된다. 세트 4는 이 브랜치에서 재보지 않았다.
 4. `rescued=[idx@ratio]` 형식은 주문 문구 그대로 두었다. 되찾은 선의 y는 이 필드에 없다 —
    A절의 `rescanYpx`에 이미 있으므로 중복이라고 판단했다. 필요하면 형식을 늘리면 된다.
+
+## Default flipped (2026-09-03, 후속)
+
+위임자 측정 통과 후(스캔 세트 칸 단위 동일, 사진 세트 동일·오답 0, 브라우저 19명 정답 +6·새 오답 0)
+밴드+되찾기를 **기본값**으로 돌렸다. `GRID_MATCH_V2`와 같은 방식이다.
+
+- `src/lib/recognition/tableGridDetection.ts:194` — `return process.env.GRID_BAND_V2 !== '0';`
+  (이전 `=== '1'`). `GRID_BAND_V2=0`이면 예전 무제한 행 대응으로 돌아간다.
+- 같은 파일 `:190-193` 주석에 기본 켜짐 근거(측정 결과)와 비교 실행용 `=0`을 적었다.
+  `:48` 상수 블록 머리와 `:776` 호출부 주석의 "GRID_BAND_V2 only" 표현도 같이 고쳤다.
+- `tests/table-grid-detection.test.ts` — `withGridBandV2(false, ...)`가 환경변수를 **지우는** 대신
+  `'0'`으로 **명시**한다(지우면 이제 켜진 것이다). D 통합 시험 이름·주석도 "flag off"에서
+  "GRID_BAND_V2=0"으로 바꿨다.
+- 시험: `npx tsc --noEmit` 통과. `npx vitest run`(환경변수 없음)·`GRID_BAND_V2=0 npx vitest run`·
+  `GRID_BAND_V2=1 npx vitest run` 모두 472 passed / 17 skipped.
+- 그 밖에는 아무것도 바꾸지 않았다 — 상수·규칙·트레이스 형식 그대로다.

@@ -45,8 +45,9 @@ const GRID_V2_AFFINE_POSITION_LAMBDA = 2;
 const GRID_V2_UNIFORM_OFFSET_FACTOR = 0.45;
 const GRID_V2_DEFAULT_ANCHOR_FACTOR = 0.45;
 const GRID_V2_SATISFACTION_SCALE_ANCHOR_Y_FACTOR = 0.55;
-// GRID_BAND_V2 only. The V2 row candidates are first restricted to a band
-// around each expected row boundary, and when no candidate set matches, the
+// GRID_BAND_V2 (default on, GRID_BAND_V2=0 to restore the old row match). The
+// V2 row candidates are first restricted to a band around each expected row
+// boundary, and when no candidate set matches, the
 // bands of the expected rows nothing landed in are rescanned at a lower dark
 // ratio. Both numbers come from the browser raster of set 1 p4: the spurious
 // rules above the five-point table sit 15-67px above the first expected row on
@@ -188,8 +189,10 @@ function isGridMatchV2Enabled(): boolean {
 }
 
 function isGridBandV2Enabled(): boolean {
-  // Off by default: with the flag unset the row match runs exactly as before.
-  return process.env.GRID_BAND_V2 === '1';
+  // Default on since 2026-09-03: measured cell-identical on the scan sets and
+  // the product photo sets, +6 correct with no new wrong across the 19 browser
+  // pages. GRID_BAND_V2=0 restores the unrestricted row match for comparison.
+  return process.env.GRID_BAND_V2 !== '0';
 }
 
 /**
@@ -772,7 +775,7 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
     horizontalLineDarkRatio,
     darkThreshold,
   ).map((line) => line.y);
-  // GRID_BAND_V2 only: try the band-limited candidates first, keep the current
+  // Unless GRID_BAND_V2=0: try the band-limited candidates first, keep the
   // unrestricted attempt as the retry, and rescue inside empty expected bands.
   const bandRowMatch = v2Enabled && isGridBandV2Enabled()
     ? matchRowLinesWithinExpectedBands(

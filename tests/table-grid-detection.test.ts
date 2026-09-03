@@ -475,7 +475,7 @@ describe('table grid detection', () => {
     expect(result.match).toBeNull();
   });
 
-  it('registers the five-point scale under GRID_BAND_V2 and leaves it unregistered without it', async () => {
+  it('registers the five-point scale by default and leaves it unregistered under GRID_BAND_V2=0', async () => {
     const groups = groupsFor(satisfactionTemplate.choiceGroups, [
       'satisfaction.q07', 'satisfaction.q08', 'satisfaction.q09', 'satisfaction.q10',
     ]);
@@ -508,7 +508,7 @@ describe('table grid detection', () => {
     const withoutBand = withGridBandV2(false, () => buildSatisfactionGridDetection(image));
     const withBand = withGridBandV2(true, () => buildSatisfactionGridDetection(image));
 
-    // Without the flag V2 refuses and the V1 fallback lands a row too high --
+    // Under GRID_BAND_V2=0 V2 refuses and the V1 fallback lands a row too high --
     // the same shape the browser raster of p4 produces.
     const withoutBandRegistration = withoutBand.registrations['satisfaction.q07'];
     expect(withoutBandRegistration.status).toBe('candidate');
@@ -694,11 +694,8 @@ function withGridMatchV2<T>(callback: () => T): T {
 
 function withGridBandV2<T>(enabled: boolean, callback: () => T): T {
   const previous = process.env.GRID_BAND_V2;
-  if (enabled) {
-    process.env.GRID_BAND_V2 = '1';
-  } else {
-    delete process.env.GRID_BAND_V2;
-  }
+  // The band path is the default, so "off" has to be stated, not unset.
+  process.env.GRID_BAND_V2 = enabled ? '1' : '0';
   try {
     return callback();
   } finally {
