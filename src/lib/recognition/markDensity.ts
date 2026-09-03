@@ -472,7 +472,9 @@ function photoBinaryRefusalEnabled(): boolean {
 }
 
 function grayClassEnabled(): boolean {
-  return typeof process !== 'undefined' && process.env?.GRAY_CLASS === '1';
+  // Default on since 2026-09-03 (Task/GRAYSCALE_CLASS_2026-09-03.md §5);
+  // GRAY_CLASS=0 restores the uncalibrated subtraction for comparison runs.
+  return typeof process === 'undefined' || process.env?.GRAY_CLASS !== '0';
 }
 
 function classifyInputClass(
@@ -1865,7 +1867,8 @@ export function createPageInkCalibration(
   // Measurement switch (GRAY_MARGIN=fixed|scaled|derived): which margin rule
   // the grayscale class uses. Decided on the real sets, see
   // Task/GRAYSCALE_CLASS_2026-09-03.md.
-  const marginRule = process.env?.GRAY_MARGIN ?? 'derived';
+  // 'scaled' won on set 4 (307/11 against 290/12 fixed and 317/13 derived).
+  const marginRule = process.env?.GRAY_MARGIN ?? 'scaled';
   const margin = marginRule === 'fixed'
     ? GRAY_MARGIN_MAX
     : marginRule === 'scaled'

@@ -115,7 +115,7 @@ function measurementFor(result: ReturnType<typeof runScene>, candidateIndex: num
 
 describe('opt-in grayscale scan class', () => {
   it('keeps the old baseline subtraction when GRAY_CLASS is off', () => {
-    delete process.env.GRAY_CLASS;
+    process.env.GRAY_CLASS = '0';
 
     const result = runScene(false);
 
@@ -149,13 +149,13 @@ describe('opt-in grayscale scan class', () => {
     process.env.GRAY_CLASS = '1';
 
     const bilevelWithFlag = runScene(true);
-    delete process.env.GRAY_CLASS;
+    process.env.GRAY_CLASS = '0';
     const bilevelWithoutFlag = runScene(true);
     expect(bilevelWithFlag).toEqual(bilevelWithoutFlag);
 
     process.env.GRAY_CLASS = '1';
     const photoWithFlag = runScene(false, true);
-    delete process.env.GRAY_CLASS;
+    process.env.GRAY_CLASS = '0';
     const photoWithoutFlag = runScene(false, true);
     expect(photoWithFlag).toEqual(photoWithoutFlag);
   });
