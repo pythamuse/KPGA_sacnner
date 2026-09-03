@@ -15,8 +15,35 @@ type SettlementDraft = Pick<RecognitionDraft, 'basic' | 'cagi' | 'satisfaction'>
   source?: {
     recognitionValueSource?: Record<string, RecognitionValueSource>;
     recognitionContested?: Record<string, boolean>;
+    recognitionEvidence?: Record<string, { refused?: string[] } | undefined>;
   };
 };
+
+/** Reads one review field's value out of a draft, whatever group it sits in. */
+function fieldValue(draft: SettlementDraft, key: string): unknown {
+  const [group, name] = key.split('.');
+  if (group === 'basic') return (draft.basic as Record<string, unknown> | undefined)?.[name];
+  if (group === 'cagi') return (draft.cagi as Record<string, unknown> | undefined)?.[name];
+  return (draft.satisfaction as Record<string, unknown> | undefined)?.[name];
+}
+
+/**
+ * Fields the cancelled-mark veto left empty on purpose, in page order.
+ *
+ * These carry recognition evidence but no value, so they are absent from
+ * `unconfirmedMachineFields` and therefore from `contestedUnconfirmedFields`
+ * and `bulkConfirmableFields` -- which is correct, an empty cell must never be
+ * bulk-confirmable. They still need naming, because a reviewer who sees a blank
+ * cell has no way to know the recognizer withheld a value rather than finding
+ * nothing (Task/CANCEL_VETO_2026-09-03.md).
+ */
+export function cancelRefusedFields(draft: SettlementDraft): string[] {
+  return REVIEW_FIELD_KEYS.filter((key) => {
+    const value = fieldValue(draft, key);
+    if (value !== undefined && value !== null && value !== '') return false;
+    return (draft.source?.recognitionEvidence?.[key]?.refused || []).includes('cancel-crossing');
+  });
+}
 
 /** Whether a source records an explicit reviewer decision. */
 export function isSettledSource(source: RecognitionValueSource | undefined): boolean {

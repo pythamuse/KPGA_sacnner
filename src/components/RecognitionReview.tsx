@@ -7,6 +7,7 @@ import {
 import { ValidationError } from '../lib/validation/types';
 import {
   bulkConfirmableFields,
+  cancelRefusedFields,
   contestedUnconfirmedFields,
   isSettledSource,
   REVIEW_FIELD_KEYS,
@@ -160,6 +161,9 @@ export default function RecognitionReview({
   const unconfirmedMachineFieldSet = new Set(unconfirmedMachineFieldKeys);
   const contestedUnconfirmedFieldKeys = contestedUnconfirmedFields(draft);
   const contestedUnconfirmedFieldSet = new Set(contestedUnconfirmedFieldKeys);
+  // Cells the cancelled-mark veto left blank. They are already in the
+  // attention list (they need a value), but nothing named the cause.
+  const cancelRefusedFieldKeys = cancelRefusedFields(draft);
 
   const buildReviewSource = (
     field: string,
@@ -1479,6 +1483,11 @@ export default function RecognitionReview({
               {contestedUnconfirmedFieldKeys.length > 0 && (
                 <span style={{ color: '#b45309', fontWeight: 700 }}>
                   <strong>경합 {contestedUnconfirmedFieldKeys.length}개</strong> — 표시가 비슷해 잘못 고를 수 있었던 항목입니다. 먼저 확인하세요.
+                </span>
+              )}
+              {cancelRefusedFieldKeys.length > 0 && (
+                <span style={{ color: '#b45309', fontWeight: 700 }}>
+                  <strong>취소 표시로 보류 {cancelRefusedFieldKeys.length}개</strong> — 지운 표시처럼 보여 자동 입력을 하지 않았습니다. 원본을 보고 직접 입력해주세요.
                 </span>
               )}
               <span>

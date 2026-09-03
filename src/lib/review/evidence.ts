@@ -151,7 +151,15 @@ export function describeEvidence(evidence: DecisionEvidence, candidateLabels: st
   const refused = evidence.refused || [];
 
   if (contested) {
-    return `경합 — ${ranking || '두 칸 모두 표시 흔적'}${ranking ? ' (두 칸 모두 표시 흔적)' : ''}`;
+    const contestedText = `경합 — ${ranking || '두 칸 모두 표시 흔적'}${ranking ? ' (두 칸 모두 표시 흔적)' : ''}`;
+    // A contested row can also have been refused outright -- the cancelled-mark
+    // veto does exactly that (Task/CANCEL_VETO_2026-09-03.md). Without this the
+    // reason never reached the screen: the reviewer saw the ranking and a blank
+    // cell, with nothing saying the winning mark looks struck out.
+    const reasons = refused
+      .filter((token) => !token.startsWith('rescued:'))
+      .map((token) => refusalDetail(token, evidence));
+    return reasons.length > 0 ? `${contestedText} · 보류 — ${reasons.join(' · ')}` : contestedText;
   }
 
   if (evidence.outcome === 'refused') {
