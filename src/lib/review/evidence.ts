@@ -95,6 +95,7 @@ export function refusalLabel(token: string): string {
     case 'relative-contrast': return '빈 양식 대비 부족';
     case 'ink-invariant': return '빈 양식보다 옅음(잡음 가능)';
     case 'band-structure': return '줄무늬 구조';
+    case 'cancel-crossing': return '취소 표시로 보이는 교차 획';
     case 'photo-binary-floor':
     case 'photo-binary-refused':
       return '사진 이진 판정 미달';
