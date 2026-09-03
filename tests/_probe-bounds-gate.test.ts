@@ -93,9 +93,12 @@ run('bounds gate probe', () => {
       console.log = (...args: unknown[]) => { lines.push(String(args[0])); };
       let draft: Record<string, unknown> = {};
       try {
+        // NO_PROVENANCE=1: image directories that are scans (e.g. pages the
+        // browser uploaded), not photos -- keep the scan class.
+        const provenance = PHOTO && !process.env.NO_PROVENANCE;
         draft = (await recognizeStudentForms(cagi[i], sat[i], {
-          cagiPhotoProvenance: PHOTO,
-          satisfactionPhotoProvenance: PHOTO,
+          cagiPhotoProvenance: provenance,
+          satisfactionPhotoProvenance: provenance,
         })) as unknown as Record<string, unknown>;
       } finally {
         console.info = realInfo;

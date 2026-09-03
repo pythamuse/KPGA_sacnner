@@ -293,8 +293,10 @@ export async function POST(req: Request) {
     }
 
     // No originals are needed after the review payload is built. Failed cleanup must not hide a valid result.
+    // KEEP_UPLOADS=1 (local measurement only) keeps the browser-rendered pages
+    // on disk so the node harness can re-run the exact raster the product saw.
     try {
-      await deleteUploadBatches(jobId, [
+      if (process.env.KEEP_UPLOADS !== '1') await deleteUploadBatches(jobId, [
         { type: 'cagi', batch: inventory.cagi },
         { type: 'satisfaction', batch: inventory.satisfaction },
       ]);
