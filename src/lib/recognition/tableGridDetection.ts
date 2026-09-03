@@ -628,6 +628,7 @@ function emitGridTrace(
       + ` mode=${trace.mode}`
       + ` detectedRows=${trace.detectedRows}`
       + (trace.expectedYpx ? ` expectedYpx=[${trace.expectedYpx.join(',')}] detectedYpx=[${(trace.detectedYpx || []).join(',')}] rescanYpx=[${(trace.rescanYpx || []).join(',')}]` : '')
+      + (trace.expectedXpx ? ` expectedXpx=[${trace.expectedXpx.join(',')}] detectedXpx=[${(trace.detectedXpx || []).join(',')}] rescanXpx=[${(trace.rescanXpx || []).join(',')}]` : '')
       + ` expectedRows=${trace.expectedRows}`
       + ` matched=${formatIndexes(trace.rowMatch?.matchedExpected)}`
       + ` missing=${formatIndexes(trace.rowMatch?.missingExpected)}`
@@ -672,6 +673,10 @@ interface GridTraceData {
   expectedYpx?: number[];
   detectedYpx?: number[];
   rescanYpx?: number[];
+  /** Instrument: the column analogue (expected boundary x, detected vertical lines, low-threshold rescan). */
+  expectedXpx?: number[];
+  detectedXpx?: number[];
+  rescanXpx?: number[];
   /** GRID_BAND_V2: detected rows the expected-row bands dropped, and the rows the band rescan recovered. */
   outOfBand?: number;
   rescued?: RescuedLine[];
@@ -873,6 +878,17 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
         Math.min(0.15, horizontalLineDarkRatio),
         darkThreshold,
       ).map((line) => Math.round(line.y * 10) / 10),
+      expectedXpx: expectedX.map((v) => Math.round(v * 10) / 10),
+      detectedXpx: verticalLines.map((x) => Math.round(x * 10) / 10),
+      rescanXpx: detectVerticalLines(
+        image,
+        expectedY[0] - yTolerance,
+        expectedY[expectedY.length - 1] + yTolerance,
+        expectedX[0] - xTolerance,
+        expectedX[expectedX.length - 1] + xTolerance,
+        Math.min(0.15, verticalLineDarkRatio),
+        darkThreshold,
+      ).map((line) => Math.round(line.x * 10) / 10),
     } : {}),
     ...(bandRowMatch ? {
       outOfBand: bandRowMatch.outOfBand,
