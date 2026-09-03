@@ -6,6 +6,7 @@ import {
   hasUsableFormBounds,
   resolveFormBoundsStatus,
   loadImageAnalysisData,
+  type CandidateMeasurement,
   type ChoiceGroupResult,
   type DecisionEvidence,
   type ImageAnalysisData,
@@ -759,6 +760,26 @@ function mapRecognizedCandidateValue(field: string, value: number | string): num
   return value;
 }
 
+/**
+ * The `MARK_SHAPE_TRACE` columns, if this run has them. Absent keys stay
+ * absent -- see `CandidateMeasurement` in `markDensity.ts`.
+ */
+function pickShapeTrace(
+  measurement: CandidateMeasurement | undefined,
+): Partial<CandidateMeasurement> {
+  if (!measurement) return {};
+  const trace: Partial<CandidateMeasurement> = {};
+  if (measurement.componentCount !== undefined) trace.componentCount = measurement.componentCount;
+  if (measurement.component2Size !== undefined) trace.component2Size = measurement.component2Size;
+  if (measurement.inkBboxFill !== undefined) trace.inkBboxFill = measurement.inkBboxFill;
+  if (measurement.diagonalPos !== undefined) trace.diagonalPos = measurement.diagonalPos;
+  if (measurement.diagonalNeg !== undefined) trace.diagonalNeg = measurement.diagonalNeg;
+  if (measurement.crossingScore !== undefined) trace.crossingScore = measurement.crossingScore;
+  if (measurement.spanX !== undefined) trace.spanX = measurement.spanX;
+  if (measurement.spanY !== undefined) trace.spanY = measurement.spanY;
+  return trace;
+}
+
 function buildCandidateMeasurements(
   result: ChoiceGroupResult,
   group: ChoiceGroup,
@@ -786,6 +807,12 @@ function buildCandidateMeasurements(
       largestComponentSize: measurement?.largestComponentSize ?? null,
       largestComponentRatio: measurement?.largestComponentRatio ?? null,
       diagonalRatio: measurement?.diagonalRatio ?? null,
+      // The MARK_SHAPE_TRACE fields, carried through only when the scorer
+      // actually produced them. Picked out by name rather than spreading the
+      // whole measurement, so nothing else the scorer ever adds reaches the
+      // exported row by accident; with the variable unset none of these keys
+      // exist and this row serializes exactly as it did before.
+      ...pickShapeTrace(measurement),
       registrationStatus: registration?.status || 'failed' as RegistrationStatus,
       cropSource,
       pageInkRatio: image.pageInkRatio ?? 0,

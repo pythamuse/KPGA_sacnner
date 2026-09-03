@@ -50,6 +50,17 @@ interface MeasuredCandidate {
   alignY?: number | null;
   largestComponentSize?: number | null;
   largestComponentRatio?: number | null;
+  // MARK_SHAPE_TRACE only. Absent on an unarmed run, and the row below then
+  // carries `null` for each -- the same "the scorer did not produce this"
+  // convention every other column here uses.
+  componentCount?: number | null;
+  component2Size?: number | null;
+  inkBboxFill?: number | null;
+  diagonalPos?: number | null;
+  diagonalNeg?: number | null;
+  crossingScore?: number | null;
+  spanX?: number | null;
+  spanY?: number | null;
   autoFilled?: boolean;
 }
 
@@ -84,6 +95,14 @@ run('scorer cell probe', () => {
             alignY: candidate.alignY ?? null,
             largestComponentSize: candidate.largestComponentSize ?? null,
             largestComponentRatio: candidate.largestComponentRatio ?? null,
+            componentCount: candidate.componentCount ?? null,
+            component2Size: candidate.component2Size ?? null,
+            inkBboxFill: candidate.inkBboxFill ?? null,
+            diagonalPos: candidate.diagonalPos ?? null,
+            diagonalNeg: candidate.diagonalNeg ?? null,
+            crossingScore: candidate.crossingScore ?? null,
+            spanX: candidate.spanX ?? null,
+            spanY: candidate.spanY ?? null,
             autoFilled: candidate.autoFilled ?? false,
           });
           cells += 1;

@@ -75,6 +75,22 @@ export interface CandidateMeasurement {
   largestComponentSize: number | null;
   largestComponentRatio: number | null;
   diagonalRatio: number | null;
+  /**
+   * Shape trace. Present ONLY under `MARK_SHAPE_TRACE`; with the variable
+   * unset these keys are absent from the object, so every serialization of a
+   * measurement -- `recognitionMeasurements` included -- is byte-identical to
+   * what this file produced before the trace existed. Read-only observations
+   * of the residual ink map: no scoring, gate or ranking reads them.
+   * See `MarkShapeTrace`.
+   */
+  componentCount?: number;
+  component2Size?: number;
+  inkBboxFill?: number;
+  diagonalPos?: number;
+  diagonalNeg?: number;
+  crossingScore?: number;
+  spanX?: number;
+  spanY?: number;
 }
 
 export interface DecisionEvidence {
@@ -256,7 +272,90 @@ interface TemplateInkShape {
   largestComponentSize: number;
   largestComponentRatio: number;
   diagonalRatio: number;
+  /** Only under `MARK_SHAPE_TRACE`; see `MarkShapeTrace`. */
+  shapeTrace?: MarkShapeTrace;
 }
+
+/**
+ * Instrument for FIELD_TEST §34.7's contested cells: the nine remaining browser
+ * wrong answers all have ink in two boxes, and several of them are a box the
+ * student marked and then CANCELLED with an X before marking another. The
+ * scorer has no measurement that could tell a cancelling stroke pair from a
+ * selecting mark, so this adds one -- as numbers only. Nothing here is read by
+ * `hasStructuredTemplateMark`, by `analyzeChoiceGroup`'s ranking, or by any
+ * gate; the delegator compares the distributions on real rasters and decides
+ * whether a rule is worth writing.
+ *
+ * Every field is computed on the SAME binary ink map the existing shape
+ * features use: `residual[y * width + x] > 0.08`, over the interior window
+ * `1 <= x < width - 1`, `1 <= y < height - 1` (the border ring is dropped so
+ * a 3x3 filter always has all eight neighbours). "Ink pixel" below always
+ * means a sample in that window that is over the threshold, and `activePixels`
+ * is how many there are.
+ */
+interface MarkShapeTrace {
+  /** 8-connected components of ink in the window. */
+  componentCount: number;
+  /** Pixel count of the SECOND largest component; 0 when there is only one. */
+  component2Size: number;
+  /** `activePixels` over the area of the ink's axis-aligned bounding box. */
+  inkBboxFill: number;
+  /**
+   * Share of ink pixels lying on a top-left -> bottom-right stroke: both
+   * `(x-1, y-1)` and `(x+1, y+1)` are ink. Divided by `activePixels`.
+   */
+  diagonalPos: number;
+  /**
+   * Share of ink pixels lying on a top-right -> bottom-left stroke: both
+   * `(x+1, y-1)` and `(x-1, y+1)` are ink. Divided by `activePixels`.
+   */
+  diagonalNeg: number;
+  /**
+   * How much the two diagonal directions occupy the same region, 0..1.
+   *
+   * Computed on the EXCLUSIVE sets -- `P` = pixels that are `diagonalPos` and
+   * not `diagonalNeg`, `N` = the converse -- because a solid blob satisfies
+   * both tests at every interior pixel and would otherwise read as a crossing.
+   * It is the IoU of the two sets' bounding boxes times their count balance:
+   *
+   *     iou = area(bbox(P) & bbox(N)) / area(bbox(P) | bbox(N))
+   *     balance = 2 * min(|P|, |N|) / (|P| + |N|)
+   *     crossingScore = iou * balance
+   *
+   * 0 when either set is empty. Measured on the synthetic fixtures in
+   * `tests/mark-shape-trace.test.ts`:
+   *
+   *     two crossing strokes   1.00   inkBboxFill 0.09
+   *     one stroke             0.00   inkBboxFill 0.05
+   *     a drawn ring           1.00   inkBboxFill 0.16
+   *     a straight-edged fill  0.00   inkBboxFill 1.00
+   *
+   * So it separates a crossing from a SINGLE stroke, which is what §34.7 asks
+   * of it, and nothing more. **It does not separate a crossing from a closed
+   * curve**: a ring's arcs run both ways over the same box, and so does the
+   * ragged boundary of a filled-in circle -- a real filled mark measured
+   * end-to-end read 0.98. Only a fill whose edges are straight and axis-aligned
+   * gives 0, and no hand-drawn mark is that. Read this WITH `inkBboxFill`,
+   * which is what tells a ring or a fill from a pair of strokes; the two
+   * columns are one measurement, not two.
+   */
+  crossingScore: number;
+  /** Ink bounding-box width over the window width (`width - 2`). */
+  spanX: number;
+  /** Ink bounding-box height over the window height (`height - 2`). */
+  spanY: number;
+}
+
+const EMPTY_MARK_SHAPE_TRACE: MarkShapeTrace = {
+  componentCount: 0,
+  component2Size: 0,
+  inkBboxFill: 0,
+  diagonalPos: 0,
+  diagonalNeg: 0,
+  crossingScore: 0,
+  spanX: 0,
+  spanY: 0,
+};
 
 interface ResidualEdges {
   /** Share of the disagreement carried by samples sitting on a printed edge. */
@@ -1995,6 +2094,9 @@ export function analyzeChoiceGroup(
     // and this invariant says nothing about the other box.
     .sort((a, b) => b.residualScore - a.residualScore);
   const candidates: CandidateScore[] = scoredCandidates.map(({ value, score }) => ({ value, score }));
+  // Read once for the group rather than per candidate: it cannot change inside
+  // one call, and the export has to be all-or-nothing anyway.
+  const traceMeasurements = markShapeTraceEnabled();
   const candidateMeasurements: CandidateMeasurement[] = scoredCandidates.map((candidate) => ({
     candidateIndex: candidate.candidateIndex,
     score: candidate.score,
@@ -2006,6 +2108,12 @@ export function analyzeChoiceGroup(
     largestComponentSize: candidate.shape?.largestComponentSize ?? null,
     largestComponentRatio: candidate.shape?.largestComponentRatio ?? null,
     diagonalRatio: candidate.shape?.diagonalRatio ?? null,
+    // Spread, not eight `?? null` lines: without the trace flag the object has
+    // no such own properties and `JSON.stringify` of it is byte-for-byte what
+    // it was before. Gated on the TRACE flag alone and never on
+    // `shapeTraceNeeded`: `MARK_CANCEL_VETO` also computes `shapeTrace`, and the
+    // export must not grow eight columns because a veto was armed.
+    ...(traceMeasurements ? candidate.shape?.shapeTrace ?? {} : {}),
   }));
 
   const best = scoredCandidates[0];
@@ -2270,12 +2378,55 @@ export function analyzeChoiceGroup(
     };
   }
 
-  if (
-    best.score >= highScoreThreshold
+  // The four high-confidence tests, and the rescue route's own precondition,
+  // as named booleans. Both are the same expressions in the same order this
+  // file has always evaluated, over values computed above; naming them changes
+  // no threshold and lets the veto below read "would this group reach an
+  // automatic value?" in one place instead of two.
+  const highConjunctionHolds = best.score >= highScoreThreshold
     && gap >= highGapThreshold
     && hasStructuredMark
-    && (!usesBaseline || relativeContrast >= HIGH_RELATIVE_CONTRAST)
-  ) {
+    && (!usesBaseline || relativeContrast >= HIGH_RELATIVE_CONTRAST);
+  const rescueHolds = usesBaseline
+    && !belowPhotoBinaryFloor
+    && !bestInkInvariantZeroed
+    && rescue !== null
+    && rescue >= RESCUE_THRESHOLD;
+
+  // THE VETO. `MARK_CANCEL_VETO` only; unset, `refusesAsCancelledMark` returns
+  // false without reading anything and this block does not exist.
+  //
+  // It sits at the single point where an automatic value is decided: the two
+  // routes that return `high` are the only ones `detectCheckmarks` fills a
+  // field from, and both of their preconditions are read here, so CAGI,
+  // satisfaction, photo and grayscale-calibrated pages all pass through this
+  // one test with no branch of their own. It is placed BEFORE either return so
+  // a group it refuses cannot be re-confirmed by the other route.
+  //
+  // It only ever takes a value away. No threshold moves, no score or ranking is
+  // touched, nothing below reads it, and the runner-up is NOT promoted -- a
+  // struck-out box says the student rejected THIS box, not that they chose the
+  // next one, and picking a replacement is a separate question with its own
+  // measurement. The row is left unconfirmed and marked contested so the
+  // reviewer answers it.
+  if ((highConjunctionHolds || rescueHolds) && refusesAsCancelledMark(best.shape)) {
+    refused.push('cancel-crossing');
+    // No review suggestion either, for the same reason the band-structure and
+    // photo-binary refusals offer none: the only box this rule has an opinion
+    // about is the one it just refused, and offering it as the default would
+    // point the reviewer straight back at the cancelled mark.
+    return {
+      field: group.field,
+      confidence: 'low',
+      contested: true,
+      candidates,
+      candidateMeasurements,
+      decision: describeDecision(evidence, 'low', refused, true),
+      evidence: evidence.published,
+    };
+  }
+
+  if (highConjunctionHolds) {
     const contested = isContestedHighConfidenceRunnerUp(second);
     return {
       field: group.field,
@@ -2304,13 +2455,7 @@ export function analyzeChoiceGroup(
   // the same reason: its weights read shape and fit, never signal strength, so
   // it is the one route that would still confirm a box the invariant emptied.
   // The floors below and above both refuse a zero score on their own.
-  if (
-    usesBaseline
-    && !belowPhotoBinaryFloor
-    && !bestInkInvariantZeroed
-    && rescue !== null
-    && rescue >= RESCUE_THRESHOLD
-  ) {
+  if (rescueHolds) {
     refused.push(`rescued:${rescue.toFixed(2)}`);
     const contested = isContestedHighConfidenceRunnerUp(second);
     return {
@@ -2784,6 +2929,10 @@ function calculateTemplateInkFeatures(
       largestComponentSize: 0,
       largestComponentRatio: 0,
       diagonalRatio: 0,
+      // Nothing was sampled, so there is no ink map to describe. The zeroed
+      // trace is emitted anyway so an armed run has the same columns on every
+      // candidate rather than a hole the reader has to explain.
+      ...(shapeTraceNeeded() ? { shapeTrace: EMPTY_MARK_SHAPE_TRACE } : {}),
       actualInk: 0,
       baselineInk: 0,
       brightnessOffset: 0,
@@ -3285,6 +3434,145 @@ function analyzeResidualShape(
     largestComponentSize,
     largestComponentRatio: activePixels > 0 ? largestComponentSize / activePixels : 0,
     diagonalRatio: diagonalEdges / Math.max(diagonalEdges + orthogonalEdges, 1),
+    // Computed in its own pass, so the three numbers above still come off
+    // exactly the loops that have always produced them.
+    ...(shapeTraceNeeded()
+      ? { shapeTrace: analyzeShapeTrace(residual, width, height, shapeThreshold) }
+      : {}),
+  };
+}
+
+/**
+ * The `MARK_SHAPE_TRACE` instrument. See `MarkShapeTrace` for what each field
+ * means; this function only counts. It reads `residual` and writes nothing.
+ */
+function analyzeShapeTrace(
+  residual: Float32Array,
+  width: number,
+  height: number,
+  shapeThreshold: number,
+): MarkShapeTrace {
+  const isInk = (x: number, y: number): boolean => (
+    x >= 1
+    && x < width - 1
+    && y >= 1
+    && y < height - 1
+    && residual[y * width + x] > shapeThreshold
+  );
+
+  const visited = new Uint8Array(residual.length);
+  const componentSizes: number[] = [];
+  let activePixels = 0;
+  let minX = width;
+  let maxX = -1;
+  let minY = height;
+  let maxY = -1;
+
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      const start = y * width + x;
+      if (visited[start] || !isInk(x, y)) continue;
+      const queue = [start];
+      visited[start] = 1;
+      let componentSize = 0;
+      while (queue.length > 0) {
+        const current = queue.pop()!;
+        const currentX = current % width;
+        const currentY = (current - currentX) / width;
+        componentSize += 1;
+        activePixels += 1;
+        if (currentX < minX) minX = currentX;
+        if (currentX > maxX) maxX = currentX;
+        if (currentY < minY) minY = currentY;
+        if (currentY > maxY) maxY = currentY;
+        for (let offsetY = -1; offsetY <= 1; offsetY++) {
+          for (let offsetX = -1; offsetX <= 1; offsetX++) {
+            if (offsetX === 0 && offsetY === 0) continue;
+            const neighborX = currentX + offsetX;
+            const neighborY = currentY + offsetY;
+            if (!isInk(neighborX, neighborY)) continue;
+            const neighbor = neighborY * width + neighborX;
+            if (visited[neighbor]) continue;
+            visited[neighbor] = 1;
+            queue.push(neighbor);
+          }
+        }
+      }
+      componentSizes.push(componentSize);
+    }
+  }
+
+  if (activePixels === 0) return { ...EMPTY_MARK_SHAPE_TRACE };
+  componentSizes.sort((a, b) => b - a);
+
+  // The exclusive direction sets. A pixel that answers to both is on neither:
+  // it is the inside of a fill, or the one point where two strokes cross.
+  let posCount = 0;
+  let posMinX = width;
+  let posMaxX = -1;
+  let posMinY = height;
+  let posMaxY = -1;
+  let negCount = 0;
+  let negMinX = width;
+  let negMaxX = -1;
+  let negMinY = height;
+  let negMaxY = -1;
+  let diagonalPosPixels = 0;
+  let diagonalNegPixels = 0;
+
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      if (!isInk(x, y)) continue;
+      const pos = isInk(x - 1, y - 1) && isInk(x + 1, y + 1);
+      const neg = isInk(x + 1, y - 1) && isInk(x - 1, y + 1);
+      if (pos) diagonalPosPixels += 1;
+      if (neg) diagonalNegPixels += 1;
+      if (pos && !neg) {
+        posCount += 1;
+        if (x < posMinX) posMinX = x;
+        if (x > posMaxX) posMaxX = x;
+        if (y < posMinY) posMinY = y;
+        if (y > posMaxY) posMaxY = y;
+      } else if (neg && !pos) {
+        negCount += 1;
+        if (x < negMinX) negMinX = x;
+        if (x > negMaxX) negMaxX = x;
+        if (y < negMinY) negMinY = y;
+        if (y > negMaxY) negMaxY = y;
+      }
+    }
+  }
+
+  let crossingScore = 0;
+  if (posCount > 0 && negCount > 0) {
+    const overlapWidth = Math.max(
+      0,
+      Math.min(posMaxX, negMaxX) - Math.max(posMinX, negMinX) + 1,
+    );
+    const overlapHeight = Math.max(
+      0,
+      Math.min(posMaxY, negMaxY) - Math.max(posMinY, negMinY) + 1,
+    );
+    const intersection = overlapWidth * overlapHeight;
+    const posArea = (posMaxX - posMinX + 1) * (posMaxY - posMinY + 1);
+    const negArea = (negMaxX - negMinX + 1) * (negMaxY - negMinY + 1);
+    const union = posArea + negArea - intersection;
+    const iou = union > 0 ? intersection / union : 0;
+    const balance = (2 * Math.min(posCount, negCount)) / (posCount + negCount);
+    crossingScore = iou * balance;
+  }
+
+  const bboxWidth = maxX - minX + 1;
+  const bboxHeight = maxY - minY + 1;
+  return {
+    componentCount: componentSizes.length,
+    component2Size: componentSizes.length > 1 ? componentSizes[1] : 0,
+    inkBboxFill: activePixels / (bboxWidth * bboxHeight),
+    diagonalPos: diagonalPosPixels / activePixels,
+    diagonalNeg: diagonalNegPixels / activePixels,
+    crossingScore,
+    spanX: bboxWidth / Math.max(width - 2, 1),
+    spanY: bboxHeight / Math.max(height - 2, 1),
   };
 }
 
@@ -3493,6 +3781,100 @@ function alignmentRadiusFloor(): number {
  */
 function baselineDilationEnabled(): boolean {
   return typeof process !== 'undefined' && Boolean(process.env?.MARK_BASELINE_DILATE);
+}
+
+/**
+ * `MARK_SHAPE_TRACE` -- pure instrumentation, read at call time like the flag
+ * above. Off it costs one boolean per cell and adds no key to any object; on it
+ * appends `MarkShapeTrace` to every candidate measurement and changes no score,
+ * no gate and no decision either way.
+ */
+function markShapeTraceEnabled(): boolean {
+  return typeof process !== 'undefined' && Boolean(process.env?.MARK_SHAPE_TRACE);
+}
+
+/**
+ * The cancelled-mark veto's two defaults, overridable from the shell as
+ * `MARK_CANCEL_CROSSING` and `MARK_CANCEL_FILL` so the pair can be swept on
+ * real rasters without a rebuild. They are NOT gate constants: nothing reads
+ * them unless `MARK_CANCEL_VETO` is set, and no existing threshold moves.
+ *
+ * The crossing default is 0.7 because 0.6 refuses too much. Swept on the real
+ * rasters (Task/CANCEL_VETO_2026-09-03.md): over scan sets 1-3, 0.6 removes 5
+ * wrong values while blanking 47 correct ones -- 10.4 review cells per wrong
+ * removed, past the limit of 10 in CLAUDE.md 5.4 -- while 0.7 removes 3 and
+ * blanks 20 (7.7:1). At 0.7 the four photo sets lose one correct cell with
+ * wrong still 0, the grayscale set drops 2 wrong at 6:1, and the browser run
+ * goes from 9 wrong to 6. Raising the fill default instead removes no wrong
+ * value at any crossing, so it stays where it is.
+ */
+const CANCEL_CROSSING_DEFAULT = 0.7;
+const CANCEL_FILL_DEFAULT = 0.22;
+
+/**
+ * `MARK_CANCEL_VETO` -- see `refusesAsCancelledMark`. Read at call time like the
+ * flags above, but DEFAULT ON, because the veto was measured and merged
+ * (Task/CANCEL_VETO_2026-09-03.md): it took the browser run from 9 wrong values
+ * to 6 and cannot add one, since it only ever withholds. `MARK_CANCEL_VETO=0`
+ * restores the previous behaviour for a comparison run -- note the convention
+ * here is the grid matcher's (`!== '0'`), not the opt-in instruments' truthy
+ * test, so `=0` really does disable it.
+ *
+ * Disabled, it is not merely neutral: `shapeTraceNeeded` is false, so the trace
+ * is never computed and no object gains a key.
+ */
+function cancelVetoEnabled(): boolean {
+  return typeof process === 'undefined' || process.env?.MARK_CANCEL_VETO !== '0';
+}
+
+/**
+ * Whether `analyzeResidualShape` has to compute the shape trace.
+ *
+ * The veto decides on `crossingScore` and `inkBboxFill`, so it needs those
+ * numbers with `MARK_SHAPE_TRACE` unset. Only the trace flag ever copies them
+ * onto a `CandidateMeasurement`, which is what keeps the default export
+ * byte-identical whichever of the two is armed.
+ */
+function shapeTraceNeeded(): boolean {
+  return markShapeTraceEnabled() || cancelVetoEnabled();
+}
+
+/** One veto threshold, read from the environment, falling back on a bad value. */
+function cancelThreshold(name: string, fallback: number): number {
+  if (typeof process === 'undefined') return fallback;
+  const raw = process.env?.[name];
+  if (raw === undefined || raw === '') return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+/**
+ * Does the winning box look like a mark the student CANCELLED rather than one
+ * they chose?
+ *
+ * FIELD_TEST §34.7: the remaining browser wrong answers are cells with ink in
+ * two boxes, several of them a box marked and then struck out with an X before
+ * another was marked. On the browser raster the wrong winners' `crossingScore`
+ * had median 0.47 against 0.00 for the correct ones, and the sweep this rule
+ * comes from put `crossing >= 0.6 && fill >= 0.22` at 4 of the 9 wrong values
+ * removed for 14 correct ones lost.
+ *
+ * Both halves are required and neither is decoration. `crossingScore` alone
+ * does not separate a crossing from a closed curve -- a ring reads 1.00 and so
+ * does the ragged boundary of a filled-in circle (`MarkShapeTrace`, and §2.1 of
+ * the shape report). `inkBboxFill` is the half that tells two thin strokes from
+ * a fill, which is why the rule is a conjunction and not a disjunction.
+ *
+ * It can only ever TAKE a value away: it returns a boolean, reads no other
+ * candidate, and the one place that calls it refuses the group outright rather
+ * than promoting anybody.
+ */
+function refusesAsCancelledMark(shape: TemplateInkShape | undefined): boolean {
+  if (!cancelVetoEnabled()) return false;
+  const trace = shape?.shapeTrace;
+  if (!trace) return false;
+  return trace.crossingScore >= cancelThreshold('MARK_CANCEL_CROSSING', CANCEL_CROSSING_DEFAULT)
+    && trace.inkBboxFill >= cancelThreshold('MARK_CANCEL_FILL', CANCEL_FILL_DEFAULT);
 }
 
 function dilatedBaselineInk(
