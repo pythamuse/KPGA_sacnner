@@ -13,10 +13,17 @@ import type { StackOrder } from '../recognition/batchMatcher';
  * `statelessRecognizeClient.ts`.
  *
  * The flag is read once, at module scope. `NEXT_PUBLIC_*` is substituted at
- * build time, so server render and client hydration see the same literal and
- * flag-off keeps today's code path untouched.
+ * build time, so server render and client hydration see the same literal.
+ *
+ * DEFAULT ON since 2026-09-03, when the round was judged: the per-student path
+ * reproduced the batch path's values, sources and contested flags for all 19
+ * students with no cell differing, and it makes no Blob call at all
+ * (Task/STATELESS_RECOGNITION_PLAN_2026-09-03.md, the round B verdict).
+ * `NEXT_PUBLIC_STATELESS_RECOGNIZE=0` puts the upload-then-batch path back --
+ * but because the value is inlined at build time, changing it needs a rebuild,
+ * not just an environment edit on a running deployment.
  */
-export const STATELESS_RECOGNIZE_ENABLED = process.env.NEXT_PUBLIC_STATELESS_RECOGNIZE === '1';
+export const STATELESS_RECOGNIZE_ENABLED = process.env.NEXT_PUBLIC_STATELESS_RECOGNIZE !== '0';
 
 /** A rendered page held in memory instead of uploaded to Blob. */
 export interface StatelessPage {

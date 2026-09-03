@@ -54,7 +54,7 @@ export type UploadMode = 'sequential' | 'batch';
 /**
  * The rendered pages of a batch, held in memory instead of uploaded
  * (Task/STATELESS_RECOGNITION_PLAN_2026-09-03.md §3). Only ever non-null with
- * `NEXT_PUBLIC_STATELESS_RECOGNIZE=1`; the flag-off path leaves it untouched
+ * the stateless path (default on); `NEXT_PUBLIC_STATELESS_RECOGNIZE=0` leaves it untouched
  * and keeps uploading to `/api/upload`.
  */
 export interface StatelessBatchPages {
