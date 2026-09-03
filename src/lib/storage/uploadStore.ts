@@ -20,6 +20,14 @@ const LOCAL_TEST_SCOPE =
     : '';
 
 const STORAGE_PREFIX = 'kpga-scan/jobs';
+// Instrument only (Task/STATELESS_RECOGNITION_PLAN_2026-09-03.md §4 step 1):
+// BLOB_OPS_TRACE=1 logs every Vercel Blob call so a batch's advanced-operation
+// count (put/list/del) can be measured instead of estimated.
+function traceBlobOp(op: 'put' | 'list' | 'del', detail: string): void {
+  if (process.env.BLOB_OPS_TRACE !== '1') return;
+  console.info(`[blob-op] op=${op} ${detail}`);
+}
+
 const LOCAL_UPLOAD_ROOT = path.join(
   os.tmpdir(),
   'kpga-scanner',
@@ -132,6 +140,7 @@ export async function storeUploadPage(input: StoreUploadPageInput) {
   }
 
   try {
+    traceBlobOp('put', `pathname=${pathname}`);
     const result = await put(pathname, input.data, {
       access: 'private',
       allowOverwrite: true,
@@ -188,6 +197,7 @@ export async function storeUploadPageMeta(input: StoreUploadPageMetaInput) {
   }
 
   try {
+    traceBlobOp('put', `pathname=${pathname}`);
     const result = await put(pathname, data, {
       access: 'private',
       allowOverwrite: true,
@@ -350,8 +360,10 @@ async function deleteBlobPrefix(prefix: string) {
   try {
     let cursor: string | undefined;
     do {
+      traceBlobOp('list', `prefix=${prefix}`);
       const result = await list({ prefix, cursor, limit: 1000 });
       if (result.blobs.length > 0) {
+        traceBlobOp('del', `count=${result.blobs.length}`);
         await del(result.blobs.map((blob) => blob.pathname));
       }
       cursor = result.cursor;
