@@ -173,8 +173,8 @@ node -e "const j=require('./local-scans/answer-key.json');j.pages.forEach(p=>Obj
 
 **세트 4는 회색조 600dpi**(`BitsPerComponent 8` · `DeviceGray` · JPEG)이고, 세트 1~3은
 1비트 CCITTFax다. 원본은 `C:/Users/night/Desktop/` 에 있고 사본은 스크래치패드에 둔다.
-**세트 4는 아직 판정에 쓸 수 없다** — 빈 양식 기준 자산이 1비트 계열이라 차분이 성립하지
-않는다(FIELD_TEST §32). 회색조 빈 양식을 받은 뒤에야 유효하다.
+**세트 4는 2026-09-03부터 회색조 계급의 판정 표본이다**(계급 보정으로 차분이 성립, 기준선 307/11). 1비트 세트 1~3의
+`WRONG=0` 판정 표본을 대신하지는 않는다.
 
 모두 `C:/Users/night/Desktop/바이브코딩/` 에 있다. 같은 학생 19명을 세 번 스캔한 것이고,
 선별검사는 세 세트 모두 학생 순서 그대로다.
@@ -198,7 +198,7 @@ REAL_SCAN_SAT_REVERSED=1   REAL_SCAN_CAGI_PDF=".../선별검사 샘플3반복.pd
 세트 1   CORRECT 361  WRONG 5  BLANK 71   OFF 30
 세트 2   CORRECT 346  WRONG 8  BLANK 83   OFF 21
 세트 3   CORRECT 344  WRONG 3  BLANK 90   OFF 12
-세트 4   CORRECT 232  WRONG 11 BLANK 194  OFF 70   (회색조, 판정 표본 아님)
+세트 4   CORRECT 307  WRONG 11 BLANK 119  OFF 70   (회색조, 계급 보정 후 — Task/GRAYSCALE_CLASS_2026-09-03.md)
 사진     OLD 61/0 · Set1 34/0 · Set2 42/0 · Set3 32/0
 ```
 
@@ -255,7 +255,7 @@ REAL_SCAN_SAT_REVERSED=1   REAL_SCAN_CAGI_PDF=".../선별검사 샘플3반복.pd
 게이트까지 포함한다.** B-11은 2026-09-03에 병합됐다([Task/B11_SETTLEMENT_GATE_2026-09-03.md](Task/B11_SETTLEMENT_GATE_2026-09-03.md)) —
 그 결과 "확인 필요 합계"에 자동값이 포함되므로 §5.2의 기준선 135는 **재설정 대상**이다. B-12·B-13도 같은 날 병합됐다([Task/B12_B13_VISIBILITY_2026-09-03.md](Task/B12_B13_VISIBILITY_2026-09-03.md)). B-1도 병합됐다([Task/B1_FRAME_BOUNDS_GATE_2026-09-03.md](Task/B1_FRAME_BOUNDS_GATE_2026-09-03.md)): 대체 경계는
 자동값을 못 만든다. **사진 4세트 기준선은 `59/0 · 34/0 · 36/0 · 24/0`(오답 0)**. B-7+B-2도 병합됐다([Task/B7_EVIDENCE_2026-09-03.md](Task/B7_EVIDENCE_2026-09-03.md)). B-3·B-4·B-9도 병합됐다(V2 선 대응 기본값 ON, [Task/B3_GRID_FIT_MEASUREMENT_2026-09-03.md](Task/B3_GRID_FIT_MEASUREMENT_2026-09-03.md) §6).
-§D 6순위(B-5·B-8)는 사용자가 미룬 회색조 재보정과 같은 설계라 **사용자 결정 뒤에** 착수한다. 앙상블 거부권은 계측으로
+§D 6순위(B-5·B-8)도 2026-09-03에 처리했다 — B-5는 회색조 계급 보정으로 병합, B-8은 계측 결과 선택지 표에서 실현되지 않음([Task/GRAYSCALE_CLASS_2026-09-03.md](Task/GRAYSCALE_CLASS_2026-09-03.md)). 앙상블 거부권은 계측으로
 기각됐다(Docs/17 §3.15). 남은 사용자 결정 5건은 Docs/17 §5, 남은 브라우저 오답 9건의 실체는 FIELD_TEST §34.1.
 
 ### 5.1 판정자는 둘이고 역할이 다르다
@@ -356,7 +356,9 @@ node scripts/compare-runs.cjs baseline.log candidate.log
   안 움직였다([Task/CAPTURE_GUIDANCE_2026-08-27.md](Task/CAPTURE_GUIDANCE_2026-08-27.md) §16.13).
   반면 **종이 경계 검출은 지렛대였다**(§17.1, 오답 11→1) — 실패가 빈칸이 아니라 **값을 만드는**
   종류였기 때문이다. 어떤 검출 실패를 고칠지는 그 실패가 무엇을 생산하는지로 고른다
-- **현 채점기에서 회색조 스캔은 회귀다**(§17.2: 355→223 — 단 회색조 빈 양식으로 기준선을 바꿔도 악화했다, FIELD_TEST §32.7; 둘을 함께 읽는다). 채점기가 1비트의 획 부풀림에 맞춰져
+- **회색조 스캔의 회귀(355→223)는 인쇄 구조 비율 문제였다** — 회색조 기기의 인쇄 구조가 1비트 빈 양식 자산의 0.41~0.57배라
+  차분이 표시 잉크를 깎았다. 2026-09-03 계급 보정(기준선을 페이지 비율로 스케일, `GRAY_CLASS`)으로 307/11
+  ([Task/GRAYSCALE_CLASS_2026-09-03.md](Task/GRAYSCALE_CLASS_2026-09-03.md)). 빈 양식 자산 교체는 여전히 답이 아니다(§32.7). 채점기가 1비트의 획 부풀림에 맞춰져
   있어 점수가 ~절반이 된다. 재보정 전까지 "회색조로 스캔하라"는 안내를 내보내지 않는다
 - **절대 밝기 문턱은 다른 기기·계조에서 세 곳이 무너졌다** — 격자 선(§16.7), 종이 경계(§17.1,
   수정됨), 수평선 대응(§17.3, 이쪽은 문턱이 아니라 대응 로직). 새 상수를 절대값으로 두지 않는다
