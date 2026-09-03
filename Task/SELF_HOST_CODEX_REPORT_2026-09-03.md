@@ -1,4 +1,21 @@
-# 제3자 런타임 파일 자체 호스팅 보고서
+# 제3자 런타임 파일 자체 호스팅 — pdf.js·OpenCV·kor OCR 모델을 앱 출처에서 (2026-09-03)
+
+사용자 승인(2026-09-03; "자체 호스팅 = 같은 앱 배포에서 라이브러리 파일까지 제공, 새 인프라 없음"). Docs/17 §3.17.
+코덱스(테라-최대) 위임, 브랜치 `codex-self-host`, 커밋 `61ef803`, 병합 `a8dfef4`. 파일은 위임자가 고정 URL에서 내려받아
+SHA-256을 기록한 뒤 체크아웃에 넣어 줬다(`public/vendor/README.md`). §0은 위임자의 판정, 그 뒤는 코덱스 보고서 원문.
+
+## 0. 판정 — 병합
+
+- 값 경로 무변경(인식 코드는 kor 워커의 `langPath`·`gzip` 옵션만). 메인 시험 468/0, tsc 통과.
+- 코드에서 외부 출처 문자열 0(`cdnjs`·`unpkg`·`docs.opencv.org`), CSP `script-src 'self' …`, `connect-src 'self' data: blob:`.
+  `'unsafe-eval'`은 OpenCV emscripten 때문에 유지.
+- **dev 서버(브라우저)**: pdf.js가 `/vendor/pdfjs/6.1.200/pdf.min.mjs`로 로드, 리소스 타이밍에 외부 요청 0, HTML에 cdnjs 없음.
+- **프로덕션 빌드**: 아래 "§0.1"에 기록(빌드·`next start`·세트 1 업로드·서버 로그).
+- 저장소 +13MB(`public/vendor`) + kor 모델 15MB(`src/lib/recognition/assets`, 번들 추적).
+- 남는 위험: 라이브러리 갱신은 수동(README의 절차). Vercel 정적 전송량이 첫 방문당 ≈12MB 늘지만 브라우저 캐시 뒤에는 0 —
+  사용자가 확인한 Vercel 병목은 Blob 연산이라 이 변경과 무관.
+
+# (코덱스 보고서 원문) 제3자 런타임 파일 자체 호스팅 보고서
 
 - 브랜치: `codex-self-host`
 - 작업 기준일: 2026-09-03
