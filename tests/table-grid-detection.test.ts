@@ -12,9 +12,12 @@ import {
   detectVerticalLines,
   getAutomaticGridMissingKind,
   isAutomaticGridEligible,
+  limitLinesToExpectedBands,
+  matchRowLinesWithinExpectedBands,
   matchTemplateLinePattern,
   type FieldRegistration,
 } from '../src/lib/recognition/tableGridDetection';
+import { detectHorizontalLines } from '../src/lib/recognition/tableRowDetection';
 import { cagiTemplate, satisfactionTemplate, type ChoiceGroup } from '../src/lib/recognition/roiTemplates';
 
 const fixtureDir = path.join(process.cwd(), 'tmp', 'test-table-grid-detection');
@@ -388,7 +391,164 @@ describe('table grid detection', () => {
     expect(scaleTolerances.maxUniformCandidateOffsetY).toBeCloseTo(0.0135, 5);
     expect(scaleTolerances.maxAnchorCandidateDeviationY).toBeCloseTo(0.0165, 5);
   });
+
+  // The three fixtures below reproduce the browser raster of set 1 p4: seven
+  // spurious rules above the five-point table, three real row boundaries found
+  // at the table's 0.2 dark ratio, and the two boundaries at 942/975 that only
+  // appear below it. Measured positions: Task/FIELD_TEST_2026-08-21.md.
+  it('limits V2 row candidates to a band around each expected boundary', () => {
+    const detected = [842, 861, 865, 873.5, 884.5, 891, 895, 916.5, 1012.5, 1048.5, 1062.5, 1139];
+
+    const band = limitLinesToExpectedBands(detected, p4ExpectedRows);
+
+    // 0.75 x the 32.5px minimum pitch.
+    expect(band?.band).toBeCloseTo(24.375, 6);
+    expect(band?.lines).toEqual([891, 895, 916.5, 1012.5, 1048.5, 1062.5]);
+    expect(band?.outOfBand).toBe(6);
+    expect(band?.missingExpected).toEqual([1, 2]);
+  });
+
+  it('rescues the two faint boundaries inside their own bands and matches all five rows', () => {
+    const image = makeRowProbeImage([
+      ...p4SpuriousRows.map((y) => ({ y })),
+      { y: 916 },
+      { y: 1012 },
+      { y: 1048 },
+      { y: 951, coverage: 0.15 },
+      { y: 989, coverage: 0.15 },
+    ]);
+    const detected = detectHorizontalLines(
+      image,
+      p4RowSearch.top,
+      p4RowSearch.bottom,
+      p4RowSearch.left,
+      p4RowSearch.right,
+      0.2,
+      200,
+    ).map((line) => line.y);
+
+    expect(detected).toEqual([...p4SpuriousRows, 916, 1012, 1048]);
+    // Flag off: the same detections give V2 nothing, because two of five
+    // expected boundaries are absent and the budget is one.
+    expect(withGridMatchV2(() => matchTemplateLinePattern(detected, p4ExpectedRows))).toBeNull();
+
+    const result = withGridMatchV2(() => matchRowLinesWithinExpectedBands(
+      image,
+      detected,
+      p4ExpectedRows,
+      p4RowSearch,
+      0.2,
+      200,
+    ));
+
+    expect(result.outOfBand).toBe(5);
+    expect(result.rescued.map((line) => [line.expectedIndex, line.y])).toEqual([[1, 951], [2, 989]]);
+    expect(result.rescued.every((line) => Math.abs(line.darkRatio - 0.12) < 1e-9)).toBe(true);
+    expect(result.match?.matchedExpected).toEqual([0, 1, 2, 3, 4]);
+    expect(result.match?.missingExpected).toEqual([]);
+    expect(result.match?.lines).toEqual([916, 951, 989, 1012, 1048]);
+  });
+
+  it('rescues nothing when the bands hold no ink at all', () => {
+    const image = makeRowProbeImage(p4SpuriousRows.map((y) => ({ y })));
+    const detected = detectHorizontalLines(
+      image,
+      p4RowSearch.top,
+      p4RowSearch.bottom,
+      p4RowSearch.left,
+      p4RowSearch.right,
+      0.2,
+      200,
+    ).map((line) => line.y);
+
+    const result = withGridMatchV2(() => matchRowLinesWithinExpectedBands(
+      image,
+      detected,
+      p4ExpectedRows,
+      p4RowSearch,
+      0.2,
+      200,
+    ));
+
+    expect(detected).toEqual(p4SpuriousRows);
+    expect(result.rescued).toEqual([]);
+    expect(result.match).toBeNull();
+  });
+
+  it('registers the five-point scale by default and leaves it unregistered under GRID_BAND_V2=0', async () => {
+    const groups = groupsFor(satisfactionTemplate.choiceGroups, [
+      'satisfaction.q07', 'satisfaction.q08', 'satisfaction.q09', 'satisfaction.q10',
+    ]);
+    const rowLines = toPagePixels(
+      deriveBoundaries(groups.map((group) => average(group.candidates.map(
+        (candidate) => candidate.rect.y + candidate.rect.height / 2,
+      )))),
+      page.top,
+      page.bottom,
+    );
+    const pitch = Math.min(...rowLines.slice(1).map((line, index) => line - rowLines[index]));
+    // satisfaction.scale searches 0.1 of the page height around the table.
+    const searchTolerance = Math.max(12, Math.round((page.bottom - page.top) * 0.1));
+    const bandPx = pitch * 0.75;
+    const room = searchTolerance - bandPx - 8;
+    const spurious = Array.from({ length: 7 }, (_, index) => Math.round(
+      rowLines[0] - bandPx - 4 - (room * index) / 6,
+    ));
+    expect(room).toBeGreaterThan(24);
+
+    const filePath = path.join(fixtureDir, 'satisfaction-scale-faint-inner-rows.png');
+    await writeGridFixture(filePath, groups, {
+      faintHorizontalLineIndexes: [1, 2],
+      faintHorizontalLineWidthRatio: 0.12,
+      extraHorizontalLineYs: spurious,
+      omitPageFrame: true,
+    });
+    const image = await loadWithFixtureBounds(filePath);
+
+    const withoutBand = withGridBandV2(false, () => buildSatisfactionGridDetection(image));
+    const withBand = withGridBandV2(true, () => buildSatisfactionGridDetection(image));
+
+    // Under GRID_BAND_V2=0 V2 refuses and the V1 fallback lands a row too high --
+    // the same shape the browser raster of p4 produces.
+    const withoutBandRegistration = withoutBand.registrations['satisfaction.q07'];
+    expect(withoutBandRegistration.status).toBe('candidate');
+    expect(withoutBandRegistration.diagnostic).toContain('V2 line match refused');
+    expect(isAutomaticGridEligible(withoutBandRegistration)).toBe(false);
+    expect(withoutBandRegistration.gapDeviation?.rows).toBeGreaterThan(0.1);
+
+    const withBandRegistration = withBand.registrations['satisfaction.q07'];
+    expect(withBandRegistration).toMatchObject({
+      tableId: 'satisfaction.scale',
+      source: 'grid',
+      status: 'verified',
+    });
+    expect(withBandRegistration.missingExpected?.rows ?? []).toEqual([]);
+    expect(withBandRegistration.gapDeviation?.rows).toBeLessThan(0.01);
+    expect(isAutomaticGridEligible(withBandRegistration)).toBe(true);
+    expect(withBand.overrides['satisfaction.q07']).toHaveLength(5);
+  });
 });
+
+const p4ExpectedRows = [909.5, 942, 975.1, 1008.2, 1040.8];
+const p4SpuriousRows = [842, 861, 865, 873, 884, 891, 895];
+const p4RowSearch = { top: 830, bottom: 1100, left: 0, right: 200 };
+
+function makeRowProbeImage(
+  rows: Array<{ y: number; coverage?: number }>,
+  width = 200,
+  height = 1200,
+): { width: number; height: number; pixels: Buffer } {
+  const pixels = Buffer.alloc(width * height, 255);
+  for (const row of rows) {
+    const span = Math.round(width * (row.coverage ?? 1));
+    for (let y = row.y - 1; y <= row.y + 1; y++) {
+      for (let x = 0; x < span; x++) {
+        pixels[y * width + x] = 0;
+      }
+    }
+  }
+  return { width, height, pixels };
+}
 
 function makeRegisteredCagiImage(): ImageAnalysisData {
   const width = 1000;
@@ -439,6 +599,11 @@ async function writeGridFixture(
     horizontalLineOffsets?: Record<number, number>;
     verticalLineOffsets?: Record<number, number>;
     horizontalLineYs?: number[];
+    /** Rows drawn across only part of the table span: dark enough for the band rescue ratio, not for the table's own. */
+    faintHorizontalLineIndexes?: number[];
+    faintHorizontalLineWidthRatio?: number;
+    /** Rules belonging to no expected boundary, e.g. the text underlines above a table. */
+    extraHorizontalLineYs?: number[];
     verticalLineXs?: number[];
     verticalLinePadding?: number;
     omitPageFrame?: boolean;
@@ -464,8 +629,14 @@ async function writeGridFixture(
     ...selectedHorizontalIndexes.map((index) => {
       const y = options.horizontalLineYs?.[index]
         || yLines[index] + (options.horizontalLineOffsets?.[index] || 0);
-      return `<line x1="${xLines[0]}" y1="${y}" x2="${xLines[xLines.length - 1]}" y2="${y}" stroke="#000" stroke-width="4"/>`;
+      const right = options.faintHorizontalLineIndexes?.includes(index)
+        ? xLines[0] + (xLines[xLines.length - 1] - xLines[0]) * (options.faintHorizontalLineWidthRatio ?? 0.12)
+        : xLines[xLines.length - 1];
+      return `<line x1="${xLines[0]}" y1="${y}" x2="${right}" y2="${y}" stroke="#000" stroke-width="4"/>`;
     }),
+    ...(options.extraHorizontalLineYs || []).map((y) => (
+      `<line x1="${xLines[0]}" y1="${y}" x2="${xLines[xLines.length - 1]}" y2="${y}" stroke="#000" stroke-width="4"/>`
+    )),
   ].join('\n');
   const svg = `
     <svg xmlns="http://www.w3.org/2000/svg" width="${page.width}" height="${page.height}">
@@ -517,6 +688,21 @@ function withGridMatchV2<T>(callback: () => T): T {
       delete process.env.GRID_MATCH_V2;
     } else {
       process.env.GRID_MATCH_V2 = previous;
+    }
+  }
+}
+
+function withGridBandV2<T>(enabled: boolean, callback: () => T): T {
+  const previous = process.env.GRID_BAND_V2;
+  // The band path is the default, so "off" has to be stated, not unset.
+  process.env.GRID_BAND_V2 = enabled ? '1' : '0';
+  try {
+    return callback();
+  } finally {
+    if (previous === undefined) {
+      delete process.env.GRID_BAND_V2;
+    } else {
+      process.env.GRID_BAND_V2 = previous;
     }
   }
 }
