@@ -379,6 +379,9 @@ node scripts/compare-runs.cjs baseline.log candidate.log
   자동 정답 309→174, 정렬 반경 ±2는 브라우저 오답 −2이지만 스캔 4세트 오답 +1·+1·+3·+2 — 둘 다 기각([Task/SCORER_NOISE_2026-09-03.md](Task/SCORER_NOISE_2026-09-03.md)).
   두 다이얼은 코드에 off로 남아 있다(`MARK_BASELINE_DILATE`, `MARK_ALIGN_RADIUS`); 후보별 점수 프로브 `tests/_probe-scorer-cells.test.ts` +
   스크래치패드 `scorer-separation.py`가 표시 판정 단계의 판정 도구다(브라우저 오답 9를 점수 게이트만으로 재현)
+- **배율 2.0은 현 채점기로는 답이 아니다.** 단독 전환은 노드 4세트 오답 +6·+2·+9·+1, 브라우저 오답 9→14; 점 샘플링 앨리어싱을 없애는 발자국 평균
+  (`MARK_SAMPLE_AVERAGE`, 브랜치 `sample-avg`)을 얹어도 오답 +7·+1·+5·+1이고, 그 변형은 1.5에서도 세트 3 오답 +3·사진 Set1 34→25라 기각
+  ([Task/RASTER20_CALIBRATION_2026-09-03.md](Task/RASTER20_CALIBRATION_2026-09-03.md)). 배율은 채점기 전체 재보정과 한 묶음일 때만 다시 연다
 - **브라우저 래스터의 JPEG 품질·PNG는 지렛대가 아니다**(1비트 원본이라 세 인코딩이 동일 결과). **배율 2.0은 신호를 키우지만 게이트 재보정 없이는
   오답 +3**([Task/RASTER_LADDER_2026-09-03.md](Task/RASTER_LADDER_2026-09-03.md)) — 배율 변경은 업로드 계약·노드 하네스·기준선·게이트가 한 묶음인
   사용자 결정 항목이다. Chrome 래스터를 지정 배율로 만드는 도구는 스크래치패드 `raster-probe/`(정적 서버 + `probe.html`, dev의 `/api/upload`로 저장)
