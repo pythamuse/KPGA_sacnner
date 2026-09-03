@@ -3813,11 +3813,18 @@ const CANCEL_FILL_DEFAULT = 0.22;
 
 /**
  * `MARK_CANCEL_VETO` -- see `refusesAsCancelledMark`. Read at call time like the
- * flags above. Off, it is not merely neutral: `shapeTraceNeeded` is false, so
- * the trace is never computed and no object gains a key.
+ * flags above, but DEFAULT ON, because the veto was measured and merged
+ * (Task/CANCEL_VETO_2026-09-03.md): it took the browser run from 9 wrong values
+ * to 6 and cannot add one, since it only ever withholds. `MARK_CANCEL_VETO=0`
+ * restores the previous behaviour for a comparison run -- note the convention
+ * here is the grid matcher's (`!== '0'`), not the opt-in instruments' truthy
+ * test, so `=0` really does disable it.
+ *
+ * Disabled, it is not merely neutral: `shapeTraceNeeded` is false, so the trace
+ * is never computed and no object gains a key.
  */
 function cancelVetoEnabled(): boolean {
-  return typeof process !== 'undefined' && Boolean(process.env?.MARK_CANCEL_VETO);
+  return typeof process === 'undefined' || process.env?.MARK_CANCEL_VETO !== '0';
 }
 
 /**

@@ -170,7 +170,7 @@ function measure(shapes: ShapeName[], veto: CancelVetoSettings) {
   ));
 }
 
-const OFF: CancelVetoSettings = {};
+const OFF: CancelVetoSettings = { MARK_CANCEL_VETO: '0' };
 const ON: CancelVetoSettings = { MARK_CANCEL_VETO: '1' };
 
 /** The eight columns the trace flag, and only the trace flag, may add. */
@@ -196,8 +196,8 @@ describe('MARK_CANCEL_VETO', () => {
       .digest('hex');
 
     /**
-     * Armed, the veto needs `crossingScore` and `inkBboxFill`, so the shape
-     * trace IS computed with `MARK_SHAPE_TRACE` unset -- and nothing copies it
+     * Armed (the default), the veto needs `crossingScore` and `inkBboxFill`, so
+     * the shape trace IS computed with `MARK_SHAPE_TRACE` unset -- and nothing copies it
      * onto a `CandidateMeasurement`. If these two ever differ, arming a veto
      * started changing an export and the flag is no longer free to measure.
      */
@@ -215,7 +215,7 @@ describe('MARK_CANCEL_VETO', () => {
     });
   });
 
-  describe('with the variable unset', () => {
+  describe('with the flag disabled', () => {
     it('fills a struck-out box exactly as it did before', () => {
       const result = measure(FIXTURE, OFF);
       expect(result.value).toBe(1);
@@ -224,7 +224,7 @@ describe('MARK_CANCEL_VETO', () => {
     });
   });
 
-  describe('with the variable set', () => {
+  describe('with the flag at its default', () => {
     it('refuses the automatic value on a struck-out box', () => {
       const result = measure(FIXTURE, ON);
       expect(result.value).toBeUndefined();

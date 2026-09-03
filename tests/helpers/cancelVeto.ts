@@ -11,8 +11,9 @@ import { afterEach, beforeEach } from 'vitest';
  * produces has to state which side of the flag it is on rather than inherit
  * whatever the shell had.
  *
- * `undefined` for a variable means "not set at all", which is the shipped
- * configuration and is restored faithfully.
+ * `undefined` for a variable means "not set at all". Since the veto is default
+ * on, unset is the ARMED configuration; `MARK_CANCEL_VETO: '0'` is the disabled
+ * one. Either way the previous environment is restored faithfully.
  */
 export type CancelVetoSettings = {
   MARK_CANCEL_VETO?: string;
@@ -52,7 +53,7 @@ export function withCancelVeto<T>(settings: CancelVetoSettings, body: () => T): 
 }
 
 /**
- * Pins the calling suite to the shipped path, with the veto off.
+ * Pins the calling suite to the pre-veto path (`MARK_CANCEL_VETO=0`).
  *
  * For suites whose fixtures are SYNTHETIC marks. `crossingScore` cannot
  * separate a crossing from a closed curve (`MarkShapeTrace`, and §2.1 of the
@@ -70,6 +71,8 @@ export function pinCancelVetoOff(): void {
       previous[key] = process.env[key];
       delete process.env[key];
     }
+    // The veto is default on, so disabling it takes the explicit value.
+    process.env.MARK_CANCEL_VETO = '0';
   });
   afterEach(() => {
     for (const key of KEYS) {
