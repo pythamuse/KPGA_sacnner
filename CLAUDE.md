@@ -206,7 +206,7 @@ REAL_SCAN_SAT_REVERSED=1   REAL_SCAN_CAGI_PDF=".../선별검사 샘플3반복.pd
 **사진 기준선의 입력은 Desktop의 원본 사진이 아니다.** 제품이 서버에 보내는 것은 브라우저 문서 스캐너가 원근 보정한 이미지이므로,
 기준선은 스크래치패드의 `prod19-cagi`/`prod19-sat`(OLD, 제품 업로드 19장)과 `warp-set{1,2,3}-cagi`/`-satisfaction`(브라우저 보정본)으로
 잰다. `C:/Users/night/Desktop/사진샘플/`의 원본을 넣으면 **어느 커밋에서든** Set1 2/3 정도가 나온다 — 2026-09-03에 이것을 회귀로
-오진해 이분 탐색에 한 시간을 썼다. 스크래치패드가 사라졌으면 브라우저 경로로 다시 만든다(§5.2 절차로 업로드 보존).
+오진해 이분 탐색에 한 시간을 썼다. 스크래치패드가 사라졌으면 **브라우저 없이** 다시 만든다: `tests/_harness-product-warp.ts`를 esbuild로 묶은 `product-warp.cjs`(스크래치패드)를 `NODE_PATH=<프로젝트>/node_modules FORM=cagi|satisfaction SRC_DIR=<원본 폴더> OUT_DIR=<출력> OPENCV_JS=public/vendor/opencv/4.9.0/opencv.js node product-warp.cjs`로 돌리면 제품과 같은 보정본이 나온다 — 2026-09-03에 OLD(`사진샘플/업로드`)를 이렇게 재생성해 61/0을 그대로 재현했다. 원본 위치: OLD `사진샘플/업로드/{선별검사,만족도}`, Set1~3 `사진샘플/Set{1,2,3}/{선별검사,만족도}`.
 
 `GRID_MATCH_V2=0`을 주면 이전 대응기(V1)로 잰다 — 비교 실험 전용. `GRID_BAND_V2=0`은 기대 행 밴드+되찾기(2026-09-03 병합, [Task/V2_BAND_RESCUE_2026-09-03.md](Task/V2_BAND_RESCUE_2026-09-03.md))를 끈다 — 노드 스캔 수치는 셀 동일이고 OFF만 `30 · 16 · 9 · 64`로 준다. `GRID_BAND_V2_COLS=0`은 같은 것을 열에서 끈다([Task/V2_BAND_COLS_2026-09-03.md](Task/V2_BAND_COLS_2026-09-03.md); 세트 3이 344→348).
 
