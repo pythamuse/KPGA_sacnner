@@ -104,6 +104,11 @@ run('bounds gate probe', () => {
       const source = (draft.recognitionValueSource || {}) as Record<string, string>;
       const registration = (draft.recognitionRegistration || {}) as Record<string, { status?: string }>;
       for (const line of lines) {
+        const bp = /^\[baseline-pair\] field=(\S+) maxDev=([\d.]+) pitchMin=([\d.]+) ok=(\d)/.exec(line);
+        if (bp) {
+          rows.push({ set: SET, page: i + 1, kind: 'baseline-pair', field: bp[1], maxDev: Number(bp[2]), pitchMin: Number(bp[3]), ok: bp[4] === '1' });
+          continue;
+        }
         const g = /^\[grid-fit\] (.*)$/.exec(line);
         if (g) {
           const kv: Record<string, string | number> = { set: SET, page: i + 1, kind: 'grid-fit' };
