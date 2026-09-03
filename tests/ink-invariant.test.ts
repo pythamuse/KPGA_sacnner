@@ -7,6 +7,7 @@ import {
 } from '../src/lib/recognition/markDensity';
 import { ChoiceGroup } from '../src/lib/recognition/roiTemplates';
 import { withAffineTone } from './helpers/affineTone';
+import { pinShippedScorer } from './helpers/scorerVariants';
 
 /**
  * The total-ink guard, as it is actually scoped after central measurement.
@@ -381,6 +382,9 @@ const LINEAR_PAGE_INK = (MARK_COUNT + ANCHOR_COUNT * inkOfGrey(ANCHOR_PAGE_GREY)
 //   anchor  0.74719 - 0.74719 - 0.08 < 0 -> 0   (mapped; unmapped it is lighter still)
 //   glyph   0.17303 - 0.66292 - 0.08 < 0 -> 0   (mapped; unmapped the page reads 0)
 const EXPECTED_RESIDUAL = (MARK_COUNT * RESIDUAL_PER_SAMPLE) / USABLE_SAMPLES;
+
+// Every number below is the shipped scorer's. See `pinShippedScorer`.
+pinShippedScorer();
 
 describe('the fixture reads as the map the product would apply', () => {
   it('takes the affine branch, at the gain the two anchor pairs imply', () => {

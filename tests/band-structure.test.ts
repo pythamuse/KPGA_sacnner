@@ -7,6 +7,7 @@ import {
 } from '../src/lib/recognition/markDensity';
 import { ChoiceGroup } from '../src/lib/recognition/roiTemplates';
 import { withAffineTone } from './helpers/affineTone';
+import { pinShippedScorer } from './helpers/scorerVariants';
 
 /**
  * The band-structure refusal, from FEATURE_SPEC_CAPTURE_PIPELINE_2026-08-27
@@ -41,6 +42,9 @@ const ALL_MIN = 0.040;
 // The highest minNonVoid any of the fifteen legitimate rows reached. Every
 // "leaves it alone" case below is built at or under this.
 const LEGITIMATE_MAX = 0.017;
+
+// Every number below is the shipped scorer's. See `pinShippedScorer`.
+pinShippedScorer();
 
 describe('detectOffRowBand -- the rule', () => {
   it('refuses the measured off-row signature: every box inked but one, which is void', () => {
