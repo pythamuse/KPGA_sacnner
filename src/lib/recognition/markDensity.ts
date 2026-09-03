@@ -90,6 +90,11 @@ export interface DecisionEvidence {
    * constants then.
    */
   thresholds: { score: number; gap: number; contrast: number };
+  /** Present only when the opt-in grayscale-scan calibration was applied. */
+  inputClass?: InputClass;
+  gain?: number;
+  margin?: number;
+  ratio?: number;
   refused: string[];
   offset?: { x: number; y: number };
   shape?: { componentRatio: number; diagonalRatio: number };
@@ -161,6 +166,23 @@ export interface ReviewSuggestionFeatures {
   matchedScore: number | undefined;
 }
 
+export type InputClass = 'bilevel-scan' | 'grayscale-scan' | 'photo';
+
+/** The page-level calibration used by the opt-in grayscale residual path. */
+export interface PageInkCalibration {
+  inputClass: 'grayscale-scan';
+  ratio: number;
+  gain: number;
+  margin: number;
+}
+
+/** Set 1's measured page/blank median, used as the bilevel reference. */
+export const R_BILEVEL = 0.73;
+const GRAY_GAIN_MIN = 0.3;
+const GRAY_GAIN_MAX = 1.0;
+const GRAY_MARGIN_MIN = 0.03;
+const GRAY_MARGIN_MAX = 0.08;
+
 /**
  * The reviewer's default on a group the scorer refused.
  *
@@ -223,6 +245,8 @@ function strictlyFirstBy(
 export interface ChoiceGroupBaseline {
   image: ImageAnalysisData;
   candidatePixelOverrides: PixelRect[];
+  /** Shared by every group on a page; absent for legacy/direct callers. */
+  pageCalibration?: PageInkCalibration;
 }
 
 interface TemplateInkShape {
@@ -442,6 +466,18 @@ function photoBinaryRefusalEnabled(): boolean {
   if (typeof raw !== 'string') return true;
   const normalized = raw.trim().toLowerCase();
   return !(normalized === '0' || normalized === 'false' || normalized === 'off');
+}
+
+function grayClassEnabled(): boolean {
+  return typeof process !== 'undefined' && process.env?.GRAY_CLASS === '1';
+}
+
+function classifyInputClass(
+  image: Pick<ImageAnalysisData, 'pageIsBinarySource'>,
+  photoProvenance: boolean,
+): InputClass {
+  if (photoProvenance) return 'photo';
+  return image.pageIsBinarySource === false ? 'grayscale-scan' : 'bilevel-scan';
 }
 
 /**
@@ -1259,6 +1295,7 @@ interface DecisionTraceContext {
   mediumScoreThreshold: number;
   mediumGapThreshold: number;
   requireHighVisualConfidence: boolean;
+  pageCalibration?: PageInkCalibration;
   /**
    * Set only when `detectOffRowBand` refused the group, so a decision that this
    * check never touched reads exactly as it did before.
@@ -1373,6 +1410,12 @@ function describeDecision(
       gap: highGapThreshold,
       contrast: HIGH_RELATIVE_CONTRAST,
     },
+    ...(evidence.pageCalibration ? {
+      inputClass: evidence.pageCalibration.inputClass,
+      gain: evidence.pageCalibration.gain,
+      margin: evidence.pageCalibration.margin,
+      ratio: evidence.pageCalibration.ratio,
+    } : {}),
     refused: [...refused],
     ...(best?.shape ? {
       offset: { x: best.shape.alignX, y: best.shape.alignY },
@@ -1397,6 +1440,15 @@ function describeDecision(
     `base=${usesBaseline ? 1 : 0} cells=${usesGridCells ? 1 : 0} n=${scores.length}`,
     `scores=${scores.map((score) => score.toFixed(3)).join('/')}`,
   ];
+
+  if (evidence.pageCalibration) {
+    parts.push(
+      `class=${evidence.pageCalibration.inputClass}`
+        + ` gain=${evidence.pageCalibration.gain.toFixed(2)}`
+        + ` margin=${evidence.pageCalibration.margin.toFixed(3)}`
+        + ` r=${evidence.pageCalibration.ratio.toFixed(3)}`,
+    );
+  }
 
   if (contested) {
     parts.push('contested=1');
@@ -1600,6 +1652,73 @@ function emitDecisionTrace(trace: string): void {
   console.info(trace);
 }
 
+function isGridTracing(): boolean {
+  return typeof process !== 'undefined' && process.env?.GRID_TRACE === '1';
+}
+
+function normalizedCandidateCenter(
+  image: Pick<ImageAnalysisData, 'width' | 'height' | 'contentBounds'>,
+  rect: PixelRect,
+): { x: number; y: number } {
+  const bounds = getRegistrationBounds(image);
+  return {
+    x: ((rect.left + rect.right) / 2 - bounds.left) / Math.max(bounds.right - bounds.left, 1),
+    y: ((rect.top + rect.bottom) / 2 - bounds.top) / Math.max(bounds.bottom - bounds.top, 1),
+  };
+}
+
+function minimumCenterSpacing(points: Array<{ x: number; y: number }>): number {
+  let minimum = Number.POSITIVE_INFINITY;
+  for (let first = 0; first < points.length; first += 1) {
+    for (let second = first + 1; second < points.length; second += 1) {
+      minimum = Math.min(
+        minimum,
+        Math.hypot(points[first].x - points[second].x, points[first].y - points[second].y),
+      );
+    }
+  }
+  return Number.isFinite(minimum) ? minimum : 0;
+}
+
+/**
+ * Reports the existing positional i↔i pairing without making it a gate. Page
+ * and baseline centres are normalised against their own content frames so a
+ * different raster size does not masquerade as a displacement.
+ */
+function emitBaselinePairTrace(
+  field: string,
+  image: ImageAnalysisData,
+  pageRects: PixelRect[],
+  baseline: ImageAnalysisData,
+  baselineRects: PixelRect[],
+): void {
+  if (!isGridTracing()) return;
+
+  const pageCenters = pageRects.map((rect) => normalizedCandidateCenter(image, rect));
+  const baselineCenters = baselineRects.map((rect) => normalizedCandidateCenter(baseline, rect));
+  const count = Math.min(pageCenters.length, baselineCenters.length);
+  let maxDeviation = 0;
+  for (let index = 0; index < count; index += 1) {
+    maxDeviation = Math.max(
+      maxDeviation,
+      Math.hypot(
+        pageCenters[index].x - baselineCenters[index].x,
+        pageCenters[index].y - baselineCenters[index].y,
+      ),
+    );
+  }
+  const pitchMin = Math.min(
+    minimumCenterSpacing(pageCenters),
+    minimumCenterSpacing(baselineCenters),
+  );
+  const ok = maxDeviation <= 0.5 * pitchMin;
+  // eslint-disable-next-line no-console
+  console.info(
+    `[baseline-pair] field=${field} maxDev=${maxDeviation.toFixed(4)}`
+      + ` pitchMin=${pitchMin.toFixed(3)} ok=${ok ? 1 : 0}`,
+  );
+}
+
 /** `have/need(ratio)`, so a near miss and a rout read differently. */
 function ratioOf(have: number, need: number): string {
   const ratio = need > 0 ? have / need : Number.POSITIVE_INFINITY;
@@ -1699,6 +1818,46 @@ export function detectOffRowBand(
   return { nonVoid, empty, minNonVoid };
 }
 
+/**
+ * Calculates the page-wide scale used by the opt-in grayscale residual path.
+ * A marked box is allowed to be an outlier; the median of all valid box
+ * ratios is the page's print-reproduction estimate.
+ */
+export function createPageInkCalibration(
+  image: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels' | 'contentBounds' | 'pageIsBinarySource'>,
+  candidateRects: PixelRect[],
+  baseline: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>,
+  baselineRects: PixelRect[],
+  photoProvenance = false,
+): PageInkCalibration | undefined {
+  const inputClass = classifyInputClass(image, photoProvenance);
+  if (!grayClassEnabled() || inputClass !== 'grayscale-scan') return undefined;
+  if (candidateRects.length === 0 || candidateRects.length !== baselineRects.length) return undefined;
+
+  const features = candidateRects.map((rect, index) => calculateTemplateInkFeatures(
+    image,
+    rect,
+    baseline,
+    baselineRects[index],
+  ));
+  const ratios = features
+    .filter((feature) => feature.baselineInk > 0 && Number.isFinite(feature.actualInk))
+    .map((feature) => feature.actualInk / feature.baselineInk)
+    .filter((ratio) => Number.isFinite(ratio));
+  if (ratios.length === 0) return undefined;
+
+  const ratio = percentile(ratios, 0.5);
+  const gain = clamp(ratio / R_BILEVEL, GRAY_GAIN_MIN, GRAY_GAIN_MAX);
+  const deltas = features
+    .map((feature) => feature.actualInk - feature.baselineInk * gain)
+    .filter((delta) => Number.isFinite(delta));
+  const center = percentile(deltas, 0.5);
+  const mad = percentile(deltas.map((delta) => Math.abs(delta - center)), 0.5);
+  const margin = clamp(center + 2 * mad, GRAY_MARGIN_MIN, GRAY_MARGIN_MAX);
+
+  return { inputClass, ratio, gain, margin };
+}
+
 export function analyzeChoiceGroup(
   image: ImageAnalysisData,
   group: ChoiceGroup,
@@ -1727,6 +1886,25 @@ export function analyzeChoiceGroup(
   const candidateRects = group.candidates.map((candidate, index) => (usesGridCells
     ? candidatePixelOverrides![index]
     : toPixelRect(image, candidate.rect, yOverride)));
+  if (usesBaseline) {
+    emitBaselinePairTrace(
+      group.field,
+      image,
+      candidateRects,
+      baseline!.image,
+      baseline!.candidatePixelOverrides,
+    );
+  }
+  const inputClass = classifyInputClass(image, photoProvenance);
+  const pageCalibration = usesBaseline && grayClassEnabled() && inputClass === 'grayscale-scan'
+    ? baseline?.pageCalibration || createPageInkCalibration(
+      image,
+      candidateRects,
+      baseline!.image,
+      baseline!.candidatePixelOverrides,
+      photoProvenance,
+    )
+    : undefined;
   // A third photo-only behaviour, alongside the band check and the binary
   // floor: which tonal correction the cells are measured through. It is
   // resolved once for the whole group, because every rule below compares the
@@ -1751,6 +1929,7 @@ export function analyzeChoiceGroup(
           baseline!.image,
           baseline!.candidatePixelOverrides[index],
           groupTone,
+          pageCalibration,
         )
         : undefined;
 
@@ -1830,6 +2009,7 @@ export function analyzeChoiceGroup(
     mediumScoreThreshold: 0,
     mediumGapThreshold: 0,
     requireHighVisualConfidence,
+    pageCalibration,
   };
 
   if (!best) {
@@ -2546,6 +2726,19 @@ export function normalizeTone(
  */
 const TEMPLATE_INK_INVARIANT_EPSILON = 0;
 
+function calculateResidualInk(
+  actualInk: number,
+  baselineInk: number,
+  pageCalibration?: PageInkCalibration,
+): number {
+  if (pageCalibration) {
+    return Math.max(0, actualInk - baselineInk * pageCalibration.gain - pageCalibration.margin);
+  }
+  // Keep the legacy expression as its own branch: with no calibration this is
+  // the byte-identical rule used by bilevel scans and photos.
+  return Math.max(0, actualInk - baselineInk - 0.08);
+}
+
 function calculateTemplateInkFeatures(
   image: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>,
   actualRect: PixelRect,
@@ -2555,6 +2748,7 @@ function calculateTemplateInkFeatures(
   // cell computes its own shift, which is what a scan does and what this
   // function did for every caller before photographs existed.
   groupTone?: ToneCorrection,
+  pageCalibration?: PageInkCalibration,
 ): TemplateInkFeatures {
   const sampleWidth = TEMPLATE_SAMPLE_WIDTH;
   const sampleHeight = TEMPLATE_SAMPLE_HEIGHT;
@@ -2641,7 +2835,7 @@ function calculateTemplateInkFeatures(
       baselineTotal += baselineInk;
       // Ignore the narrow anti-aliasing and scanner-noise band around the
       // printed form. A handwritten circle or check remains well above it.
-      const residualInk = Math.max(0, actualInk - baselineInk - 0.08);
+      const residualInk = calculateResidualInk(actualInk, baselineInk, pageCalibration);
       residual[index] = residualInk;
       difference += residualInk;
     }
@@ -2689,10 +2883,11 @@ function calculateTemplateInkFeatures(
         radiusY,
         stepsX,
         stepsY,
+        pageCalibration,
       )
       : undefined,
     insetSignal: isTracing()
-      ? calculateInsetResidualSignal(image, actualRect, baseline, baselineRect)
+      ? calculateInsetResidualSignal(image, actualRect, baseline, baselineRect, pageCalibration)
       : undefined,
     blankGeometry: isTracing()
       ? measureBlankInkGeometry(
@@ -2884,6 +3079,7 @@ function measureBrightnessReference(
   radiusY: number,
   stepsX: number,
   stepsY: number,
+  pageCalibration?: PageInkCalibration,
 ): BrightnessReferenceProbe {
   const actualP82 = percentile(actual, 0.82);
   const blankP82 = percentile(blank, 0.82);
@@ -2912,7 +3108,7 @@ function measureBrightnessReference(
       const baselineInk = darkness(
         sampleGridAt(blank, width, height, x + alignment95.x, y + alignment95.y),
       );
-      difference += Math.max(0, actualInk - baselineInk - 0.08);
+      difference += calculateResidualInk(actualInk, baselineInk, pageCalibration);
     }
   }
   const usablePixels = Math.max((width - 2 * radiusX) * (height - 2 * radiusY), 1);
@@ -2936,6 +3132,7 @@ function calculateInsetResidualSignal(
   actualRect: PixelRect,
   baseline: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>,
   baselineRect: PixelRect,
+  pageCalibration?: PageInkCalibration,
 ): number {
   const actual = insetPixelRect(actualRect, 3);
   const blank = insetPixelRect(baselineRect, 4);
@@ -2964,7 +3161,7 @@ function calculateInsetResidualSignal(
       );
       const actualInk = darkness(image.pixels[actualY * image.width + actualX]);
       const blankInk = darkness(baseline.pixels[blankY * baseline.width + blankX]);
-      difference += Math.max(0, actualInk - blankInk - 0.08);
+      difference += calculateResidualInk(actualInk, blankInk, pageCalibration);
     }
   }
   return difference / 64;
