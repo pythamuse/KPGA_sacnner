@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  bulkConfirmableFields,
   contestedUnconfirmedFields,
   isSettledSource,
   unconfirmedMachineFields,
@@ -76,6 +77,51 @@ describe('review settlement sources', () => {
       'basic.age',
       'basic.gender',
       'cagi.q03',
+    ]);
+  });
+
+  it('bulk-confirms only high-confidence, non-contested machine values', () => {
+    const draft = {
+      basic: { age: 14, gender: '여', schoolType: '중학교', grade: '2학년' },
+      cagi: { q01: 0, q02: 1, q03: 2 },
+      satisfaction: { q01: 4 },
+      confidence: {
+        'basic.age': 'high',
+        'basic.gender': 'high',
+        'basic.schoolType': 'medium',
+        'basic.grade': 'low',
+        'cagi.q01': 'high',
+        'cagi.q02': 'high',
+        'cagi.q03': 'high',
+        'cagi.q04': 'high',
+        'satisfaction.q01': 'high',
+      },
+      source: {
+        recognitionValueSource: {
+          'basic.age': 'auto',
+          'basic.gender': 'restored',
+          'basic.schoolType': 'auto',
+          'basic.grade': 'auto',
+          'cagi.q01': 'auto',
+          'cagi.q02': 'restored',
+          'cagi.q03': 'auto',
+          'cagi.q04': 'auto',
+          'satisfaction.q01': 'auto',
+        },
+        recognitionContested: {
+          'cagi.q01': true,
+          'cagi.q02': false,
+          'cagi.q03': false,
+        },
+      },
+    } as unknown as RecognitionDraft;
+
+    expect(bulkConfirmableFields(draft)).toEqual([
+      'basic.age',
+      'basic.gender',
+      'cagi.q02',
+      'cagi.q03',
+      'satisfaction.q01',
     ]);
   });
 });

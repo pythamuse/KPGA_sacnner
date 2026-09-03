@@ -11,6 +11,7 @@ export const REVIEW_FIELD_KEYS = [
 ] as const;
 
 type SettlementDraft = Pick<RecognitionDraft, 'basic' | 'cagi' | 'satisfaction'> & {
+  confidence?: RecognitionDraft['confidence'];
   source?: {
     recognitionValueSource?: Record<string, RecognitionValueSource>;
     recognitionContested?: Record<string, boolean>;
@@ -51,5 +52,21 @@ export function unconfirmedMachineFields(draft: SettlementDraft): string[] {
 export function contestedUnconfirmedFields(draft: SettlementDraft): string[] {
   return unconfirmedMachineFields(draft).filter(
     (key) => draft.source?.recognitionContested?.[key] === true,
+  );
+}
+
+/**
+ * Returns the safe subset for conditional bulk confirmation.
+ *
+ * A high-confidence value is eligible only when it is still machine-originated
+ * and its recognition evidence was not contested. The filter deliberately
+ * starts from `unconfirmedMachineFields`, so empty values and settled sources
+ * cannot enter this action by accident.
+ */
+export function bulkConfirmableFields(draft: SettlementDraft): string[] {
+  const contested = new Set(contestedUnconfirmedFields(draft));
+
+  return unconfirmedMachineFields(draft).filter(
+    (key) => !contested.has(key) && draft.confidence?.[key] === 'high',
   );
 }
