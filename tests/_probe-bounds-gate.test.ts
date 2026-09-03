@@ -103,6 +103,13 @@ run('bounds gate probe', () => {
       }
       const source = (draft.recognitionValueSource || {}) as Record<string, string>;
       const registration = (draft.recognitionRegistration || {}) as Record<string, { status?: string }>;
+      // Age OCR: value, source and the decision sentence (carries the tesseract
+      // confidence), for re-deriving the acceptance floor from real sets.
+      {
+        const basic = (draft.basic || {}) as Record<string, unknown>;
+        const traces = (draft.recognitionDecisionTrace || {}) as Record<string, string>;
+        rows.push({ set: SET, page: i + 1, kind: 'age', got: basic.age ?? null, source: source['basic.age'] ?? null, trace: (traces['basic.age'] || '').slice(0, 400) });
+      }
       for (const line of lines) {
         const bp = /^\[baseline-pair\] field=(\S+) maxDev=([\d.]+) pitchMin=([\d.]+) ok=(\d)/.exec(line);
         if (bp) {
