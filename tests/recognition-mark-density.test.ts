@@ -16,6 +16,14 @@ import {
   loadImageAnalysisData,
 } from '../src/lib/recognition/markDensity';
 import { ChoiceGroup } from '../src/lib/recognition/roiTemplates';
+import { pinCancelVetoOff } from './helpers/cancelVeto';
+
+// Synthetic marks, so the shipped path is the only thing this file can speak
+// for: the hand-drawn "ring" below is a rectangular outline that reads
+// crossingScore 1.00 / inkBboxFill 0.30, which is exactly the closed curve
+// `crossingScore` is documented as unable to tell from a crossing. See
+// `pinCancelVetoOff`.
+pinCancelVetoOff();
 
 const fixtureDir = path.join(process.cwd(), 'tmp', 'test-mark-density');
 

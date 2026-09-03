@@ -4,6 +4,14 @@ import path from 'path';
 import sharp from 'sharp';
 import { recognizeStudentForms } from '../src/lib/recognition/detectCheckmarks';
 import { cagiTemplate, ChoiceGroup, satisfactionTemplate } from '../src/lib/recognition/roiTemplates';
+import { pinCancelVetoOff } from './helpers/cancelVeto';
+
+// `writeMarkedForm` paints a filled mark, and a filled mark's ragged boundary
+// reads as a crossing (0.98 measured end-to-end on this very fixture). This
+// file asserts that the scorer fills a marked form, which is shipped
+// behaviour; the veto's own cost is measured on real rasters. See
+// `pinCancelVetoOff`.
+pinCancelVetoOff();
 
 const fixtureDir = path.join(process.cwd(), 'tmp', 'test-satisfaction-recognition');
 

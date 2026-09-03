@@ -2094,6 +2094,9 @@ export function analyzeChoiceGroup(
     // and this invariant says nothing about the other box.
     .sort((a, b) => b.residualScore - a.residualScore);
   const candidates: CandidateScore[] = scoredCandidates.map(({ value, score }) => ({ value, score }));
+  // Read once for the group rather than per candidate: it cannot change inside
+  // one call, and the export has to be all-or-nothing anyway.
+  const traceMeasurements = markShapeTraceEnabled();
   const candidateMeasurements: CandidateMeasurement[] = scoredCandidates.map((candidate) => ({
     candidateIndex: candidate.candidateIndex,
     score: candidate.score,
@@ -2105,10 +2108,12 @@ export function analyzeChoiceGroup(
     largestComponentSize: candidate.shape?.largestComponentSize ?? null,
     largestComponentRatio: candidate.shape?.largestComponentRatio ?? null,
     diagonalRatio: candidate.shape?.diagonalRatio ?? null,
-    // Spread, not eight `?? null` lines: with `MARK_SHAPE_TRACE` unset there
-    // is no `shapeTrace`, so the object has no such own properties and
-    // `JSON.stringify` of it is byte-for-byte what it was before.
-    ...(candidate.shape?.shapeTrace ?? {}),
+    // Spread, not eight `?? null` lines: without the trace flag the object has
+    // no such own properties and `JSON.stringify` of it is byte-for-byte what
+    // it was before. Gated on the TRACE flag alone and never on
+    // `shapeTraceNeeded`: `MARK_CANCEL_VETO` also computes `shapeTrace`, and the
+    // export must not grow eight columns because a veto was armed.
+    ...(traceMeasurements ? candidate.shape?.shapeTrace ?? {} : {}),
   }));
 
   const best = scoredCandidates[0];
@@ -2373,12 +2378,55 @@ export function analyzeChoiceGroup(
     };
   }
 
-  if (
-    best.score >= highScoreThreshold
+  // The four high-confidence tests, and the rescue route's own precondition,
+  // as named booleans. Both are the same expressions in the same order this
+  // file has always evaluated, over values computed above; naming them changes
+  // no threshold and lets the veto below read "would this group reach an
+  // automatic value?" in one place instead of two.
+  const highConjunctionHolds = best.score >= highScoreThreshold
     && gap >= highGapThreshold
     && hasStructuredMark
-    && (!usesBaseline || relativeContrast >= HIGH_RELATIVE_CONTRAST)
-  ) {
+    && (!usesBaseline || relativeContrast >= HIGH_RELATIVE_CONTRAST);
+  const rescueHolds = usesBaseline
+    && !belowPhotoBinaryFloor
+    && !bestInkInvariantZeroed
+    && rescue !== null
+    && rescue >= RESCUE_THRESHOLD;
+
+  // THE VETO. `MARK_CANCEL_VETO` only; unset, `refusesAsCancelledMark` returns
+  // false without reading anything and this block does not exist.
+  //
+  // It sits at the single point where an automatic value is decided: the two
+  // routes that return `high` are the only ones `detectCheckmarks` fills a
+  // field from, and both of their preconditions are read here, so CAGI,
+  // satisfaction, photo and grayscale-calibrated pages all pass through this
+  // one test with no branch of their own. It is placed BEFORE either return so
+  // a group it refuses cannot be re-confirmed by the other route.
+  //
+  // It only ever takes a value away. No threshold moves, no score or ranking is
+  // touched, nothing below reads it, and the runner-up is NOT promoted -- a
+  // struck-out box says the student rejected THIS box, not that they chose the
+  // next one, and picking a replacement is a separate question with its own
+  // measurement. The row is left unconfirmed and marked contested so the
+  // reviewer answers it.
+  if ((highConjunctionHolds || rescueHolds) && refusesAsCancelledMark(best.shape)) {
+    refused.push('cancel-crossing');
+    // No review suggestion either, for the same reason the band-structure and
+    // photo-binary refusals offer none: the only box this rule has an opinion
+    // about is the one it just refused, and offering it as the default would
+    // point the reviewer straight back at the cancelled mark.
+    return {
+      field: group.field,
+      confidence: 'low',
+      contested: true,
+      candidates,
+      candidateMeasurements,
+      decision: describeDecision(evidence, 'low', refused, true),
+      evidence: evidence.published,
+    };
+  }
+
+  if (highConjunctionHolds) {
     const contested = isContestedHighConfidenceRunnerUp(second);
     return {
       field: group.field,
@@ -2407,13 +2455,7 @@ export function analyzeChoiceGroup(
   // the same reason: its weights read shape and fit, never signal strength, so
   // it is the one route that would still confirm a box the invariant emptied.
   // The floors below and above both refuse a zero score on their own.
-  if (
-    usesBaseline
-    && !belowPhotoBinaryFloor
-    && !bestInkInvariantZeroed
-    && rescue !== null
-    && rescue >= RESCUE_THRESHOLD
-  ) {
+  if (rescueHolds) {
     refused.push(`rescued:${rescue.toFixed(2)}`);
     const contested = isContestedHighConfidenceRunnerUp(second);
     return {
@@ -2890,7 +2932,7 @@ function calculateTemplateInkFeatures(
       // Nothing was sampled, so there is no ink map to describe. The zeroed
       // trace is emitted anyway so an armed run has the same columns on every
       // candidate rather than a hole the reader has to explain.
-      ...(markShapeTraceEnabled() ? { shapeTrace: EMPTY_MARK_SHAPE_TRACE } : {}),
+      ...(shapeTraceNeeded() ? { shapeTrace: EMPTY_MARK_SHAPE_TRACE } : {}),
       actualInk: 0,
       baselineInk: 0,
       brightnessOffset: 0,
@@ -3394,7 +3436,7 @@ function analyzeResidualShape(
     diagonalRatio: diagonalEdges / Math.max(diagonalEdges + orthogonalEdges, 1),
     // Computed in its own pass, so the three numbers above still come off
     // exactly the loops that have always produced them.
-    ...(markShapeTraceEnabled()
+    ...(shapeTraceNeeded()
       ? { shapeTrace: analyzeShapeTrace(residual, width, height, shapeThreshold) }
       : {}),
   };
@@ -3749,6 +3791,74 @@ function baselineDilationEnabled(): boolean {
  */
 function markShapeTraceEnabled(): boolean {
   return typeof process !== 'undefined' && Boolean(process.env?.MARK_SHAPE_TRACE);
+}
+
+/**
+ * The cancelled-mark veto's two defaults, overridable from the shell as
+ * `MARK_CANCEL_CROSSING` and `MARK_CANCEL_FILL` so the pair can be swept on
+ * real rasters without a rebuild. They are NOT gate constants: nothing reads
+ * them unless `MARK_CANCEL_VETO` is set, and no existing threshold moves.
+ */
+const CANCEL_CROSSING_DEFAULT = 0.6;
+const CANCEL_FILL_DEFAULT = 0.22;
+
+/**
+ * `MARK_CANCEL_VETO` -- see `refusesAsCancelledMark`. Read at call time like the
+ * flags above. Off, it is not merely neutral: `shapeTraceNeeded` is false, so
+ * the trace is never computed and no object gains a key.
+ */
+function cancelVetoEnabled(): boolean {
+  return typeof process !== 'undefined' && Boolean(process.env?.MARK_CANCEL_VETO);
+}
+
+/**
+ * Whether `analyzeResidualShape` has to compute the shape trace.
+ *
+ * The veto decides on `crossingScore` and `inkBboxFill`, so it needs those
+ * numbers with `MARK_SHAPE_TRACE` unset. Only the trace flag ever copies them
+ * onto a `CandidateMeasurement`, which is what keeps the default export
+ * byte-identical whichever of the two is armed.
+ */
+function shapeTraceNeeded(): boolean {
+  return markShapeTraceEnabled() || cancelVetoEnabled();
+}
+
+/** One veto threshold, read from the environment, falling back on a bad value. */
+function cancelThreshold(name: string, fallback: number): number {
+  if (typeof process === 'undefined') return fallback;
+  const raw = process.env?.[name];
+  if (raw === undefined || raw === '') return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+/**
+ * Does the winning box look like a mark the student CANCELLED rather than one
+ * they chose?
+ *
+ * FIELD_TEST §34.7: the remaining browser wrong answers are cells with ink in
+ * two boxes, several of them a box marked and then struck out with an X before
+ * another was marked. On the browser raster the wrong winners' `crossingScore`
+ * had median 0.47 against 0.00 for the correct ones, and the sweep this rule
+ * comes from put `crossing >= 0.6 && fill >= 0.22` at 4 of the 9 wrong values
+ * removed for 14 correct ones lost.
+ *
+ * Both halves are required and neither is decoration. `crossingScore` alone
+ * does not separate a crossing from a closed curve -- a ring reads 1.00 and so
+ * does the ragged boundary of a filled-in circle (`MarkShapeTrace`, and §2.1 of
+ * the shape report). `inkBboxFill` is the half that tells two thin strokes from
+ * a fill, which is why the rule is a conjunction and not a disjunction.
+ *
+ * It can only ever TAKE a value away: it returns a boolean, reads no other
+ * candidate, and the one place that calls it refuses the group outright rather
+ * than promoting anybody.
+ */
+function refusesAsCancelledMark(shape: TemplateInkShape | undefined): boolean {
+  if (!cancelVetoEnabled()) return false;
+  const trace = shape?.shapeTrace;
+  if (!trace) return false;
+  return trace.crossingScore >= cancelThreshold('MARK_CANCEL_CROSSING', CANCEL_CROSSING_DEFAULT)
+    && trace.inkBboxFill >= cancelThreshold('MARK_CANCEL_FILL', CANCEL_FILL_DEFAULT);
 }
 
 function dilatedBaselineInk(
