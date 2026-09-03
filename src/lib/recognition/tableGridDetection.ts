@@ -608,6 +608,7 @@ function emitGridTrace(
     `[grid-fit] table=${trace.tableId}`
       + ` mode=${trace.mode}`
       + ` detectedRows=${trace.detectedRows}`
+      + (trace.expectedYpx ? ` expectedYpx=[${trace.expectedYpx.join(',')}] detectedYpx=[${(trace.detectedYpx || []).join(',')}] rescanYpx=[${(trace.rescanYpx || []).join(',')}]` : '')
       + ` expectedRows=${trace.expectedRows}`
       + ` matched=${formatIndexes(trace.rowMatch?.matchedExpected)}`
       + ` missing=${formatIndexes(trace.rowMatch?.missingExpected)}`
@@ -642,6 +643,10 @@ interface GridTraceData {
   tableId: string;
   mode: 'v1' | 'v2';
   detectedRows: number;
+  /** Instrument: absolute y of expected row boundaries and of every detected line, plus a low-threshold rescan (GRID_TRACE only). */
+  expectedYpx?: number[];
+  detectedYpx?: number[];
+  rescanYpx?: number[];
   expectedRows: number;
   pageWidth: number;
   pageHeight: number;
@@ -809,6 +814,19 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
     tableId: spec.id,
     mode: v2Enabled ? 'v2' : 'v1',
     detectedRows: horizontalLines.length,
+    ...(process.env.GRID_TRACE ? {
+      expectedYpx: expectedY.map((v) => Math.round(v * 10) / 10),
+      detectedYpx: horizontalLines.map((y) => Math.round(y * 10) / 10),
+      rescanYpx: detectHorizontalLines(
+        image,
+        expectedY[0] - yTolerance,
+        expectedY[expectedY.length - 1] + yTolerance,
+        bounds.left,
+        bounds.right,
+        Math.min(0.15, horizontalLineDarkRatio),
+        darkThreshold,
+      ).map((line) => Math.round(line.y * 10) / 10),
+    } : {}),
     expectedRows: expectedY.length,
     pageWidth: baseWidth,
     pageHeight: baseHeight,
