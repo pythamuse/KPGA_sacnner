@@ -178,6 +178,9 @@ export interface PageInkCalibration {
 
 /** Set 1's measured page/blank median, used as the bilevel reference. */
 export const R_BILEVEL = 0.73;
+// Pages whose printed structure is at least this fraction of the blank asset's
+// are treated as bilevel scans (set 1 measured 0.73; grayscale device 0.41-0.57).
+const GRAY_CLASS_MAX_RATIO = 0.62;
 const GRAY_GAIN_MIN = 0.3;
 const GRAY_GAIN_MAX = 1.0;
 const GRAY_MARGIN_MIN = 0.03;
@@ -1830,8 +1833,7 @@ export function createPageInkCalibration(
   baselineRects: PixelRect[],
   photoProvenance = false,
 ): PageInkCalibration | undefined {
-  const inputClass = classifyInputClass(image, photoProvenance);
-  if (!grayClassEnabled() || inputClass !== 'grayscale-scan') return undefined;
+  if (!grayClassEnabled() || photoProvenance) return undefined;
   if (candidateRects.length === 0 || candidateRects.length !== baselineRects.length) return undefined;
 
   const features = candidateRects.map((rect, index) => calculateTemplateInkFeatures(
@@ -1847,13 +1849,28 @@ export function createPageInkCalibration(
   if (ratios.length === 0) return undefined;
 
   const ratio = percentile(ratios, 0.5);
+  // The class is decided by the page's own printed structure, not by
+  // `pageIsBinarySource`: after the upload JPEG a 1-bit scan carries more
+  // than 1% intermediate pixels and would be misfiled as grayscale (measured
+  // 2026-09-03: set 1 pages moved with the flag on). Set 1 sits at r ~ 0.73,
+  // the grayscale device at 0.41-0.57.
+  if (!(ratio < GRAY_CLASS_MAX_RATIO)) return undefined;
+  const inputClass: InputClass = 'grayscale-scan';
   const gain = clamp(ratio / R_BILEVEL, GRAY_GAIN_MIN, GRAY_GAIN_MAX);
   const deltas = features
     .map((feature) => feature.actualInk - feature.baselineInk * gain)
     .filter((delta) => Number.isFinite(delta));
   const center = percentile(deltas, 0.5);
   const mad = percentile(deltas.map((delta) => Math.abs(delta - center)), 0.5);
-  const margin = clamp(center + 2 * mad, GRAY_MARGIN_MIN, GRAY_MARGIN_MAX);
+  // Measurement switch (GRAY_MARGIN=fixed|scaled|derived): which margin rule
+  // the grayscale class uses. Decided on the real sets, see
+  // Task/GRAYSCALE_CLASS_2026-09-03.md.
+  const marginRule = process.env?.GRAY_MARGIN ?? 'derived';
+  const margin = marginRule === 'fixed'
+    ? GRAY_MARGIN_MAX
+    : marginRule === 'scaled'
+      ? clamp(GRAY_MARGIN_MAX * gain, GRAY_MARGIN_MIN, GRAY_MARGIN_MAX)
+      : clamp(center + 2 * mad, GRAY_MARGIN_MIN, GRAY_MARGIN_MAX);
 
   return { inputClass, ratio, gain, margin };
 }
