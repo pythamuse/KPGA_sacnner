@@ -288,6 +288,11 @@ REAL_SCAN_SAT_REVERSED=1   REAL_SCAN_CAGI_PDF=".../선별검사 샘플3반복.pd
 5. **파일 입력을 보이게 만든다.** `파일 선택` 버튼 뒤에 숨어 있어 `read_page`가 `ref`를 주지 않는다. `style`을 덮어쓰면 잡힌다.
 6. 두 PDF를 첨부하고 `전체 설문지 인식 시작`을 누른다.
 7. 학생을 순회하며 `확인 필요 항목 N개`와 항목 이름을 읽는다.
+   **값 대조는 학생을 순회하지 말고 페이지 안에서 계산한다**(2026-09-03, [Task/FIELD_TEST_2026-08-21.md](Task/FIELD_TEST_2026-08-21.md) §34.5):
+   `localStorage`의 `kpga.review.session.v2.*`에서 `drafts[]`를 읽어 `{basic,cagi,satisfaction}` 값과
+   `source.recognitionValueSource`를 평탄화하고, 정답표(`node -e`로 압축한 8KB)를 JS 인자로 넣어 자동/정답/오답/빈칸과
+   오답 목록만 돌려받는다. 결과 26KB를 꺼내는 대신 요약 1KB만 나오고, 스냅샷은 `__snap.<커밋>` 키로 그 탭에 남겨 다음 측정과
+   셀 단위로 diff한다. 브라우저 래스터를 보존하려면 `.env.local`에 `KEEP_UPLOADS=1`을 두고 dev 서버를 재시작한다(측정 후 제거).
    **페이지 안에서 긴 루프를 돌리지 마라** — 배경 탭은 타이머를 스로틀링하고, 학생당 렌더가 무거워 `Runtime.evaluate`가 45초에서 끊긴다. **한 호출에 5~7명씩** 끊어서 돈다.
 
 기준선(2026-08-24):
