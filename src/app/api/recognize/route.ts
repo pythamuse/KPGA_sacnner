@@ -4,19 +4,16 @@ import os from 'os';
 import path from 'path';
 import { randomUUID } from 'crypto';
 import { classifyForm, FORM_CLASSIFIER_POLICY_VERSION } from '../../../lib/recognition/classifyForm';
-import { recognizeStudentForms } from '../../../lib/recognition/detectCheckmarks';
 import {
   createRecognitionOcrDeadlines,
   ROW_ANCHOR_BATCH_BUDGET_MS,
 } from '../../../lib/recognition/ocrBudget';
 import { matchBatch, isStackOrder } from '../../../lib/recognition/batchMatcher';
 import { detectCagiEarlyIntervention } from '../../../lib/recognition/cagiEarlyIntervention';
-import { buildSourcePreview } from '../../../lib/recognition/buildSourcePreview';
+import { recognizeOneStudent } from '../../../lib/recognition/recognizeOneStudent';
 import {
-  evaluateSheetQuality,
   isRegistrationMetaLike,
   type RegistrationMetaLike,
-  type SheetQualityVerdict,
 } from '../../../lib/recognition/sheetQuality';
 import { storeRecognitionMeasurements } from '../../../lib/labelExport/labelStore';
 import {
@@ -215,81 +212,29 @@ export async function POST(req: Request) {
         readRegistrationForPath(jobId, pair.cagiPath, uploadOrigins),
         readRegistrationForPath(jobId, pair.satisfactionPath, uploadOrigins),
       ]);
-      const draft = await recognizeStudentForms(
-        pair.cagiPath,
-        pair.satisfactionPath,
-        {
-          ...createRecognitionOcrDeadlines(rowOcrDeadlineAt, studentIndex),
-          cagiPhotoProvenance: Boolean(cagiRegistration),
-          satisfactionPhotoProvenance: Boolean(satisfactionRegistration),
-        },
-      );
-      const {
-        recognitionCropRects,
-        recognitionCandidateRects,
-        recognitionCropSource,
-        recognitionCropDiagnostic,
-        recognitionRegistration,
-        recognitionRejectedCandidateRects,
-        recognitionValueSource,
-        recognitionContested,
-        recognitionSuggestion,
-        recognitionDecisionTrace,
-        recognitionEvidence,
-        recognitionMeasurements,
-        ...recognizedDraft
-      } = draft;
+      // Assembly of the student object lives in `recognizeOneStudent` so the
+      // per-student route (/api/recognize/student) returns the same object
+      // from the same code. This route keeps everything that is batch-shaped:
+      // where the files came from, the shared row-OCR deadline, and the
+      // job-scoped measurements sidecar.
       const cagiImageId = path.basename(pair.cagiPath).split('.')[0];
+      const { student, measurements } = await recognizeOneStudent({
+        cagiPath: pair.cagiPath,
+        satisfactionPath: pair.satisfactionPath,
+        cagiRegistration,
+        satisfactionRegistration,
+        ocrDeadlines: createRecognitionOcrDeadlines(rowOcrDeadlineAt, studentIndex),
+        cagiImageId,
+        satisfactionImageId: path.basename(pair.satisfactionPath).split('.')[0],
+      });
       await storeRecognitionMeasurements({
         jobId,
         studentIndex,
         cagiImageId,
-        measurements: recognitionMeasurements || {},
+        measurements,
       });
-      const preview = await buildSourcePreview(
-        pair.cagiPath,
-        pair.satisfactionPath,
-        recognitionCropRects,
-        recognitionCropSource,
-        recognitionCropDiagnostic,
-        recognitionCandidateRects,
-        recognitionRejectedCandidateRects,
-      );
 
-      // Same evaluator as POST /api/uploads/quality (spec F3.2 consistency
-      // requirement) — two different judges would let "it said fine at upload"
-      // disagree with the review screen. Whatever F1 meta the client stored
-      // with these two pages is read back by path, so a photographed sheet can
-      // reach the review screen as retake/unusable/overridden; the scan path
-      // carries no meta and stays provenance-unknown ('good' with reason
-      // no-registration-meta).
-      const sheetQuality = await buildSheetQualityAttachment(
-        pair.cagiPath,
-        pair.satisfactionPath,
-        cagiRegistration,
-        satisfactionRegistration,
-      );
-
-      studentDrafts.push({
-        ...recognizedDraft,
-        ...(sheetQuality ? { sheetQuality } : {}),
-        source: {
-          cagiImageId,
-          satisfactionImageId: path.basename(pair.satisfactionPath).split('.')[0],
-          cagiImageDataUrl: preview.cagiImageDataUrl,
-          satisfactionImageDataUrl: preview.satisfactionImageDataUrl,
-          cropDataUrls: preview.cropDataUrls,
-          cropDebugDataUrls: preview.cropDebugDataUrls,
-          recognitionCropSource: preview.recognitionCropSource,
-          recognitionCropDiagnostic: preview.recognitionCropDiagnostic,
-          recognitionRegistration,
-          recognitionValueSource,
-          recognitionContested,
-          recognitionSuggestion,
-          recognitionDecisionTrace,
-          recognitionEvidence,
-        },
-      });
+      studentDrafts.push(student);
     }
 
     // No originals are needed after the review payload is built. Failed cleanup must not hide a valid result.
@@ -321,46 +266,6 @@ export async function POST(req: Request) {
       await fs.rm(requestScratchDir, { recursive: true, force: true }).catch(() => undefined);
     }
   }
-}
-
-/**
- * Attaches per-sheet quality verdicts to a student draft without ever being
- * able to fail recognition: a sheet whose evaluation throws simply has no
- * verdict attached (spec F3.3 — the verdict is a reviewer signal, never a
- * gate). Draft-field safety: `validateStudent` checks only known fields and
- * `/api/students` rebuilds the saved student from an explicit whitelist, so
- * this extra top-level field travels to the review client and is dropped at
- * save, like the other review-only draft fields.
- */
-async function buildSheetQualityAttachment(
-  cagiPath: string,
-  satisfactionPath: string,
-  cagiRegistration: RegistrationMetaLike | null,
-  satisfactionRegistration: RegistrationMetaLike | null,
-): Promise<{ cagi?: SheetQualityVerdict; satisfaction?: SheetQualityVerdict } | null> {
-  const attachment: { cagi?: SheetQualityVerdict; satisfaction?: SheetQualityVerdict } = {};
-
-  try {
-    attachment.cagi = await evaluateSheetQuality({
-      imagePath: cagiPath,
-      formType: 'cagi',
-      registration: cagiRegistration,
-    });
-  } catch (error) {
-    console.error('cagi sheet-quality evaluation failed', error);
-  }
-
-  try {
-    attachment.satisfaction = await evaluateSheetQuality({
-      imagePath: satisfactionPath,
-      formType: 'satisfaction',
-      registration: satisfactionRegistration,
-    });
-  } catch (error) {
-    console.error('satisfaction sheet-quality evaluation failed', error);
-  }
-
-  return attachment.cagi || attachment.satisfaction ? attachment : null;
 }
 
 async function materializeUploadBatch(

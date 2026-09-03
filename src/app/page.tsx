@@ -1,8 +1,18 @@
 'use client';
 
 import React, { useEffect, useRef, useState } from 'react';
-import ImageUploadPanel, { UploadMode } from '@/components/ImageUploadPanel';
+import ImageUploadPanel, { UploadMode, type StatelessBatchPages } from '@/components/ImageUploadPanel';
 import type { StackOrder } from '@/lib/recognition/batchMatcher';
+import {
+  assembleStatelessSession,
+  pairStatelessPages,
+  StatelessPageCountMismatchError,
+  STATELESS_RECOGNIZE_ENABLED,
+} from '@/lib/stateless/statelessSession';
+import {
+  recognizeStudentsStateless,
+  StatelessFormTypeMismatchError,
+} from '@/lib/stateless/statelessRecognizeClient';
 import type { UploadInventory } from '@/lib/uploadInventory';
 import RecognitionReview from '@/components/RecognitionReview';
 import StudentTable from '@/components/StudentTable';
@@ -170,7 +180,7 @@ function BrandHeader() {
           whiteSpace: 'nowrap',
         }}
       >
-        테스트 버전 v2026-08-27.1
+        테스트 버전 v2026-09-03.1
       </span>
     </div>
   );
@@ -199,6 +209,12 @@ export default function Home() {
   const [restoredFromSnapshot, setRestoredFromSnapshot] = useState(false);
 
   const [isRecognizing, setIsRecognizing] = useState(false);
+  /**
+   * Students finished, out of students expected. Only the stateless path can
+   * report this -- the batch route answers once, at the end -- so it stays null
+   * with the flag off and the recognizing panel renders exactly as before.
+   */
+  const [recognitionProgress, setRecognitionProgress] = useState<{ completed: number; total: number } | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [isUploadingFiles, setIsUploadingFiles] = useState(false);
   const [errors, setErrors] = useState<ValidationError[]>([]);
@@ -338,7 +354,75 @@ export default function Home() {
     }
   };
 
-  const requestRecognition = async (inventory: UploadInventory, satisfactionOrder: StackOrder) => {
+  /**
+   * Flag-on batch recognition: one request per student, no Blob round trip
+   * (Task/STATELESS_RECOGNITION_PLAN_2026-09-03.md §3, round B).
+   *
+   * Everything downstream of this function is the batch path's: the same
+   * `studentDrafts` array in the same order reaches `setDrafts`, and the same
+   * notices reach `setNotices`. The differences are confined to how the answers
+   * are obtained -- two requests at a time, retried per student, and one
+   * student's permanent failure leaving an empty draft in its own slot instead
+   * of failing all nineteen.
+   */
+  const runStatelessRecognition = async (
+    statelessPages: StatelessBatchPages,
+    satisfactionOrder: StackOrder,
+    currentJobId: string,
+  ) => {
+    let pairs;
+    try {
+      pairs = pairStatelessPages(statelessPages.cagi, statelessPages.satisfaction, satisfactionOrder);
+    } catch (error) {
+      if (error instanceof StatelessPageCountMismatchError) {
+        setErrors([{ code: 'COUNT_MISMATCH', message: error.message }]);
+        return;
+      }
+      throw error;
+    }
+
+    let trustUploadedTypes = false;
+    while (true) {
+      setRecognitionProgress({ completed: 0, total: pairs.length });
+      try {
+        const outcomes = await recognizeStudentsStateless({
+          jobId: currentJobId,
+          pairs,
+          trustUploadedTypes,
+          onProgress: (completed, total) => setRecognitionProgress({ completed, total }),
+        });
+        const { studentDrafts, warnings } = assembleStatelessSession(outcomes);
+        setDrafts(studentDrafts);
+        setNotices(warnings);
+        setCurrentDraftIndex(0);
+        return;
+      } catch (error) {
+        // The upload-slot guard is about the two stacks, not one student, so it
+        // stops the run and asks the same question the batch path asked.
+        if (error instanceof StatelessFormTypeMismatchError && !trustUploadedTypes) {
+          const shouldUseUploadedTypes = window.confirm(
+            '자동 양식 판정과 선택한 업로드 칸이 다릅니다.\n\n사진 보정 결과가 불확실할 수 있습니다. 선택한 업로드 칸을 기준으로 검수 화면으로 계속 진행하시겠습니까?',
+          );
+
+          if (shouldUseUploadedTypes) {
+            trustUploadedTypes = true;
+            continue;
+          }
+
+          setErrors([{ code: 'FORM_TYPE_MISMATCH', message: error.message }]);
+          return;
+        }
+
+        throw error;
+      }
+    }
+  };
+
+  const requestRecognition = async (
+    inventory: UploadInventory,
+    satisfactionOrder: StackOrder,
+    statelessPages?: StatelessBatchPages | null,
+  ) => {
     if (!jobId) return;
 
     setIsRecognizing(true);
@@ -348,6 +432,11 @@ export default function Home() {
     let trustUploadedTypes = false;
 
     try {
+      if (STATELESS_RECOGNIZE_ENABLED && statelessPages) {
+        await runStatelessRecognition(statelessPages, satisfactionOrder, jobId);
+        return;
+      }
+
       while (true) {
         const res = await fetch('/api/recognize', {
           method: 'POST',
@@ -381,6 +470,7 @@ export default function Home() {
       setErrors([{ code: 'API_ERROR', message: `이미지 인식 요청 오류: ${err.message}` }]);
     } finally {
       setIsRecognizing(false);
+      setRecognitionProgress(null);
     }
   };
 
@@ -395,10 +485,11 @@ export default function Home() {
   const handleTriggerBatchAnalysis = async (
     inventory: UploadInventory,
     satisfactionOrder: StackOrder = 'same',
+    statelessPages?: StatelessBatchPages | null,
   ) => {
     if (!jobId) return;
 
-    await requestRecognition(inventory, satisfactionOrder);
+    await requestRecognition(inventory, satisfactionOrder, statelessPages);
   };
 
   const handleDraftChange = (updatedDraft: RecognitionDraft) => {
@@ -800,6 +891,11 @@ export default function Home() {
                   <p style={{ color: 'var(--text-muted)', lineHeight: 1.6 }}>
                     업로드된 이미지의 양식 종류와 체크 위치를 확인한 뒤 검수 화면으로 넘깁니다.
                   </p>
+                  {recognitionProgress && (
+                    <p style={{ color: 'var(--text-muted)', fontWeight: 700, marginTop: 8 }} role="status">
+                      학생 {recognitionProgress.completed} / {recognitionProgress.total}명 인식 완료
+                    </p>
+                  )}
                 </div>
               </div>
             )}
