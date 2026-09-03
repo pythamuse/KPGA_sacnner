@@ -1,6 +1,7 @@
 import {
   analyzeChoiceGroup,
   applyTemplateRegistrationFrame,
+  createPageInkCalibration,
   getRegistrationBounds,
   hasUsableFormBounds,
   resolveFormBoundsStatus,
@@ -8,6 +9,7 @@ import {
   type ChoiceGroupResult,
   type DecisionEvidence,
   type ImageAnalysisData,
+  type PageInkCalibration,
   type PixelRect,
 } from './markDensity';
 import type {
@@ -274,6 +276,16 @@ export async function recognizeStudentForms(
       ? await buildCagiRowDetection(cagiImage, cagiImageBuffer, toOcrOptions(options))
       : { overrides: {} };
     const cagiRowOverrides = cagiRowDetection.overrides;
+    const cagiPageCalibration = buildPageInkCalibration(
+      cagiImage,
+      cagiTemplate.choiceGroups,
+      cagiGridOverrides,
+      cagiRowOverrides,
+      cagiGridDetection.registrations,
+      cagiBaseline,
+      basicGroups,
+      options.cagiPhotoProvenance ?? false,
+    );
 
     if (!canAutoRecognizeCagi) {
       draft.warnings?.push('선별검사지의 종이 경계를 안정적으로 찾지 못해 자동 입력을 확정하지 않았습니다. 강조된 항목을 원본과 대조해 직접 확인해주세요.');
@@ -347,6 +359,7 @@ export async function recognizeStudentForms(
           image: cagiBaseline.image,
           candidatePixelOverrides: cagiBaseline.basicCheckboxCandidateRects?.[group.field]
             || cagiBaseline.candidateRects[group.field],
+          pageCalibration: cagiPageCalibration,
         } : undefined,
         options.cagiPhotoProvenance ?? false,
       );
@@ -492,6 +505,16 @@ export async function recognizeStudentForms(
     const satisfactionImage = satisfactionGridStream.scoringImage;
     const satisfactionGridDetection = satisfactionGridStream.detection;
     const satisfactionGridOverrides = satisfactionGridDetection.overrides;
+    const satisfactionPageCalibration = buildPageInkCalibration(
+      satisfactionImage,
+      satisfactionTemplate.choiceGroups,
+      satisfactionGridOverrides,
+      satisfactionRowOverrides,
+      satisfactionGridDetection.registrations,
+      satisfactionBaseline,
+      [],
+      options.satisfactionPhotoProvenance ?? false,
+    );
 
     if (!canAutoRecognizeSatisfaction) {
       draft.warnings?.push('만족도조사 이미지의 종이 경계를 안정적으로 찾지 못해 자동 입력을 확정하지 않았습니다. 강조된 항목을 원본과 대조해 직접 확인해주세요.');
@@ -543,6 +566,7 @@ export async function recognizeStudentForms(
         satisfactionBaseline ? {
           image: satisfactionBaseline.image,
           candidatePixelOverrides: satisfactionBaseline.candidateRects[group.field],
+          pageCalibration: satisfactionPageCalibration,
         } : undefined,
         options.satisfactionPhotoProvenance ?? false,
       );
@@ -1036,6 +1060,63 @@ export function resolveRecognitionCropDiagnostic(
   return source === 'fixed'
     ? `Grid candidate rejected; measured template coordinates used. ${details.join('; ')}`
     : details.join('; ');
+}
+
+/**
+ * Collects the exact candidate geometry the recognition loop will score on one
+ * page, paired with the committed baseline geometry by group/index. The
+ * scorer uses this only for the opt-in grayscale page calibration; the normal
+ * group loop continues to own all recognition decisions.
+ */
+function buildPageInkCalibration(
+  image: ImageAnalysisData,
+  groups: ChoiceGroup[],
+  gridOverrides: Record<string, PixelRect[]>,
+  rowOverrides: Record<string, { top: number; bottom: number }>,
+  registrations: Record<string, FieldRegistration>,
+  baseline: {
+    image: ImageAnalysisData;
+    candidateRects: Record<string, PixelRect[]>;
+    basicCheckboxCandidateRects?: Record<string, PixelRect[]>;
+  } | undefined,
+  basicGroups: ChoiceGroup[] = [],
+  photoProvenance = false,
+): PageInkCalibration | undefined {
+  if (!baseline) return undefined;
+
+  const pageRects: PixelRect[] = [];
+  const baselineRects: PixelRect[] = [];
+  for (const group of groups) {
+    const detectedGridCells = gridOverrides[group.field];
+    const gridCells = completeOverrideOrNull(detectedGridCells, group.candidates.length) ?? undefined;
+    const registration = registrations[group.field];
+    const directCheckboxGroup = basicGroups.includes(group);
+    const scoringCells = directCheckboxGroup && isVerifiedGrid(registration) && gridCells
+      ? normalizeBasicCheckboxRects(image, gridCells)
+      : resolveScoringCells(image, group, gridCells, rowOverrides[group.field], registration);
+    const matchingBaselineRects = directCheckboxGroup
+      ? baseline.basicCheckboxCandidateRects?.[group.field]
+        || baseline.candidateRects[group.field]
+      : baseline.candidateRects[group.field];
+
+    if (
+      scoringCells.length !== group.candidates.length
+      || !matchingBaselineRects
+      || matchingBaselineRects.length !== group.candidates.length
+    ) {
+      continue;
+    }
+    pageRects.push(...scoringCells);
+    baselineRects.push(...matchingBaselineRects);
+  }
+
+  return createPageInkCalibration(
+    image,
+    pageRects,
+    baseline.image,
+    baselineRects,
+    photoProvenance,
+  );
 }
 
 function getAutomaticDecisionTrace(
