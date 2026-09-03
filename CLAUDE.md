@@ -119,6 +119,15 @@ node scripts/check-delegates.cjs "<background task 로그 디렉터리>"
 - 계측기는 **가설을 확인하는 것이 아니라 반증할 수 있게** 만든다. 착수 전에 "어떤 값이 나오면 이 가설이 죽는가"를 적어둔다.
 - **계측기가 무엇을 재고 있는지 확인한다.** 이 프로젝트에서 엉뚱한 단계를 잰 사례가 네 번 있다 — 렌더 해상도 불일치, `applyTemplateRegistrationFrame` 이전 단계, 커밋 안 된 브랜치, 그리고 계측기가 붙인 **이름**이 틀린 경우.
 
+### 플래그를 끈다는 것은 변수를 **비우는** 것이다
+
+`markDensity.ts`의 opt-in 플래그(`MARK_DECISION_TRACE`·`MARK_AFFINE_TONE`·`MARK_BASELINE_DILATE`·`MARK_SHAPE_TRACE`·`MARK_CANCEL_VETO`)는
+`Boolean(process.env.X)`로 검사한다 — **`X=0`은 참이므로 기능이 켜진다.** 2026-09-03에 판정 스크립트가 off 열을 `MARK_CANCEL_VETO=0`으로 주는 바람에
+off/on이 같은 수치로 나왔고, 한 라운드(스캔 8회·사진 8회)를 헛돌렸다. 판정 스크립트의 off는 `unset`이어야 한다.
+
+반면 `tableGridDetection.ts`의 기본 on 플래그(`GRID_MATCH_V2`·`GRID_BAND_V2`·`GRID_BAND_V2_COLS`)와 `GRAY_CLASS`는 `!== '0'`이라 `=0`이 끄는 값이다.
+**두 규약이 한 저장소에 공존한다.** 새 플래그를 읽는 코드를 볼 때마다 어느 쪽인지 확인하고, 판정 스크립트에는 그 플래그의 off 표기를 그대로 적어라.
+
 ### 합성 이미지로 판정하지 않는다
 
 합성이 이 프로젝트를 **세 번** 잘못된 방향으로 이끌었다. 한 번은 전 항목 개선처럼 보였는데 실제 스캔에서 45칸을 잃었다. 합성은 **코드가 도는지 확인하는 연기 테스트로만** 쓴다.
@@ -171,6 +180,8 @@ node -e "const j=require('./local-scans/answer-key.json');j.pages.forEach(p=>Obj
 | 2 | `선별검사 샘플2반복.pdf` | `만족도조사 샘플2 반복.pdf` | 그대로 |
 | 3 | `선별검사 샘플3반복.pdf` | `만족도조사 샘플3 역순.pdf` | **만족도만 역순** |
 | 4 | `선별검사지(그레이,600dpi).pdf` | `만족도(역순,그레이,600dpi).pdf` | **만족도만 역순** |
+
+세트 4의 원본 PDF는 2026-09-03에 데스크톱에서 사라졌다 — 스크래치패드 사본 `gray/cagi-gray-600.pdf`·`gray/sat-gray-600-reversed.pdf`(후자는 이미 역순 파일이지만 `REAL_SCAN_SAT_REVERSED=1`과 함께 쓴다)로 잰다.
 
 **세트 4는 회색조 600dpi**(`BitsPerComponent 8` · `DeviceGray` · JPEG)이고, 세트 1~3은
 1비트 CCITTFax다. 원본은 `C:/Users/night/Desktop/` 에 있고 사본은 스크래치패드에 둔다.
