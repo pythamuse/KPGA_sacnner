@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
+import { classifyForm, FORM_CLASSIFIER_POLICY_VERSION } from '../../../../lib/recognition/classifyForm';
+import { detectCagiEarlyIntervention } from '../../../../lib/recognition/cagiEarlyIntervention';
 import {
   createRecognitionOcrDeadlines,
   ROW_ANCHOR_BATCH_BUDGET_MS,
@@ -12,6 +14,13 @@ import {
   type RegistrationMetaLike,
 } from '../../../../lib/recognition/sheetQuality';
 import { storeRecognitionMeasurements } from '../../../../lib/labelExport/labelStore';
+import {
+  buildEarlyInterventionContactWarnings,
+  buildEarlyInterventionWarnings,
+  buildFormTypeMismatchMessage,
+  decideSheetType,
+  type FormTypeMismatch,
+} from '../../../../lib/stateless/formNotices';
 import { isSafeJobId } from '../../../../lib/uploadInventory';
 
 /**
@@ -98,6 +107,10 @@ export async function POST(req: Request) {
     // malformed value reads as absent rather than as a lie.
     const cagiRegistration = parseRegistrationField(formData.get('cagiRegistration'));
     const satisfactionRegistration = parseRegistrationField(formData.get('satisfactionRegistration'));
+    // The batch route takes this in its JSON body; here it rides the same
+    // multipart request. Only an explicit '1' trusts the upload slots, so an
+    // absent or garbled field keeps the strict guard.
+    const trustUploadedTypes = formData.get('trustUploadedTypes') === '1';
 
     scratchDir = await fs.mkdtemp(path.join(os.tmpdir(), 'kpga-student-'));
     const cagiImageId = `cagi_page_${studentIndex}`;
@@ -106,6 +119,61 @@ export async function POST(req: Request) {
     const satisfactionPath = path.join(scratchDir, `${satisfactionImageId}.jpg`);
     await fs.writeFile(cagiPath, Buffer.from(await cagiFile.arrayBuffer()));
     await fs.writeFile(satisfactionPath, Buffer.from(await satisfactionFile.arrayBuffer()));
+
+    // Everything the batch route decided before recognizing, decided here for
+    // this one student instead: the upload-slot guard and the two
+    // early-intervention notices. Same call sites, same order, same strings —
+    // only the scope shrank, from "the whole bundle" to "these two sheets".
+    // None of it can reach a recognized value; it gates and it annotates.
+    const [cagiFormType, satisfactionFormType, earlyIntervention] = await Promise.all([
+      classifyForm(cagiPath),
+      classifyForm(satisfactionPath),
+      detectCagiEarlyIntervention(cagiPath),
+    ]);
+
+    const decisions = [
+      decideSheetType({
+        filename: cagiFile.name || `${cagiImageId}.jpg`,
+        uploadedAs: 'cagi',
+        detectedAs: cagiFormType,
+        // A filled-in early-intervention block scores as a satisfaction form
+        // often enough that refusing it would reject valid CAGI paper.
+        keepAsCagiWithNotice: cagiFormType === 'satisfaction'
+          && (earlyIntervention.hasMarks || earlyIntervention.hasContactInformation),
+        trustUploadedTypes,
+      }),
+      decideSheetType({
+        filename: satisfactionFile.name || `${satisfactionImageId}.jpg`,
+        uploadedAs: 'satisfaction',
+        detectedAs: satisfactionFormType,
+        keepAsCagiWithNotice: false,
+        trustUploadedTypes,
+      }),
+    ];
+
+    const mismatches = decisions
+      .map((decision) => decision.mismatch)
+      .filter((mismatch): mismatch is FormTypeMismatch => mismatch !== null);
+
+    if (mismatches.length > 0) {
+      return NextResponse.json({
+        error: buildFormTypeMismatchMessage(mismatches),
+        code: 'FORM_TYPE_MISMATCH',
+        recognitionPolicyVersion: FORM_CLASSIFIER_POLICY_VERSION,
+        mismatches,
+        canProceedWithUploadedTypes: true,
+      }, { status: 400 });
+    }
+
+    // The batch route numbers these pages by the CAGI stack's sorted position,
+    // which is the student's own position — `matchBatch` pairs the sorted CAGI
+    // list in order, so student N always carries CAGI page N+1.
+    const cagiPageNumber = studentIndex + 1;
+    const warnings = [
+      ...buildEarlyInterventionWarnings(earlyIntervention.hasMarks ? [cagiPageNumber] : []),
+      ...buildEarlyInterventionContactWarnings(earlyIntervention.hasContactInformation ? [cagiPageNumber] : []),
+      ...decisions.flatMap((decision) => decision.overrideWarning ? [decision.overrideWarning] : []),
+    ];
 
     const { student, measurements } = await recognizeOneStudent({
       cagiPath,
@@ -128,7 +196,19 @@ export async function POST(req: Request) {
       console.error('Unable to store recognition measurements for student', studentIndex, error);
     }
 
-    return NextResponse.json({ student });
+    // The notices ride ON the student, not beside it: `RecognitionDraft.warnings`
+    // is what the review screen already prints above that student's own form,
+    // and with one student per request there is no bundle left to hang them
+    // off. APPENDED, never assigned: the recognizer fills the same array with
+    // its own findings (an unstable paper boundary, for one), and overwriting
+    // it would delete a warning about the values in order to add one about the
+    // sheet.
+    return NextResponse.json({
+      student: warnings.length > 0
+        ? { ...student, warnings: [...(student.warnings ?? []), ...warnings] }
+        : student,
+      recognitionPolicyVersion: FORM_CLASSIFIER_POLICY_VERSION,
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : '알 수 없는 오류';
     return NextResponse.json({ error: `이미지 인식 결과 처리 중 실패: ${message}` }, { status: 500 });

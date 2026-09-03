@@ -43,14 +43,33 @@ import {
 } from '@/lib/pdf/pdfRenderConfig';
 import { cagiTemplate, satisfactionTemplate } from '@/lib/recognition/roiTemplates';
 import { describePairing, type StackOrder } from '@/lib/recognition/batchMatcher';
+import {
+  STATELESS_RECOGNIZE_ENABLED,
+  type StatelessPage,
+} from '@/lib/stateless/statelessSession';
 import type { UploadBatchReference, UploadInventory } from '@/lib/uploadInventory';
 
 export type UploadMode = 'sequential' | 'batch';
 
+/**
+ * The rendered pages of a batch, held in memory instead of uploaded
+ * (Task/STATELESS_RECOGNITION_PLAN_2026-09-03.md §3). Only ever non-null with
+ * `NEXT_PUBLIC_STATELESS_RECOGNIZE=1`; the flag-off path leaves it untouched
+ * and keeps uploading to `/api/upload`.
+ */
+export interface StatelessBatchPages {
+  cagi: StatelessPage[];
+  satisfaction: StatelessPage[];
+}
+
 interface ImageUploadPanelProps {
   mode: UploadMode;
   jobId: string;
-  onAnalyzeTrigger: (inventory: UploadInventory, satisfactionOrder: StackOrder) => void | Promise<void>;
+  onAnalyzeTrigger: (
+    inventory: UploadInventory,
+    satisfactionOrder: StackOrder,
+    statelessPages?: StatelessBatchPages | null,
+  ) => void | Promise<void>;
   onUploadProgressChange?: (isProcessing: boolean) => void;
   onUploadSuccess: (type: 'cagi' | 'satisfaction', imageId: string, filename: string) => void;
 }
@@ -458,6 +477,15 @@ export default function ImageUploadPanel({
   const cameraCanvasRef = useRef<HTMLCanvasElement>(null);
   const cameraStreamRef = useRef<MediaStream | null>(null);
   const uploadInventoryRef = useRef<UploadInventory>({ cagi: null, satisfaction: null });
+  /**
+   * Flag-on only: the batch's rendered pages, kept here instead of uploaded.
+   * ~11MB for 38 sheets, the same order the IndexedDB draft cache already
+   * holds, and freed when the batch is reset or recognition hands off.
+   */
+  const statelessPagesRef = useRef<{ cagi: StatelessPage[] | null; satisfaction: StatelessPage[] | null }>({
+    cagi: null,
+    satisfaction: null,
+  });
   /** Detection scratch canvas -- never the capture canvas, which holds a shot. */
   const liveFrameCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const liveLoopActiveRef = useRef<boolean>(false);
@@ -1180,15 +1208,48 @@ export default function ImageUploadPanel({
     }
   };
 
+  /**
+   * Flag-on: the same prepared pages, kept in memory instead of uploaded.
+   *
+   * `shrinkImageFileIfNeeded` runs here because that is what `uploadSingleFile`
+   * did on the way to `/api/upload` -- the recognizer has to receive the same
+   * bytes it would have read back out of Blob, or the two paths are not
+   * comparable cell by cell. Nothing else is done to the page: no `/api/upload`,
+   * no F3 verdict request (the per-sheet verdict comes back attached to the
+   * student draft), and so no Blob operation at all.
+   */
+  const holdPreparedBatchInMemory = async (
+    type: UploadKind,
+    pages: PreparedBatchPage[],
+  ): Promise<void> => {
+    const held: StatelessPage[] = [];
+    for (const page of pages) {
+      setBatchStatusMessage(`페이지를 준비하고 있습니다. (${page.page}/${pages.length})`);
+      held.push({
+        file: await shrinkImageFileIfNeeded(page.file, MAX_UPLOAD_IMAGE_BYTES),
+        page: page.page,
+        filename: page.filename,
+        registration: page.registration,
+      });
+    }
+    statelessPagesRef.current = { ...statelessPagesRef.current, [type]: held };
+  };
+
   const uploadPreparedBatch = async (
     type: UploadKind,
     batch: UploadBatchReference,
     pages: PreparedBatchPage[],
     warnings: BatchCorrectionWarning[],
   ) => {
-    for (const page of pages) {
-      setBatchStatusMessage(`페이지를 업로드하고 있습니다. (${page.page}/${pages.length})`);
-      await uploadSingleFile(page.file, type, batch, page.page, page.registration);
+    const stateless = STATELESS_RECOGNIZE_ENABLED && mode === 'batch';
+
+    if (stateless) {
+      await holdPreparedBatchInMemory(type, pages);
+    } else {
+      for (const page of pages) {
+        setBatchStatusMessage(`페이지를 업로드하고 있습니다. (${page.page}/${pages.length})`);
+        await uploadSingleFile(page.file, type, batch, page.page, page.registration);
+      }
     }
 
     uploadInventoryRef.current = { ...uploadInventoryRef.current, [type]: batch };
@@ -1201,6 +1262,8 @@ export default function ImageUploadPanel({
       ...previous.filter((warning) => warning.type !== type),
       ...warnings,
     ]);
+
+    if (stateless) return;
 
     // F3: per-page verdicts, fire-and-forget after the uploads are safe.
     void Promise.allSettled(pages.map((page) =>
@@ -1542,17 +1605,23 @@ export default function ImageUploadPanel({
     setBatchStatusMessage('업로드된 파일을 정리하고 있습니다.');
 
     try {
-      const res = await fetch('/api/jobs/cleanup', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jobId, scope: 'uploads' }),
-      });
+      // Flag-on there is nothing stored to clean up: the pages never left the
+      // tab. Calling the cleanup endpoint anyway would be the one Blob
+      // operation the stateless path still made.
+      if (!(STATELESS_RECOGNIZE_ENABLED && mode === 'batch')) {
+        const res = await fetch('/api/jobs/cleanup', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ jobId, scope: 'uploads' }),
+        });
 
-      if (!res.ok) {
-        const errData = await res.json();
-        throw new Error(errData.error || '파일 정리 실패');
+        if (!res.ok) {
+          const errData = await res.json();
+          throw new Error(errData.error || '파일 정리 실패');
+        }
       }
 
+      statelessPagesRef.current = { cagi: null, satisfaction: null };
       setCagiCount(0);
       setSatCount(0);
       setCagiFile(null);
@@ -1566,6 +1635,18 @@ export default function ImageUploadPanel({
       setIsBatchProcessing(false);
       setBatchStatusMessage('');
     }
+  };
+
+  /**
+   * The two held stacks, or null when this run is not stateless. Null is the
+   * signal the caller uses to stay on the Blob-backed batch route, so it must
+   * stay null whenever either stack is missing.
+   */
+  const statelessBatchPages = (): StatelessBatchPages | null => {
+    if (!STATELESS_RECOGNIZE_ENABLED || mode !== 'batch') return null;
+    const { cagi, satisfaction } = statelessPagesRef.current;
+    if (!cagi || !satisfaction) return null;
+    return { cagi, satisfaction };
   };
 
   const isMismatch = cagiCount !== satCount;
@@ -2083,7 +2164,13 @@ export default function ImageUploadPanel({
                     className="btn-primary"
                     type="button"
                     disabled={isMismatch}
-                    onClick={() => void onAnalyzeTrigger(uploadInventoryRef.current, satisfactionOrder)}
+                    onClick={() => void onAnalyzeTrigger(
+                      uploadInventoryRef.current,
+                      satisfactionOrder,
+                      // Flag-off this is null and the caller takes the batch
+                      // route exactly as before.
+                      statelessBatchPages(),
+                    )}
                   >
                     전체 설문지 인식 시작
                   </button>
