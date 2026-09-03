@@ -15,7 +15,7 @@ import {
 import cagiOrbTemplateJson from './orbTemplate.cagi.json';
 import satisfactionOrbTemplateJson from './orbTemplate.satisfaction.json';
 
-const OPENCV_SCRIPT_URL = 'https://docs.opencv.org/4.9.0/opencv.js';
+const OPENCV_SCRIPT_URL = '/vendor/opencv/4.9.0/opencv.js';
 
 /**
  * Long side of the internal detection copy. Detection stays at the scale it

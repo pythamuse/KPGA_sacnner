@@ -1,12 +1,11 @@
 export const PDFJS_VERSION = '6.1.200';
 
-const PDFJS_CDN_BASE = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${PDFJS_VERSION}`;
-const PDFJS_DIST_BASE = `https://unpkg.com/pdfjs-dist@${PDFJS_VERSION}`;
+const PDFJS_VENDOR_BASE = `/vendor/pdfjs/${PDFJS_VERSION}`;
 
-export const PDFJS_WORKER_SRC = `${PDFJS_CDN_BASE}/pdf.worker.min.mjs`;
-// cdnjs publishes the viewer and worker bundle, but not the decoder WASM assets.
-// JBIG2 scanner PDFs require these assets to initialize their decoder.
-export const PDFJS_WASM_URL = `${PDFJS_DIST_BASE}/wasm/`;
+export const PDFJS_MAIN_SRC = `${PDFJS_VENDOR_BASE}/pdf.min.mjs`;
+export const PDFJS_WORKER_SRC = `${PDFJS_VENDOR_BASE}/pdf.worker.min.mjs`;
+// JBIG2 scanner PDFs require these matching decoder assets to initialize.
+export const PDFJS_WASM_URL = `${PDFJS_VENDOR_BASE}/wasm/`;
 
 /**
  * Upload raster settings. The browser renders every PDF page through this

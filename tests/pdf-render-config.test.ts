@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  PDFJS_MAIN_SRC,
+  PDFJS_VERSION,
   PDFJS_WASM_URL,
   PDFJS_WORKER_SRC,
   buildPdfDocumentOptions,
@@ -8,11 +10,20 @@ import {
 } from '../src/lib/pdf/pdfRenderConfig';
 
 describe('PDF render configuration', () => {
-  it('provides a decoder WASM path alongside the same-version worker', () => {
+  it('keeps every PDF.js runtime URL on the same-origin vendor path', () => {
     const data = new ArrayBuffer(12);
+    const urls = [PDFJS_MAIN_SRC, PDFJS_WORKER_SRC, PDFJS_WASM_URL];
 
-    expect(PDFJS_WORKER_SRC).toContain('pdf.js/6.1.200/pdf.worker.min.mjs');
-    expect(PDFJS_WASM_URL).toBe('https://unpkg.com/pdfjs-dist@6.1.200/wasm/');
+    expect(PDFJS_MAIN_SRC).toBe(`/vendor/pdfjs/${PDFJS_VERSION}/pdf.min.mjs`);
+    expect(PDFJS_WORKER_SRC).toBe(`/vendor/pdfjs/${PDFJS_VERSION}/pdf.worker.min.mjs`);
+    expect(PDFJS_WASM_URL).toBe(`/vendor/pdfjs/${PDFJS_VERSION}/wasm/`);
+    for (const url of urls) {
+      expect(url).toMatch(/^\/vendor\//);
+      expect(url).not.toMatch(/^https?:\/\//);
+      expect(url).not.toContain('cdnjs.cloudflare.com');
+      expect(url).not.toContain('unpkg.com');
+      expect(url).not.toContain('docs.opencv.org');
+    }
     expect(buildPdfDocumentOptions(data)).toEqual({ data, wasmUrl: PDFJS_WASM_URL });
   });
 

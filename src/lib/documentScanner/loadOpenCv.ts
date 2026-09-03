@@ -1,4 +1,4 @@
-const OPENCV_SCRIPT_URL = 'https://docs.opencv.org/4.9.0/opencv.js';
+const OPENCV_SCRIPT_URL = '/vendor/opencv/4.9.0/opencv.js';
 
 declare global {
   interface Window {

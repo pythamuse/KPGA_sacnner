@@ -9,9 +9,9 @@
 // layout.tsx imports pdf.js from an inline module. Removing it needs a nonce
 // middleware and a rework of that import, which is a separate change.
 //
-// Third-party origins in use: pdf.js from cdnjs (its worker is fetched and run
-// as a blob), its WASM decoders from unpkg, and OpenCV from docs.opencv.org,
-// which is loaded both as a script tag and via importScripts inside a worker.
+// Third-party origins in use: Google Fonts from fonts.googleapis.com and
+// fonts.gstatic.com. Runtime pdf.js, decoder WASM, and OpenCV assets are
+// served from this origin.
 // `data:` appears in connect-src because the review screen re-fetches its own
 // crop data URIs to build blob links.
 const CONTENT_SECURITY_POLICY = [
@@ -22,9 +22,9 @@ const CONTENT_SECURITY_POLICY = [
   // failed inside the correction worker. Dropping it would disable the
   // document scanner. It does not weaken connect-src, which is what keeps an
   // injected script from shipping the cached batch anywhere.
-  "script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' https://cdnjs.cloudflare.com https://unpkg.com https://docs.opencv.org",
+  "script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'",
   "worker-src 'self' blob:",
-  "connect-src 'self' data: blob: https://cdnjs.cloudflare.com https://unpkg.com https://docs.opencv.org",
+  "connect-src 'self' data: blob:",
   "img-src 'self' data: blob:",
   // globals.css opens with an @import of Noto Sans KR from Google Fonts, and
   // without these two the browser blocks it and every Korean glyph on the page
