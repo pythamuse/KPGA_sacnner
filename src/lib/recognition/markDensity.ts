@@ -2853,9 +2853,24 @@ function calculateTemplateInkFeatures(
       );
       actualTotal += actualInk;
       baselineTotal += baselineInk;
+      // The subtrahend, and only the subtrahend. Under MARK_BASELINE_DILATE the
+      // printed ink is grown by one sample before it is taken away, so a
+      // glyph edge that the whole-sample alignment left one sample off no
+      // longer survives as residual. The totals above are already banked, so
+      // the ink ratio, the total-ink invariant and every gate keep reading the
+      // undilated baseline -- the flag moves the subtraction, nothing else.
+      const subtrahendInk = baselineDilationEnabled()
+        ? dilatedBaselineInk(
+          blank,
+          sampleWidth,
+          sampleHeight,
+          x + alignment.x,
+          y + alignment.y,
+        )
+        : baselineInk;
       // Ignore the narrow anti-aliasing and scanner-noise band around the
       // printed form. A handwritten circle or check remains well above it.
-      const residualInk = calculateResidualInk(actualInk, baselineInk, pageCalibration);
+      const residualInk = calculateResidualInk(actualInk, subtrahendInk, pageCalibration);
       residual[index] = residualInk;
       difference += residualInk;
     }
@@ -3423,10 +3438,80 @@ const RESIDUAL_EDGE_GRADIENT = 0.15;
  * own resolution can still be shifted a whole pixel.
  */
 function alignmentRadius(pitch: number): number {
+  const floor = alignmentRadiusFloor();
   if (!Number.isFinite(pitch) || pitch <= 0) {
-    return BASELINE_ALIGNMENT_RADIUS;
+    return floor;
   }
-  return clamp(Math.round(1 / pitch), BASELINE_ALIGNMENT_RADIUS, BASELINE_ALIGNMENT_MAX_RADIUS);
+  return clamp(Math.round(1 / pitch), floor, BASELINE_ALIGNMENT_MAX_RADIUS);
+}
+
+/**
+ * Instrument, off by default: the smallest reach the baseline alignment search
+ * is allowed, in samples. Unset it reads `BASELINE_ALIGNMENT_RADIUS` and every
+ * number this file produces is the one it produced before.
+ *
+ * MARK_ALIGN_RADIUS=2 gives every cell the reach a cell sampled at half a
+ * source pixel already gets, which is the point: the hypothesis under
+ * measurement is that the ~0.03 residual left in unmarked boxes is a printed
+ * glyph the whole-sample search could not reach. Raising the floor here rather
+ * than inside `findBestBaselineAlignment` keeps the reach and the compared
+ * window the same number, which is the invariant that function is built on --
+ * every offset reads real in-bounds samples and compares exactly the same
+ * count, so a wider search cannot win by scoring fewer samples. The cost is
+ * that the scored window narrows with the reach (36x28 samples inset by 2
+ * instead of 1); that is the same trade an oversampled cell already makes, and
+ * `usablePixels` already divides by the count it actually summed.
+ *
+ * Values outside the search's own bounds are clamped rather than refused: this
+ * is a measurement dial, and a nonsense setting should read as the nearest
+ * sensible one rather than change the code path.
+ */
+function alignmentRadiusFloor(): number {
+  if (typeof process === 'undefined') return BASELINE_ALIGNMENT_RADIUS;
+  const raw = process.env?.MARK_ALIGN_RADIUS;
+  if (typeof raw !== 'string') return BASELINE_ALIGNMENT_RADIUS;
+  const parsed = Number.parseInt(raw.trim(), 10);
+  if (!Number.isFinite(parsed)) return BASELINE_ALIGNMENT_RADIUS;
+  return clamp(parsed, BASELINE_ALIGNMENT_RADIUS, BASELINE_ALIGNMENT_MAX_RADIUS);
+}
+
+/**
+ * Instrument, off by default: 3x3 maximum filter over the baseline ink map,
+ * read at the aligned position.
+ *
+ * `darkness` runs light-to-dark, so a maximum over the neighbourhood is a
+ * dilation of the printed ink -- one sample of slack in every direction for
+ * the subtraction to find the same stroke the page has.
+ *
+ * This is deliberately not the dilation recorded at
+ * `findBestBaselineAlignment` as having taken CORRECT 92 to 64. That one
+ * enlarged what is removed from every cell unconditionally and permanently.
+ * This one is off unless asked for, and even on it touches only the residual:
+ * `actualInk`, `baselineInk`, the total-ink invariant and every gate
+ * constant still read the undilated map. The delegator measures whether the
+ * separation it buys is worth the ink it eats; this file does not decide that.
+ */
+function baselineDilationEnabled(): boolean {
+  return typeof process !== 'undefined' && Boolean(process.env?.MARK_BASELINE_DILATE);
+}
+
+function dilatedBaselineInk(
+  grid: number[],
+  width: number,
+  height: number,
+  x: number,
+  y: number,
+): number {
+  let maxInk = 0;
+  for (let offsetY = -1; offsetY <= 1; offsetY += 1) {
+    for (let offsetX = -1; offsetX <= 1; offsetX += 1) {
+      const ink = darkness(sampleGridAt(grid, width, height, x + offsetX, y + offsetY));
+      if (ink > maxInk) {
+        maxInk = ink;
+      }
+    }
+  }
+  return maxInk;
 }
 
 /**

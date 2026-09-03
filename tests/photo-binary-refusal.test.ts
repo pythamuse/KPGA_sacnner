@@ -10,6 +10,7 @@ import {
   satisfactionTemplate,
 } from '../src/lib/recognition/roiTemplates';
 import { withAffineTone } from './helpers/affineTone';
+import { pinShippedScorer } from './helpers/scorerVariants';
 
 /**
  * Two-candidate groups on a photo sheet reach no automatic value at all --
@@ -231,6 +232,9 @@ afterEach(() => {
     process.env.MARK_AFFINE_TONE = ambientAffineTone;
   }
 });
+
+// Every number below is the shipped scorer's. See `pinShippedScorer`.
+pinShippedScorer();
 
 describe('the fixture reads as the measurement it stands in for', () => {
   it('produces scores on the right side of both floors', () => {

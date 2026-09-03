@@ -6,6 +6,7 @@ import {
   PixelRect,
 } from '../src/lib/recognition/markDensity';
 import { ChoiceGroup } from '../src/lib/recognition/roiTemplates';
+import { pinShippedScorer } from './helpers/scorerVariants';
 
 /**
  * The tonal correction a photographed cell is measured through, from
@@ -80,6 +81,9 @@ const DARK_PHOTO = boxSamples(DARK_PAPER, [
   { level: DARK_MARK, count: MARK_SAMPLES },
   { level: DARK_PRINT, count: PRINT_SAMPLES },
 ]);
+
+// Every number below is the shipped scorer's. See `pinShippedScorer`.
+pinShippedScorer();
 
 describe('the fixture reads as the measurement it stands in for', () => {
   it('puts the anchors where §12.2 measured them', () => {

@@ -45,6 +45,18 @@ const GRID_V2_AFFINE_POSITION_LAMBDA = 2;
 const GRID_V2_UNIFORM_OFFSET_FACTOR = 0.45;
 const GRID_V2_DEFAULT_ANCHOR_FACTOR = 0.45;
 const GRID_V2_SATISFACTION_SCALE_ANCHOR_Y_FACTOR = 0.55;
+// GRID_BAND_V2 (default on, GRID_BAND_V2=0 to restore the old row match). The
+// V2 row candidates are first restricted to a band around each expected row
+// boundary, and when no candidate set matches, the
+// bands of the expected rows nothing landed in are rescanned at a lower dark
+// ratio. Both numbers come from the browser raster of set 1 p4: the spurious
+// rules above the five-point table sit 15-67px above the first expected row on
+// a 33px pitch, so 0.75 of the pitch drops most of them; the two rules the 0.2
+// scan loses are found at 0.15 within 0.4 of the pitch of where they belong.
+const GRID_BAND_HALF_WIDTH_RATIO = 0.75;
+const GRID_BAND_RESCUE_DARK_RATIO_SCALE = 0.6;
+const GRID_BAND_RESCUE_MIN_DARK_RATIO = 0.12;
+const GRID_BAND_RESCUE_MERGE_TOLERANCE_PX = 1;
 const DEFAULT_VERTICAL_LINE_DARK_RATIO = 0.32;
 const DEFAULT_HORIZONTAL_LINE_DARK_RATIO = 0.3;
 const DEFAULT_DARK_THRESHOLD = 200;
@@ -174,6 +186,22 @@ function isGridMatchV2Enabled(): boolean {
   // Default on since 2026-09-03 (Task/B3_GRID_FIT_MEASUREMENT_2026-09-03.md §6);
   // GRID_MATCH_V2=0 restores the choose-k matcher for comparison runs.
   return process.env.GRID_MATCH_V2 !== '0';
+}
+
+function isGridBandV2Enabled(): boolean {
+  // Default on since 2026-09-03: measured cell-identical on the scan sets and
+  // the product photo sets, +6 correct with no new wrong across the 19 browser
+  // pages. GRID_BAND_V2=0 restores the unrestricted row match for comparison.
+  return process.env.GRID_BAND_V2 !== '0';
+}
+
+function isGridBandV2ColsEnabled(): boolean {
+  // The column analogue of GRID_BAND_V2. Separate flag because the two axes
+  // fail differently: a column band holds glyph edges the row bands do not, so
+  // the rescued column match is additionally required to leave no expected
+  // column missing (see matchColumnLinesWithinExpectedBands).
+  // GRID_BAND_V2_COLS=0 restores the unrestricted column match.
+  return process.env.GRID_BAND_V2_COLS !== '0';
 }
 
 /**
@@ -608,6 +636,8 @@ function emitGridTrace(
     `[grid-fit] table=${trace.tableId}`
       + ` mode=${trace.mode}`
       + ` detectedRows=${trace.detectedRows}`
+      + (trace.expectedYpx ? ` expectedYpx=[${trace.expectedYpx.join(',')}] detectedYpx=[${(trace.detectedYpx || []).join(',')}] rescanYpx=[${(trace.rescanYpx || []).join(',')}]` : '')
+      + (trace.expectedXpx ? ` expectedXpx=[${trace.expectedXpx.join(',')}] detectedXpx=[${(trace.detectedXpx || []).join(',')}] rescanXpx=[${(trace.rescanXpx || []).join(',')}]` : '')
       + ` expectedRows=${trace.expectedRows}`
       + ` matched=${formatIndexes(trace.rowMatch?.matchedExpected)}`
       + ` missing=${formatIndexes(trace.rowMatch?.missingExpected)}`
@@ -626,7 +656,19 @@ function emitGridTrace(
       + ` refusedBy=${refusedBy}`
       + eligibilityTrace
       + ` matchedCols=${formatIndexes(trace.columnMatch?.matchedExpected)}`
-      + ` missingCols=${formatIndexes(trace.columnMatch?.missingExpected)}`,
+      + ` missingCols=${formatIndexes(trace.columnMatch?.missingExpected)}`
+      + (trace.outOfBand === undefined
+        ? ''
+        : ` outOfBand=${trace.outOfBand}`
+          + ` rescued=[${(trace.rescued || [])
+            .map((line) => `${line.expectedIndex}@${Math.round(line.darkRatio * 1000) / 1000}`)
+            .join(',')}]`)
+      + (trace.outOfBandCols === undefined
+        ? ''
+        : ` outOfBandCols=${trace.outOfBandCols}`
+          + ` rescuedCols=[${(trace.rescuedCols || [])
+            .map((line) => `${line.expectedIndex}@${Math.round(line.darkRatio * 1000) / 1000}`)
+            .join(',')}]`),
   );
 }
 
@@ -642,6 +684,20 @@ interface GridTraceData {
   tableId: string;
   mode: 'v1' | 'v2';
   detectedRows: number;
+  /** Instrument: absolute y of expected row boundaries and of every detected line, plus a low-threshold rescan (GRID_TRACE only). */
+  expectedYpx?: number[];
+  detectedYpx?: number[];
+  rescanYpx?: number[];
+  /** Instrument: the column analogue (expected boundary x, detected vertical lines, low-threshold rescan). */
+  expectedXpx?: number[];
+  detectedXpx?: number[];
+  rescanXpx?: number[];
+  /** GRID_BAND_V2: detected rows the expected-row bands dropped, and the rows the band rescan recovered. */
+  outOfBand?: number;
+  rescued?: RescuedLine[];
+  /** GRID_BAND_V2_COLS: the column analogue. Rescued columns are listed even when the zero-missing rule dropped the match they were part of. */
+  outOfBandCols?: number;
+  rescuedCols?: RescuedColumnLine[];
   expectedRows: number;
   pageWidth: number;
   pageHeight: number;
@@ -706,7 +762,26 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
     verticalLineDarkRatio,
     darkThreshold,
   ).map((line) => line.x);
-  const columnV2Match = matchTemplateLinePattern(verticalLines, expectedX);
+  // Unless GRID_BAND_V2_COLS=0: try the band-limited candidates first, keep the
+  // unrestricted attempt as the retry, and rescue inside empty expected bands.
+  const bandColumnMatch = v2Enabled && isGridBandV2ColsEnabled()
+    ? matchColumnLinesWithinExpectedBands(
+      image,
+      verticalLines,
+      expectedX,
+      {
+        top: expectedY[0] - yTolerance,
+        bottom: expectedY[expectedY.length - 1] + yTolerance,
+        left: expectedX[0] - xTolerance,
+        right: expectedX[expectedX.length - 1] + xTolerance,
+      },
+      verticalLineDarkRatio,
+      darkThreshold,
+    )
+    : null;
+  const columnV2Match = bandColumnMatch
+    ? bandColumnMatch.match
+    : matchTemplateLinePattern(verticalLines, expectedX);
   const columnLegacyMatch = v2Enabled && !columnV2Match
     ? matchTemplateLinePatternV1(verticalLines, expectedX)
     : null;
@@ -742,7 +817,26 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
     horizontalLineDarkRatio,
     darkThreshold,
   ).map((line) => line.y);
-  const rowV2Match = matchTemplateLinePattern(horizontalLines, expectedY);
+  // Unless GRID_BAND_V2=0: try the band-limited candidates first, keep the
+  // unrestricted attempt as the retry, and rescue inside empty expected bands.
+  const bandRowMatch = v2Enabled && isGridBandV2Enabled()
+    ? matchRowLinesWithinExpectedBands(
+      image,
+      horizontalLines,
+      expectedY,
+      {
+        top: expectedY[0] - yTolerance,
+        bottom: expectedY[expectedY.length - 1] + yTolerance,
+        left: horizontalSearchLeft,
+        right: horizontalSearchRight,
+      },
+      horizontalLineDarkRatio,
+      darkThreshold,
+    )
+    : null;
+  const rowV2Match = bandRowMatch
+    ? bandRowMatch.match
+    : matchTemplateLinePattern(horizontalLines, expectedY);
   const rowLegacyMatch = v2Enabled && !rowV2Match
     ? matchTemplateLinePatternV1(horizontalLines, expectedY)
     : null;
@@ -809,6 +903,38 @@ function buildGridOverrides(image: ImageAnalysisData, spec: TableGridSpec): Grid
     tableId: spec.id,
     mode: v2Enabled ? 'v2' : 'v1',
     detectedRows: horizontalLines.length,
+    ...(process.env.GRID_TRACE ? {
+      expectedYpx: expectedY.map((v) => Math.round(v * 10) / 10),
+      detectedYpx: horizontalLines.map((y) => Math.round(y * 10) / 10),
+      rescanYpx: detectHorizontalLines(
+        image,
+        expectedY[0] - yTolerance,
+        expectedY[expectedY.length - 1] + yTolerance,
+        bounds.left,
+        bounds.right,
+        Math.min(0.15, horizontalLineDarkRatio),
+        darkThreshold,
+      ).map((line) => Math.round(line.y * 10) / 10),
+      expectedXpx: expectedX.map((v) => Math.round(v * 10) / 10),
+      detectedXpx: verticalLines.map((x) => Math.round(x * 10) / 10),
+      rescanXpx: detectVerticalLines(
+        image,
+        expectedY[0] - yTolerance,
+        expectedY[expectedY.length - 1] + yTolerance,
+        expectedX[0] - xTolerance,
+        expectedX[expectedX.length - 1] + xTolerance,
+        Math.min(0.15, verticalLineDarkRatio),
+        darkThreshold,
+      ).map((line) => Math.round(line.x * 10) / 10),
+    } : {}),
+    ...(bandRowMatch ? {
+      outOfBand: bandRowMatch.outOfBand,
+      rescued: bandRowMatch.rescued,
+    } : {}),
+    ...(bandColumnMatch ? {
+      outOfBandCols: bandColumnMatch.outOfBand,
+      rescuedCols: bandColumnMatch.rescued,
+    } : {}),
     expectedRows: expectedY.length,
     pageWidth: baseWidth,
     pageHeight: baseHeight,
@@ -1939,6 +2065,285 @@ export function matchTemplateLinePattern(
 
 function isTemplateLineMatch(value: number[] | TemplateLineMatch): value is TemplateLineMatch {
   return !Array.isArray(value);
+}
+
+export interface BandLimitedLineCandidates {
+  /** Half-width of the band around each expected line, in the caller's units. */
+  band: number;
+  /** Detected lines inside the band of at least one expected line. */
+  lines: number[];
+  /** How many detected lines the band dropped. */
+  outOfBand: number;
+  /** Expected indexes with no band candidate at all. */
+  missingExpected: number[];
+}
+
+/**
+ * Restricts detected lines to a band around the expected pattern.
+ *
+ * A page carries rules that are not the table's: text underlines above it and
+ * the rules of the table below. They are legitimate detections, and V2 has to
+ * consider every pair of them as an affine seed, so they cost search and can
+ * outvote the real pattern. Every line the matcher can accept sits close to
+ * where the template says it should be, so a band is a cheap way to say that
+ * once, up front. The caller keeps the unrestricted set for its retry, so
+ * nothing here loses information.
+ */
+export function limitLinesToExpectedBands(
+  detected: number[],
+  expected: number[],
+): BandLimitedLineCandidates | null {
+  if (detected.length === 0 || expected.length < 2) {
+    return null;
+  }
+
+  const minimumSpacing = getMinimumPositiveSpacing(expected);
+  if (!Number.isFinite(minimumSpacing) || minimumSpacing <= 0) {
+    return null;
+  }
+
+  const band = minimumSpacing * GRID_BAND_HALF_WIDTH_RATIO;
+  const lines = detected.filter(
+    (line) => expected.some((value) => Math.abs(line - value) <= band),
+  );
+  const missingExpected = expected
+    .map((_, index) => index)
+    .filter((index) => !lines.some((line) => Math.abs(line - expected[index]) <= band));
+
+  return { band, lines, outOfBand: detected.length - lines.length, missingExpected };
+}
+
+export interface RescuedLine {
+  expectedIndex: number;
+  darkRatio: number;
+  y: number;
+}
+
+/** The column analogue of RescuedLine: the same record on the x axis. */
+export interface RescuedColumnLine {
+  expectedIndex: number;
+  darkRatio: number;
+  x: number;
+}
+
+export interface BandLimitedRowMatch {
+  match: TemplateLineMatch | null;
+  outOfBand: number;
+  rescued: RescuedLine[];
+}
+
+export interface BandLimitedColumnMatch {
+  match: TemplateLineMatch | null;
+  outOfBand: number;
+  rescued: RescuedColumnLine[];
+}
+
+/** One rescued line while the axis is still abstract; the wrappers name it y or x. */
+interface RescuedBandLine {
+  expectedIndex: number;
+  darkRatio: number;
+  position: number;
+}
+
+interface BandLimitedAxisMatch {
+  match: TemplateLineMatch | null;
+  outOfBand: number;
+  rescued: RescuedBandLine[];
+}
+
+/**
+ * A line detector reduced to positions along the axis being matched. Both
+ * detectHorizontalLines and detectVerticalLines already take the same search
+ * rectangle in the same argument order, so only the projection differs.
+ */
+type BandLineDetector = (
+  image: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>,
+  searchTop: number,
+  searchBottom: number,
+  searchLeft: number,
+  searchRight: number,
+  darkRatio: number,
+  darkThreshold: number,
+) => number[];
+
+interface BandSearchWindow {
+  top: number;
+  bottom: number;
+  left: number;
+  right: number;
+}
+
+/**
+ * Band matching for one axis: band-limited candidates first, the unrestricted
+ * set once as a retry, then a rescan confined to the bands of the expected
+ * lines nothing landed in.
+ *
+ * The rescan lowers the dark ratio only for those bands. It is not a relaxed
+ * gate: a rescued line still has to survive the same V2 scale, residual,
+ * absolute-position and missing-count rules as any other detection, and a band
+ * with no ink in it produces nothing.
+ *
+ * Note what the retry guarantees: the rescan is only reached when the
+ * unrestricted match has already returned null, so this never replaces a match
+ * the caller would have had without the band.
+ */
+function matchLinesWithinExpectedBands(
+  image: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>,
+  detected: number[],
+  expected: number[],
+  search: BandSearchWindow,
+  darkRatio: number,
+  darkThreshold: number,
+  detectLines: BandLineDetector,
+): BandLimitedAxisMatch {
+  const band = limitLinesToExpectedBands(detected, expected);
+  if (!band) {
+    return { match: matchTemplateLinePattern(detected, expected), outOfBand: 0, rescued: [] };
+  }
+
+  const bandMatch = matchTemplateLinePattern(band.lines, expected);
+  if (bandMatch) {
+    return { match: bandMatch, outOfBand: band.outOfBand, rescued: [] };
+  }
+
+  const fullMatch = matchTemplateLinePattern(detected, expected);
+  if (fullMatch || band.missingExpected.length === 0) {
+    return { match: fullMatch, outOfBand: band.outOfBand, rescued: [] };
+  }
+
+  const rescueDarkRatio = Math.max(
+    GRID_BAND_RESCUE_MIN_DARK_RATIO,
+    darkRatio * GRID_BAND_RESCUE_DARK_RATIO_SCALE,
+  );
+  if (rescueDarkRatio >= darkRatio) {
+    return { match: null, outOfBand: band.outOfBand, rescued: [] };
+  }
+
+  const rescanned = detectLines(
+    image,
+    search.top,
+    search.bottom,
+    search.left,
+    search.right,
+    rescueDarkRatio,
+    darkThreshold,
+  );
+  const rescued: RescuedBandLine[] = [];
+  for (const position of rescanned) {
+    const expectedIndex = band.missingExpected.find(
+      (index) => Math.abs(position - expected[index]) <= band.band,
+    );
+    if (expectedIndex === undefined) continue;
+    const alreadyKnown = band.lines.some(
+      (line) => Math.abs(line - position) < GRID_BAND_RESCUE_MERGE_TOLERANCE_PX,
+    ) || rescued.some(
+      (line) => Math.abs(line.position - position) < GRID_BAND_RESCUE_MERGE_TOLERANCE_PX,
+    );
+    if (alreadyKnown) continue;
+    rescued.push({ expectedIndex, darkRatio: rescueDarkRatio, position });
+  }
+
+  if (rescued.length === 0) {
+    return { match: null, outOfBand: band.outOfBand, rescued: [] };
+  }
+
+  const candidates = [...band.lines, ...rescued.map((line) => line.position)]
+    .sort((first, second) => first - second);
+  return {
+    match: matchTemplateLinePattern(candidates, expected),
+    outOfBand: band.outOfBand,
+    rescued,
+  };
+}
+
+/** GRID_BAND_V2 row matching. The axis-independent body is above. */
+export function matchRowLinesWithinExpectedBands(
+  image: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>,
+  detected: number[],
+  expected: number[],
+  search: BandSearchWindow,
+  darkRatio: number,
+  darkThreshold: number,
+): BandLimitedRowMatch {
+  const result = matchLinesWithinExpectedBands(
+    image,
+    detected,
+    expected,
+    search,
+    darkRatio,
+    darkThreshold,
+    (target, top, bottom, left, right, ratio, threshold) => detectHorizontalLines(
+      target,
+      top,
+      bottom,
+      left,
+      right,
+      ratio,
+      threshold,
+    ).map((line) => line.y),
+  );
+  return {
+    match: result.match,
+    outOfBand: result.outOfBand,
+    rescued: result.rescued.map((line) => ({
+      expectedIndex: line.expectedIndex,
+      darkRatio: line.darkRatio,
+      y: line.position,
+    })),
+  };
+}
+
+/**
+ * GRID_BAND_V2_COLS column matching: the same three steps as the row path, plus
+ * one acceptance rule that only the rescued attempt has to pass.
+ *
+ * A lowered dark ratio finds the vertical edges of glyphs printed inside the
+ * cells, and those sit inside the column bands -- the row rescan has no
+ * equivalent, which is why the band alone cannot filter them here. The binary
+ * table is the case that decides it: on 17 of 19 measured pages there is no ink
+ * at all where its column 2 belongs, because that boundary is not printed. So a
+ * rescued match that still leaves an expected column missing is a match that
+ * invented the columns it did fill, and the whole rescued attempt is dropped --
+ * the caller then sees exactly what it sees today, since the rescan is only
+ * reached after the unrestricted match has returned null. Band and unrestricted
+ * matches are returned as they come; this rule applies to the rescue only.
+ */
+export function matchColumnLinesWithinExpectedBands(
+  image: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>,
+  detected: number[],
+  expected: number[],
+  search: BandSearchWindow,
+  darkRatio: number,
+  darkThreshold: number,
+): BandLimitedColumnMatch {
+  const result = matchLinesWithinExpectedBands(
+    image,
+    detected,
+    expected,
+    search,
+    darkRatio,
+    darkThreshold,
+    (target, top, bottom, left, right, ratio, threshold) => detectVerticalLines(
+      target,
+      top,
+      bottom,
+      left,
+      right,
+      ratio,
+      threshold,
+    ).map((line) => line.x),
+  );
+  const rescuedIncomplete = result.rescued.length > 0
+    && (result.match === null || result.match.missingExpected.length > 0);
+  return {
+    match: rescuedIncomplete ? null : result.match,
+    outOfBand: result.outOfBand,
+    rescued: result.rescued.map((line) => ({
+      expectedIndex: line.expectedIndex,
+      darkRatio: line.darkRatio,
+      x: line.position,
+    })),
+  };
 }
 
 /** The pre-V2 choose-k search. Keep this body stable for the flag-off path. */

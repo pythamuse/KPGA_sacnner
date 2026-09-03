@@ -11,6 +11,7 @@ import {
 } from '../src/lib/recognition/markDensity';
 import { recognizeStudentForms } from '../src/lib/recognition/detectCheckmarks';
 import { cagiTemplate, satisfactionTemplate, type ChoiceGroup } from '../src/lib/recognition/roiTemplates';
+import { pinShippedScorer } from './helpers/scorerVariants';
 
 const fixtureDir = path.join(process.cwd(), 'tmp', 'test-review-suggestion');
 
@@ -27,6 +28,9 @@ function feature(
 ): ReviewSuggestionFeatures {
   return { candidateIndex, value: candidateIndex, pageMinusBlank, matchedScore };
 }
+
+// Every number below is the shipped scorer's. See `pinShippedScorer`.
+pinShippedScorer();
 
 describe('review suggestion rule', () => {
   it('suggests the box both rankings put first', () => {
