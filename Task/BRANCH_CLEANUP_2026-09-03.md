@@ -25,3 +25,11 @@
   tesseract.js/pdfjs-dist/canvas 존재)·`tsc`·격자 시험 29 통과를 확인했다. 앞으로 워크트리를 지울 때는 **접합점을 먼저 `rmdir`로 끊고** `git worktree remove`.
 - 경로 길이 초과("Filename too long")로 디렉터리가 남은 옛 워크트리(wt-grid·wt-scorer·wt-badge·wt-bounds·wt-glyph·wt-grid-th·wt-topology)는 git 등록만
   해제됐고 디렉터리는 별도로 지웠다(아래 결과 참조).
+
+## 결과
+- 브랜치: `main`, `stateless-recognize`만 남음. `loop/c1-preview`·`photo-path-correction-measurement`는 `--merged main`에는 들었지만 `-d`가 거부해 `-D`로 지웠다.
+- 워크트리: 메인 체크아웃과 `wt-stateless`만 남음. 스크래치패드의 빈 `wt-*` 껍데기 8개는 남아 있던 `node_modules` 접합점을 PowerShell로 끊은 뒤 지웠고,
+  경로 길이로 남았던 옛 7개는 실제 디렉터리(부분 복사본)임을 확인하고 `rm -rf`로 지웠다.
+- 건강 확인: 메인 `node_modules` 218 항목(숨김 포함), `npx tsc --noEmit` 통과, 전체 `npx vitest run` 통과(아래 줄).
+
+  ` Test Files 49 passed | 18 skipped (67) Tests 483 passed | 18 skipped (501) `
