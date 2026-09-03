@@ -247,6 +247,18 @@ export async function recognizeStudentForms(
     // shared worker, otherwise this request can be skipped as "worker busy".
     const ageRect = cagiGridDetection.fieldRects['basic.age'];
     const templateAgeRect = cagiBaseline?.fieldRects['basic.age'];
+    // Input class from the grid cells alone (row fallbacks are not known yet):
+    // enough to tell a grayscale scanner from a 1-bit one for the age floor.
+    const cagiPreCalibration = buildPageInkCalibration(
+      cagiImage,
+      cagiTemplate.choiceGroups,
+      cagiGridOverrides,
+      {},
+      cagiGridDetection.registrations,
+      cagiBaseline,
+      basicGroups,
+      options.cagiPhotoProvenance ?? false,
+    );
     if (!canAutoRecognizeCagi) {
       recognitionDecisionTrace['basic.age'] =
         'Age: automatic entry blocked because the CAGI form boundary was not verified.';
@@ -259,7 +271,7 @@ export async function recognizeStudentForms(
         cagiImage.width,
         cagiImage.height,
         getAgeDigitsRect(ageRect),
-        toDigitOcrOptions(options),
+        toDigitOcrOptions(options, cagiPreCalibration?.inputClass === 'grayscale-scan'),
         cagiBaseline && templateAgeRect ? {
           image: cagiBaseline.image,
           rect: getAgeDigitsRect(templateAgeRect),
@@ -709,10 +721,11 @@ function toOcrOptions(options: RecognitionOptions): { deadlineAt?: number } | un
 // arms the photo-only confidence refusal. An options object is now always
 // produced: `deadlineAt: undefined` takes the same branch as no options at
 // all, so a caller that passed no deadline keeps the full digit-OCR budget.
-function toDigitOcrOptions(options: RecognitionOptions): DigitOcrOptions {
+function toDigitOcrOptions(options: RecognitionOptions, grayscaleScan = false): DigitOcrOptions {
   return {
     deadlineAt: options.digitOcrDeadlineAt,
     photoProvenance: options.cagiPhotoProvenance ?? false,
+    grayscaleScan,
   };
 }
 

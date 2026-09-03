@@ -20,6 +20,14 @@ export interface DigitOcrOptions extends OcrOptions {
    * it `false` and takes exactly the path it took before this flag existed.
    */
   photoProvenance?: boolean;
+  /**
+   * The page's printed structure is far lighter than the blank asset
+   * (grayscale scanner class, Task/GRAYSCALE_CLASS_2026-09-03.md). Measured
+   * 2026-09-03: every wrong age read came from this class (4 read as 9 at
+   * confidence 87, 3 as 1 at 67) while 1-bit scans were right at 69-96, so
+   * this class gets its own, higher floor.
+   */
+  grayscaleScan?: boolean;
 }
 
 export type DigitOcrStatus =
@@ -31,7 +39,8 @@ export type DigitOcrStatus =
   | 'no_handwriting_found'
   | 'timeout_or_error'
   | 'parse_or_confidence_rejected'
-  | 'photo_confidence_refused';
+  | 'photo_confidence_refused'
+  | 'grayscale_confidence_refused';
 
 export interface DigitOcrResult {
   value?: number;
@@ -84,6 +93,10 @@ const MIN_DIGIT_CONFIDENCE = 60;
  * three points is a starting position, not a settled one.
  */
 export const AGE_OCR_MIN_CONFIDENCE = 85;
+// Grayscale-scan class floor: above the two measured wrongs (87, 67), below
+// the one measured right (95) on set 4. n=3 -- re-derive when more grayscale
+// sheets exist.
+export const AGE_OCR_GRAYSCALE_MIN_CONFIDENCE = 90;
 const MIN_LINE_HEIGHT = 6;
 const GROUP_DISTANCE_PX = 8;
 // Emergency fix (see Task/OCR_ANCHORED_ROW_DETECTION.md cycle 1 feedback): the original
@@ -331,7 +344,10 @@ export async function recognizeDigitsInRegionDetailed(
     );
 
     return recordAgeOcrConfidence(
-      applyPhotoAgeConfidenceGate(read, photoProvenance),
+      applyGrayscaleAgeConfidenceGate(
+        applyPhotoAgeConfidenceGate(read, photoProvenance),
+        options?.grayscaleScan === true,
+      ),
       photoProvenance,
     );
   } catch {
@@ -379,6 +395,28 @@ export function parseTrustedAgeOcrText(text: unknown, confidence: number): numbe
  * which records one on every branch that produced a value, but the safe
  * direction under `WRONG = 0` is blank.
  */
+export function applyGrayscaleAgeConfidenceGate(
+  result: DigitOcrResult,
+  grayscaleScan: boolean,
+): DigitOcrResult {
+  if (!grayscaleScan || result.value === undefined) {
+    return result;
+  }
+  const { confidence } = result;
+  if (typeof confidence === 'number' && Number.isFinite(confidence)
+    && confidence >= AGE_OCR_GRAYSCALE_MIN_CONFIDENCE) {
+    return result;
+  }
+  const read = typeof confidence === 'number' && Number.isFinite(confidence)
+    ? `confidence ${Math.round(confidence)}`
+    : 'no confidence figure';
+  return {
+    status: 'grayscale_confidence_refused',
+    confidence: result.confidence,
+    diagnostic: `Age OCR refused ${result.value} [gate=grayscale-confidence]: the sheet is a grayscale scan and the accepted digits carried ${read} of ${AGE_OCR_GRAYSCALE_MIN_CONFIDENCE} needed on that class. ${result.diagnostic}`,
+  };
+}
+
 export function applyPhotoAgeConfidenceGate(
   result: DigitOcrResult,
   photoProvenance: boolean,
