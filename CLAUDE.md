@@ -207,11 +207,14 @@ REAL_SCAN_SAT_REVERSED=1   REAL_SCAN_CAGI_PDF=".../선별검사 샘플3반복.pd
 기준선(2026-09-03, 노드, V2 선 대응 기본값 — 이전 2026-08-28 값은 `355/7/75 · 343/8/86 · 342/3/92`):
 
 ```
-세트 1   CORRECT 361  WRONG 5  BLANK 71   OFF 30
-세트 2   CORRECT 346  WRONG 8  BLANK 83   OFF 21
-세트 3   CORRECT 348  WRONG 3  BLANK 86   OFF 9    (2026-09-03 열 밴드 병합 후; 그 전 344/3/90)
-세트 4   CORRECT 307  WRONG 9  BLANK 121  OFF 70   (회색조, 계급 보정 + 나이 바닥 90 — Task/GRAYSCALE_CLASS_2026-09-03.md)
-사진     OLD 61/0 · Set1 34/0 · Set2 42/0 · Set3 32/0
+세트 1   CORRECT 354  WRONG 4  BLANK 79   OFF 30
+세트 2   CORRECT 338  WRONG 7  BLANK 92   OFF 16
+세트 3   CORRECT 343  WRONG 2  BLANK 92   OFF 9
+세트 4   CORRECT 297  WRONG 7  BLANK 133  OFF 64   (회색조, 계급 보정 + 나이 바닥 90 — Task/GRAYSCALE_CLASS_2026-09-03.md)
+사진     OLD 60/0 · Set1 34/0 · Set2 42/0 · Set3 32/0
+
+취소 표시 거부권 병합(2026-09-03, [Task/CANCEL_VETO_2026-09-03.md](Task/CANCEL_VETO_2026-09-03.md)) 전 값은
+`361/5/71 · 346/8/83 · 348/3/86 · 307/9/121`, 사진 `61/0 · 34/0 · 42/0 · 32/0`이었다. `MARK_CANCEL_VETO=0`으로 그 값이 재현된다.
 ```
 
 **사진 기준선의 입력은 Desktop의 원본 사진이 아니다.** 제품이 서버에 보내는 것은 브라우저 문서 스캐너가 원근 보정한 이미지이므로,
@@ -324,6 +327,7 @@ REAL_SCAN_SAT_REVERSED=1   REAL_SCAN_CAGI_PDF=".../선별검사 샘플3반복.pd
 **V2 선 대응 병합 후(2026-09-03 오후, dev, FIELD_TEST §34.1)**: 자동 339 · 정답 330 · **오답 9** · 미확정 빈칸 98 · 경합 99(오답 7/9).
 **밴드+되찾기 병합 후(2026-09-03 저녁, dev, [Task/V2_BAND_RESCUE_2026-09-03.md](Task/V2_BAND_RESCUE_2026-09-03.md) §3)**: 자동 345 · 정답 336 · **오답 9**(같은 칸) · 미확정 빈칸 92. 셀 diff는 빈칸→정답 6칸뿐(p4 q07~q10, p9 q01, p10 q08).
 **열 밴드 병합 후(같은 날 밤, [Task/V2_BAND_COLS_2026-09-03.md](Task/V2_BAND_COLS_2026-09-03.md))**: 자동 346 · 정답 337 · **오답 9** · 미확정 빈칸 91 (p5 q10 한 칸).
+**취소 표시 거부권 병합 후(2026-09-03, 기본값 on, [Task/CANCEL_VETO_2026-09-03.md](Task/CANCEL_VETO_2026-09-03.md))**: 자동 335 · 정답 329 · **오답 6** · 미확정 빈칸 102. 남은 오답 6칸은 p15 q04, p16 q02·q03·q04·q06, p19 q09.
 
 ```
 ```
