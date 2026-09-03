@@ -6,8 +6,10 @@ import {
 } from '../lib/recognition/sheetQualityDisplay';
 import { ValidationError } from '../lib/validation/types';
 import {
+  bulkConfirmableFields,
   contestedUnconfirmedFields,
   isSettledSource,
+  REVIEW_FIELD_KEYS,
   unconfirmedMachineFields,
 } from '../lib/review/settlement';
 import { describeEvidence, remarkCause } from '../lib/review/evidence';
@@ -39,6 +41,9 @@ const confidenceRank = {
   medium: 1,
   low: 2,
 };
+
+const bulkConfirmTrace = '크롭을 끝까지 확인한 뒤 일괄 확인했습니다 (bulk-confirmed after full review).';
+const bulkUndoTrace = '일괄 확인을 되돌렸습니다.';
 
 /**
  * Same three-step palette the confidence badges use, so a capture verdict and
@@ -135,6 +140,8 @@ export default function RecognitionReview({
   currentIndex = 1,
   totalCount = 1,
 }: RecognitionReviewProps) {
+  const reviewKeys = REVIEW_FIELD_KEYS;
+  const studentReviewKey = `${jobId}:${currentIndex}`;
   const [showRoiBoxes, setShowRoiBoxes] = React.useState(false);
   // The per-field decision traces are engineering output -- gate names, sample
   // counts, alignment offsets. They were invaluable for finding out why a cell
@@ -142,33 +149,48 @@ export default function RecognitionReview({
   // the wall of numbers is what a reviewer has to read past to find the four
   // fields that actually need them. Off by default, one click away.
   const [showDiagnostics, setShowDiagnostics] = React.useState(false);
+  const [seenFieldKeys, setSeenFieldKeys] = React.useState<Set<string>>(new Set());
+  const [seenStudentKey, setSeenStudentKey] = React.useState(studentReviewKey);
+  const [lastBulkConfirmedFieldKeys, setLastBulkConfirmedFieldKeys] = React.useState<string[]>([]);
+  const [bulkConfirmationCompleted, setBulkConfirmationCompleted] = React.useState(false);
+  const [bulkConfirmationStudentKey, setBulkConfirmationStudentKey] = React.useState<string | null>(null);
+  const fieldCardRefs = React.useRef<Record<string, HTMLDivElement | null>>({});
+  const bulkUndoTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const unconfirmedMachineFieldKeys = unconfirmedMachineFields(draft);
   const unconfirmedMachineFieldSet = new Set(unconfirmedMachineFieldKeys);
   const contestedUnconfirmedFieldKeys = contestedUnconfirmedFields(draft);
   const contestedUnconfirmedFieldSet = new Set(contestedUnconfirmedFieldKeys);
 
-  const buildReviewSource = (field: string, valueSource: RecognitionValueSource) => {
-    const priorTrace = draft.source?.recognitionDecisionTrace?.[field];
-    const reviewMessage = valueSource === 'confirmed'
+  const buildReviewSource = (
+    field: string,
+    valueSource: RecognitionValueSource,
+    baseDraft: RecognitionDraft = draft,
+    reviewMessageSuffix?: string,
+  ) => {
+    const priorTrace = baseDraft.source?.recognitionDecisionTrace?.[field];
+    const defaultReviewMessage = valueSource === 'confirmed'
       ? 'The reviewer confirmed the recognized value.'
       : valueSource === 'blank_ok'
         ? 'The reviewer confirmed that the candidate field is blank.'
         : valueSource === 'manual'
           ? 'Value was entered or changed during manual review.'
           : 'The reviewer confirmed the current value.';
+    const reviewMessage = reviewMessageSuffix
+      ? `${defaultReviewMessage} ${reviewMessageSuffix}`
+      : defaultReviewMessage;
 
     return {
-      ...(draft.source || {}),
+      ...(baseDraft.source || {}),
       recognitionValueSource: {
-        ...(draft.source?.recognitionValueSource || {}),
+        ...(baseDraft.source?.recognitionValueSource || {}),
         [field]: valueSource,
       },
       recognitionManualEditedAt: {
-        ...(draft.source?.recognitionManualEditedAt || {}),
+        ...(baseDraft.source?.recognitionManualEditedAt || {}),
         [field]: new Date().toISOString(),
       },
       recognitionDecisionTrace: {
-        ...(draft.source?.recognitionDecisionTrace || {}),
+        ...(baseDraft.source?.recognitionDecisionTrace || {}),
         [field]: priorTrace
           ? `${priorTrace} ${reviewMessage}`
           : reviewMessage,
@@ -176,39 +198,40 @@ export default function RecognitionReview({
     };
   };
 
-  const buildManualReviewSource = (field: string) => buildReviewSource(field, 'manual');
+  /**
+   * Applies one review decision to a draft. Ordinary changes, individual
+   * confirmations, and bulk confirmations all use this same field-level path;
+   * the bulk action only reduces it over several keys before emitting once.
+   */
+  const applyFieldChange = (
+    baseDraft: RecognitionDraft,
+    key: string,
+    value: unknown,
+    valueSource: RecognitionValueSource,
+    reviewMessageSuffix?: string,
+  ): RecognitionDraft => {
+    const [group, name] = key.split('.');
+    const source = buildReviewSource(key, valueSource, baseDraft, reviewMessageSuffix);
+
+    if (group === 'basic') {
+      return { ...baseDraft, source, basic: { ...baseDraft.basic, [name]: value as any } };
+    }
+    if (group === 'cagi') {
+      return { ...baseDraft, source, cagi: { ...baseDraft.cagi, [name]: value as number } };
+    }
+    return { ...baseDraft, source, satisfaction: { ...baseDraft.satisfaction, [name]: value as number } };
+  };
 
   const handleBasicChange = (field: string, val: any) => {
-    onChange({
-      ...draft,
-      source: buildManualReviewSource(`basic.${field}`),
-      basic: {
-        ...draft.basic,
-        [field]: val,
-      },
-    });
+    onChange(applyFieldChange(draft, `basic.${field}`, val, 'manual'));
   };
 
   const handleCagiChange = (field: string, val: number) => {
-    onChange({
-      ...draft,
-      source: buildManualReviewSource(`cagi.${field}`),
-      cagi: {
-        ...draft.cagi,
-        [field]: val,
-      },
-    });
+    onChange(applyFieldChange(draft, `cagi.${field}`, val, 'manual'));
   };
 
   const handleSatisfactionChange = (field: string, val: number) => {
-    onChange({
-      ...draft,
-      source: buildManualReviewSource(`satisfaction.${field}`),
-      satisfaction: {
-        ...draft.satisfaction,
-        [field]: val,
-      },
-    });
+    onChange(applyFieldChange(draft, `satisfaction.${field}`, val, 'manual'));
   };
 
   /**
@@ -259,12 +282,14 @@ export default function RecognitionReview({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [saveErrors]);
 
-  const currentValue = (key: string): unknown => {
+  const currentValueFromDraft = (baseDraft: RecognitionDraft, key: string): unknown => {
     const [group, name] = key.split('.');
-    if (group === 'basic') return (draft.basic as Record<string, unknown>)[name];
-    if (group === 'cagi') return (draft.cagi as Record<string, unknown>)[name];
-    return (draft.satisfaction as Record<string, unknown>)[name];
+    if (group === 'basic') return (baseDraft.basic as Record<string, unknown>)[name];
+    if (group === 'cagi') return (baseDraft.cagi as Record<string, unknown>)[name];
+    return (baseDraft.satisfaction as Record<string, unknown>)[name];
   };
+
+  const currentValue = (key: string): unknown => currentValueFromDraft(draft, key);
 
   /**
    * Accepts the recognized value as it stands.
@@ -275,21 +300,13 @@ export default function RecognitionReview({
    * "yes, that one" and the field can never leave the outstanding list.
    */
   const confirmField = (key: string) => {
-    const [group, name] = key.split('.');
     const value = currentValue(key);
     const valueSource: RecognitionValueSource = needsValue(key) ? 'blank_ok' : 'confirmed';
     // Including when there is no value: a student who answered nothing is a
     // fact about the form, and the reviewer needs a way to record having seen
     // it. Keep this explicit confirmation separate from a value that was
     // changed by hand: both are useful labels, but they mean different things.
-    const source = buildReviewSource(key, valueSource);
-    if (group === 'basic') {
-      onChange({ ...draft, source, basic: { ...draft.basic, [name]: value } });
-    } else if (group === 'cagi') {
-      onChange({ ...draft, source, cagi: { ...draft.cagi, [name]: value as number } });
-    } else {
-      onChange({ ...draft, source, satisfaction: { ...draft.satisfaction, [name]: value as number } });
-    }
+    onChange(applyFieldChange(draft, key, value, valueSource));
   };
 
   const renderConfidenceBadge = (key: string) => {
@@ -982,11 +999,6 @@ export default function RecognitionReview({
     );
   };
 
-  const reviewKeys = [
-    'basic.age', 'basic.gender', 'basic.schoolType', 'basic.grade',
-    ...Array.from({ length: 9 }).map((_, idx) => `cagi.q${String(idx + 1).padStart(2, '0')}`),
-    ...Array.from({ length: 10 }).map((_, idx) => `satisfaction.q${String(idx + 1).padStart(2, '0')}`),
-  ];
   /**
    * A field with no value needs the reviewer whatever the recogniser thought of
    * it. Confidence alone missed that: school type and grade come back `높음`
@@ -999,6 +1011,70 @@ export default function RecognitionReview({
     const value = currentValue(key);
     return value === undefined || value === null || value === '';
   };
+
+  /**
+   * Bulk confirmation is deliberately gated by cards, not by crop images. A
+   * missing cached crop still counts once the card itself has entered the
+   * viewport, so the reviewer has had the opportunity to see the card's note.
+   * The browser-only guard keeps SSR and static/test renders inert.
+   */
+  React.useEffect(() => {
+    setSeenStudentKey(studentReviewKey);
+    setSeenFieldKeys(new Set());
+    setLastBulkConfirmedFieldKeys([]);
+    setBulkConfirmationCompleted(false);
+    setBulkConfirmationStudentKey(null);
+    if (bulkUndoTimerRef.current !== null) {
+      clearTimeout(bulkUndoTimerRef.current);
+      bulkUndoTimerRef.current = null;
+    }
+  }, [studentReviewKey]);
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined' || typeof document === 'undefined' || typeof IntersectionObserver === 'undefined') {
+      return undefined;
+    }
+
+    let active = true;
+    const observer = new IntersectionObserver((entries) => {
+      if (!active) return;
+
+      const visibleKeys = entries
+        .filter((entry) => entry.isIntersecting)
+        .map((entry) => (entry.target as HTMLElement).dataset.reviewFieldKey)
+        .filter((key): key is string => Boolean(key));
+      if (visibleKeys.length === 0) return;
+
+      setSeenFieldKeys((previous) => {
+        const next = new Set(previous);
+        let changed = false;
+        visibleKeys.forEach((key) => {
+          if (!next.has(key)) {
+            next.add(key);
+            changed = true;
+          }
+        });
+        return changed ? next : previous;
+      });
+    }, { root: null, threshold: 0 });
+
+    reviewKeys.forEach((key) => {
+      const card = fieldCardRefs.current[key];
+      if (card) observer.observe(card);
+    });
+
+    return () => {
+      active = false;
+      observer.disconnect();
+    };
+  }, [studentReviewKey, reviewKeys]);
+
+  React.useEffect(() => () => {
+    if (bulkUndoTimerRef.current !== null) {
+      clearTimeout(bulkUndoTimerRef.current);
+    }
+  }, []);
+
   const attentionFields = reviewKeys.filter(
     (key) => confidenceRank[getConfidenceLevel(key)] > 0 || needsValue(key) || unconfirmedMachineFieldSet.has(key),
   );
@@ -1009,9 +1085,80 @@ export default function RecognitionReview({
   const lowCount = pendingFields.filter((key) => getConfidenceLevel(key) === 'low').length;
   const mediumCount = pendingFields.filter((key) => getConfidenceLevel(key) === 'medium').length;
   const firstUnconfirmedFieldKey = contestedUnconfirmedFieldKeys[0] || unconfirmedMachineFieldKeys[0];
+  const bulkConfirmableFieldKeys = bulkConfirmableFields(draft);
+  const seenFieldKeySet = seenStudentKey === studentReviewKey ? seenFieldKeys : new Set<string>();
+  const remainingCardCount = reviewKeys.filter((key) => !seenFieldKeySet.has(key)).length;
+  const allFieldCardsSeen = remainingCardCount === 0;
+  const bulkConfirmationCompletedForStudent = bulkConfirmationCompleted
+    && bulkConfirmationStudentKey === studentReviewKey;
+  const hasBulkUndoForStudent = lastBulkConfirmedFieldKeys.length > 0
+    && bulkConfirmationStudentKey === studentReviewKey;
   const saveErrorKeys = Array.from(
     new Set(saveErrors.flatMap((error) => (error.field ? [error.field] : []))),
   );
+
+  const confirmBulkFields = () => {
+    if (!allFieldCardsSeen || bulkConfirmableFieldKeys.length === 0) return;
+
+    const confirmedKeys = [...bulkConfirmableFieldKeys];
+    const updatedDraft = confirmedKeys.reduce(
+      (nextDraft, key) => applyFieldChange(
+        nextDraft,
+        key,
+        currentValueFromDraft(nextDraft, key),
+        'confirmed',
+        bulkConfirmTrace,
+      ),
+      draft,
+    );
+
+    if (bulkUndoTimerRef.current !== null) {
+      clearTimeout(bulkUndoTimerRef.current);
+    }
+    onChange(updatedDraft);
+    setLastBulkConfirmedFieldKeys(confirmedKeys);
+    setBulkConfirmationCompleted(true);
+    setBulkConfirmationStudentKey(studentReviewKey);
+    bulkUndoTimerRef.current = setTimeout(() => {
+      setLastBulkConfirmedFieldKeys([]);
+      bulkUndoTimerRef.current = null;
+    }, 5000);
+  };
+
+  const undoBulkConfirmation = () => {
+    if (lastBulkConfirmedFieldKeys.length === 0) return;
+
+    const updatedDraft = lastBulkConfirmedFieldKeys.reduce((nextDraft, key) => {
+      const priorSource = nextDraft.source || {};
+      const priorTrace = priorSource.recognitionDecisionTrace?.[key];
+      const recognitionManualEditedAt = { ...(priorSource.recognitionManualEditedAt || {}) };
+      delete recognitionManualEditedAt[key];
+      const nextSource: NonNullable<RecognitionDraft['source']> = {
+        ...priorSource,
+        recognitionValueSource: {
+          ...(priorSource.recognitionValueSource || {}),
+          [key]: 'auto',
+        },
+        recognitionDecisionTrace: {
+          ...(priorSource.recognitionDecisionTrace || {}),
+          [key]: priorTrace
+            ? `${priorTrace} ${bulkUndoTrace}`
+            : bulkUndoTrace,
+        },
+        recognitionManualEditedAt,
+      };
+      return { ...nextDraft, source: nextSource };
+    }, draft);
+
+    onChange(updatedDraft);
+    setLastBulkConfirmedFieldKeys([]);
+    setBulkConfirmationCompleted(false);
+    setBulkConfirmationStudentKey(null);
+    if (bulkUndoTimerRef.current !== null) {
+      clearTimeout(bulkUndoTimerRef.current);
+      bulkUndoTimerRef.current = null;
+    }
+  };
 
   const fieldLabel = (key: string) => {
     const basicLabels: Record<string, string> = {
@@ -1248,7 +1395,12 @@ export default function RecognitionReview({
   const saveErrorMessages = saveErrors.filter((error) => !error.field);
 
   const fieldShell = (label: string, badgeKey: string, control: React.ReactNode) => (
-    <div id={fieldDomId(badgeKey)} style={getFieldCardStyle(badgeKey)}>
+    <div
+      id={fieldDomId(badgeKey)}
+      data-review-field-key={badgeKey}
+      ref={(element) => { fieldCardRefs.current[badgeKey] = element; }}
+      style={getFieldCardStyle(badgeKey)}
+    >
       <label style={{ display: 'block', fontSize: 14, fontWeight: 700, marginBottom: 7 }}>
         {label}
         {renderConfidenceBadge(badgeKey)}
@@ -1453,7 +1605,13 @@ export default function RecognitionReview({
             const val = draft.cagi[key];
 
             return (
-              <div key={key} id={fieldDomId(`cagi.q${num}`)} style={getFieldCardStyle(`cagi.q${num}`)}>
+              <div
+                key={key}
+                id={fieldDomId(`cagi.q${num}`)}
+                data-review-field-key={`cagi.q${num}`}
+                ref={(element) => { fieldCardRefs.current[`cagi.q${num}`] = element; }}
+                style={getFieldCardStyle(`cagi.q${num}`)}
+              >
                 <label style={{ display: 'block', fontSize: 13, fontWeight: 700, marginBottom: 7 }}>
                   CAGI {num}
                   {renderConfidenceBadge(`cagi.q${num}`)}
@@ -1482,7 +1640,12 @@ export default function RecognitionReview({
       <div>
         <h3 style={{ fontSize: 18, marginBottom: 14 }}>예방교육 만족도조사</h3>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 12 }}>
-          <div id={fieldDomId('satisfaction.q01')} style={getFieldCardStyle('satisfaction.q01')}>
+          <div
+            id={fieldDomId('satisfaction.q01')}
+            data-review-field-key="satisfaction.q01"
+            ref={(element) => { fieldCardRefs.current['satisfaction.q01'] = element; }}
+            style={getFieldCardStyle('satisfaction.q01')}
+          >
             <label style={{ display: 'block', fontSize: 13, fontWeight: 700, marginBottom: 7 }}>
               문항1 교육 참여 횟수
               {renderConfidenceBadge('satisfaction.q01')}
@@ -1510,7 +1673,13 @@ export default function RecognitionReview({
             const val = draft.satisfaction[key];
 
             return (
-              <div key={key} id={fieldDomId(`satisfaction.q0${num}`)} style={getFieldCardStyle(`satisfaction.q0${num}`)}>
+              <div
+                key={key}
+                id={fieldDomId(`satisfaction.q0${num}`)}
+                data-review-field-key={`satisfaction.q0${num}`}
+                ref={(element) => { fieldCardRefs.current[`satisfaction.q0${num}`] = element; }}
+                style={getFieldCardStyle(`satisfaction.q0${num}`)}
+              >
                 <label style={{ display: 'block', fontSize: 13, fontWeight: 700, marginBottom: 7 }}>
                   문항{num} 예/아니오
                   {renderConfidenceBadge(`satisfaction.q0${num}`)}
@@ -1538,7 +1707,13 @@ export default function RecognitionReview({
             const val = draft.satisfaction[key];
 
             return (
-              <div key={key} id={fieldDomId(`satisfaction.${key}`)} style={getFieldCardStyle(`satisfaction.${key}`)}>
+              <div
+                key={key}
+                id={fieldDomId(`satisfaction.${key}`)}
+                data-review-field-key={`satisfaction.${key}`}
+                ref={(element) => { fieldCardRefs.current[`satisfaction.${key}`] = element; }}
+                style={getFieldCardStyle(`satisfaction.${key}`)}
+              >
                 <label style={{ display: 'block', fontSize: 13, fontWeight: 700, marginBottom: 7 }}>
                   문항{num} 만족도
                   {renderConfidenceBadge(`satisfaction.${key}`)}
@@ -1585,28 +1760,67 @@ export default function RecognitionReview({
         </div>
       )}
 
-      {unconfirmedMachineFieldKeys.length > 0 && (
+      {(unconfirmedMachineFieldKeys.length > 0 || hasBulkUndoForStudent) && (
         <div
-          className="error-box"
+          className={unconfirmedMachineFieldKeys.length > 0 ? 'error-box' : 'notice'}
           role="alert"
           style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 10 }}
         >
           <strong>
-            확인되지 않은 자동 입력 {unconfirmedMachineFieldKeys.length}개 — 확인 후 저장할 수 있습니다
+            {bulkConfirmationCompletedForStudent && contestedUnconfirmedFieldKeys.length > 0
+              ? `경합 ${contestedUnconfirmedFieldKeys.length}개는 개별 확인이 필요합니다`
+              : unconfirmedMachineFieldKeys.length > 0
+                ? `확인되지 않은 자동 입력 ${unconfirmedMachineFieldKeys.length}개 — 확인 후 저장할 수 있습니다`
+                : `자동 입력 ${lastBulkConfirmedFieldKeys.length}개를 일괄 확인했습니다`}
           </strong>
-          <button
-            type="button"
-            className="btn-secondary"
-            onClick={() => {
-              if (firstUnconfirmedFieldKey) focusField(firstUnconfirmedFieldKey);
-            }}
-            style={{ padding: '6px 10px', fontSize: 12, whiteSpace: 'nowrap' }}
-          >
-            {contestedUnconfirmedFieldKeys.length > 0
-              ? '첫 번째 경합 항목으로 이동'
-              : '첫 번째 미확정 항목으로 이동'}
-          </button>
-        </div>
+          {unconfirmedMachineFieldKeys.length > 0 && (
+            <>
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => {
+                  if (firstUnconfirmedFieldKey) focusField(firstUnconfirmedFieldKey);
+                }}
+                style={{ padding: '6px 10px', fontSize: 12, whiteSpace: 'nowrap' }}
+              >
+                {contestedUnconfirmedFieldKeys.length > 0
+                  ? '첫 번째 경합 항목으로 이동'
+                  : '첫 번째 미확정 항목으로 이동'}
+              </button>
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={isSaving || !allFieldCardsSeen || bulkConfirmableFieldKeys.length === 0}
+                onClick={confirmBulkFields}
+                title={allFieldCardsSeen
+                  ? '경합이 아니고 신뢰도가 높은 자동 입력만 확인합니다.'
+                  : `크롭을 끝까지 확인한 뒤 일괄 확인할 수 있습니다 (남은 카드 ${remainingCardCount}개)`}
+                style={{ padding: '6px 10px', fontSize: 12, whiteSpace: 'nowrap' }}
+              >
+                경합 아닌 자동값 {bulkConfirmableFieldKeys.length}개 확인
+              </button>
+            </>
+          )}
+          {hasBulkUndoForStudent && (
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={undoBulkConfirmation}
+              style={{ padding: '6px 10px', fontSize: 12, whiteSpace: 'nowrap' }}
+            >
+              되돌리기
+            </button>
+          )}
+          {!allFieldCardsSeen && (
+            <span
+              role="status"
+              aria-live="polite"
+              style={{ color: 'var(--text-muted)', fontSize: 12, lineHeight: 1.4 }}
+            >
+              크롭을 끝까지 확인한 뒤 일괄 확인할 수 있습니다 (남은 카드 {remainingCardCount}개)
+            </span>
+          )}
+          </div>
       )}
 
       <button

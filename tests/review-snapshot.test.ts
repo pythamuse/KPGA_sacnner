@@ -276,7 +276,9 @@ describe('contested runner-up badge', () => {
       recognitionContested: { 'basic.gender': false },
     };
 
-    expect(renderReview(draft)).not.toContain('경합');
+    const html = renderReview(draft);
+    expect(html).not.toContain('다른 칸에도 표시 흔적이 있습니다 — 지운 표시인지 확인해주세요');
+    expect(html).not.toContain('>경합</span>');
   });
 });
 
