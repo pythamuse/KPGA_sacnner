@@ -3798,8 +3798,17 @@ function markShapeTraceEnabled(): boolean {
  * `MARK_CANCEL_CROSSING` and `MARK_CANCEL_FILL` so the pair can be swept on
  * real rasters without a rebuild. They are NOT gate constants: nothing reads
  * them unless `MARK_CANCEL_VETO` is set, and no existing threshold moves.
+ *
+ * The crossing default is 0.7 because 0.6 refuses too much. Swept on the real
+ * rasters (Task/CANCEL_VETO_2026-09-03.md): over scan sets 1-3, 0.6 removes 5
+ * wrong values while blanking 47 correct ones -- 10.4 review cells per wrong
+ * removed, past the limit of 10 in CLAUDE.md 5.4 -- while 0.7 removes 3 and
+ * blanks 20 (7.7:1). At 0.7 the four photo sets lose one correct cell with
+ * wrong still 0, the grayscale set drops 2 wrong at 6:1, and the browser run
+ * goes from 9 wrong to 6. Raising the fill default instead removes no wrong
+ * value at any crossing, so it stays where it is.
  */
-const CANCEL_CROSSING_DEFAULT = 0.6;
+const CANCEL_CROSSING_DEFAULT = 0.7;
 const CANCEL_FILL_DEFAULT = 0.22;
 
 /**

@@ -228,3 +228,16 @@ tests/satisfaction-recognition.test.ts  writeMarkedForm 채움 마크        0.9
    넣을지는 위임자가 확인해야 한다(형태 계측 보고 §6.5와 같은 주의).
 6. **문턱 파싱은 관대하다.** 숫자가 아니거나 빈 문자열이면 기본값으로 돌아간다. 오타를 조용히
    무시한다는 뜻이므로, 훑기를 돌릴 때 값이 실제로 먹었는지는 결과로 확인해야 한다.
+
+## Default raised to 0.7 (2026-09-03, judge)
+
+The delegate that wrote this round could not make the change: two attempts ended on HTTP 529 before any edit. Rather than hold the merge for a
+one-line constant, the judge (main agent) made it and ran the same three commands. `CANCEL_CROSSING_DEFAULT` is 0.7; the comment above it carries the
+measurement that chose the value. Nothing else moved -- `CANCEL_FILL_DEFAULT` is still 0.22, the decision point is untouched.
+
+Measured, from `Task/CANCEL_VETO_2026-09-03.md`: over scan sets 1-3, 0.6 removes 5 wrong values and blanks 47 correct (10.4 review cells per wrong,
+past the 10 limit); 0.7 removes 3 and blanks 20 (7.7:1). Four scan sets at 0.7 measured `354/4/79 · 338/7/92 · 343/2/92 · 297/7/133`, photos
+`60/0 · 34/0 · 42/0 · 32/0`, browser `auto 335 · correct 329 · wrong 6 · blank 102`.
+
+Checks: `npx tsc --noEmit` clean; `npx vitest run` 504 passed / 18 skipped; `MARK_CANCEL_VETO=1 npx vitest run` 504 passed / 18 skipped.
+
