@@ -191,3 +191,19 @@ p16 q05는 1.5에서 교차 0.76으로 거부권에 걸렸는데 2.0에서 0.68�
 같은 두 덤프(1.5·2.0)에서 후보별 점수를 평균해 같은 게이트·거부권을 적용: 정답 302→311, 오답 8→8이지만 **오답의 구성이 바뀐다**
 — p15 q04·p19 q09가 빠지는 대신 p14 cagi.q07·p15 sat.q01이 새로 오답이 된다. 값을 더하는 규칙이 새 오답 둘을 만들므로 총계가
 같아도 기각(오답 0 원칙). 합의(1위 일치)만이 오답을 늘리지 않고 값을 뺀다.
+
+### 사이클 5 구현·판정
+
+구현(소넷, `cycle5-multiscale` 3f0c141): `recognitionTopCandidate[field]`(q 항목의 최고 점수 후보) 노출, 순수 병합
+`src/lib/recognition/multiScaleConsensus.ts`(`mergeMultiScale`), `/api/recognize/student`의 선택 파일 `cagi2`·`satisfaction2`,
+`recognizeOneStudent`의 2차 인식+병합(`student.source.multiScale = {applied, vetoed[], rescued[]}`), 클라이언트
+`CONSENSUS_RENDER`(2.0/0.86) 추가 렌더(`NEXT_PUBLIC_MULTI_SCALE_CONSENSUS`), 계측기 `REAL_SCAN_CONSENSUS=1`. 되찾기 허용
+토큰(코더가 `markDensity.ts:2249-2470`에서 뽑음): `ink-invariant`·`absolute-floor`·`gap`·`mark-shape`·`relative-contrast`·
+`photo-binary-floor`·`photo-binary-refused`; `medium-*`·`band-structure`·`cancel-crossing`·`grid-unverified`·`form-bounds:*`는 최종
+(되찾지 않음). 시험 559 통과. 코더의 보고서 파일은 도구 제한으로 커밋되지 않았고 요약은 이 절이 대신한다.
+
+**브라우저 19명(세트 1, 3001 포트 워크트리 서버, 두 규칙 on)**: **자동 356 · 정답 352 · 오답 4 · 미확정 빈칸 76**
+(기준선 350/344/6/87). 철회 3칸 = p11 q05(정답 손실)·p15 q04·p19 q09(오답 제거), 되찾기 9칸 = p3 q02·q03, p5 q02, p7 cagi q01·q02,
+p8 cagi q07, p11 q06, p15 cagi q07·q03 — **전부 정답**. 나머지 12명의 값은 기준선 스냅샷과 학생별 다이제스트가 일치(1.5 경로 무변경).
+남은 오답 4 = p16 q02·q03·q04·q06(취소 X, 두 배율 동일). 규칙별 귀속: 거부권만 = 347/343/**4**/88(오답 −2에 빈칸 +1),
+되찾기만 = 359/353/6/78(오답 0 추가).
