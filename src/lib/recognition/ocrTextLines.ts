@@ -42,6 +42,15 @@ export interface DigitOcrOptions extends OcrOptions {
    * without `AGE_OCR_DUMP_DIR`) no dump code runs at all.
    */
   dumpLabel?: string;
+  /**
+   * Opt-in: when true, `DigitOcrResult.strokes` is populated with the same
+   * bitmaps `AGE_OCR_DUMP_DIR` would have written as `<label>-stroke-N.png`
+   * (left to right), independent of whether a dump directory is set. Used by
+   * the digit-classifier fallback (Task/AGE_CLASSIFIER_BRIEF_2026-09-05.md)
+   * so it can classify exactly what tesseract was shown. False by default,
+   * and when false or omitted the result carries no `strokes` field at all.
+   */
+  exposeStrokes?: boolean;
 }
 
 /** Where and under what name the debug dump hook writes its PNGs. */
@@ -75,6 +84,14 @@ export interface DigitOcrResult {
    * re-instrumenting this file.
    */
   confidence?: number;
+  /**
+   * The digit-stroke bitmaps this read was based on, left to right, one per
+   * shape `readDigitStrokes` handed to the per-digit reader -- the same
+   * images `AGE_OCR_DUMP_DIR` writes as `<label>-stroke-N.png`. Present only
+   * when `DigitOcrOptions.exposeStrokes` was true; absent (not an empty
+   * array) otherwise, so the field costs nothing when unused.
+   */
+  strokes?: Array<{ data: Uint8Array; width: number; height: number }>;
 }
 
 export interface DigitTemplateReference {
@@ -364,21 +381,33 @@ export async function recognizeDigitsInRegionDetailed(
       ? { dir: dumpDir, label: options.dumpLabel }
       : undefined;
 
+    // Opt-in stroke capture (`DigitOcrOptions.exposeStrokes`), independent of
+    // `dump` above -- a probe or the digit-classifier fallback may want the
+    // bitmaps with no `AGE_OCR_DUMP_DIR` set. Collected as a side channel
+    // rather than a field on `read` because `read` may come back through
+    // either confidence-gate function below, and only one of them threads its
+    // input object through untouched.
+    const strokeSink: NonNullable<DigitOcrResult['strokes']> | undefined = options?.exposeStrokes
+      ? []
+      : undefined;
+
     // The photo-only refusal is applied to the finished read, after every gate
     // inside `recognizeDigitsCropDetailed` has had its say, so it can subtract
     // a value but never add one back.
     const read = await withTimeout(
-      recognizeDigitsCropDetailed(imageBuffer, crop, templateReference, dump),
+      recognizeDigitsCropDetailed(imageBuffer, crop, templateReference, dump, strokeSink),
       remainingMs,
     );
 
-    return recordAgeOcrConfidence(
+    const gated = recordAgeOcrConfidence(
       applyGrayscaleAgeConfidenceGate(
         applyPhotoAgeConfidenceGate(read, photoProvenance),
         options?.grayscaleScan === true,
       ),
       photoProvenance,
     );
+
+    return strokeSink ? { ...gated, strokes: strokeSink } : gated;
   } catch {
     return recordAgeOcrConfidence({
       status: 'timeout_or_error',
@@ -637,6 +666,7 @@ async function recognizeDigitsCropDetailed(
   crop: { left: number; top: number; width: number; height: number },
   templateReference?: DigitTemplateReference,
   dump?: DigitOcrDump,
+  strokeSink?: NonNullable<DigitOcrResult['strokes']>,
 ): Promise<DigitOcrResult> {
   try {
     const { found, shape } = await buildDigitStrokes(imageBuffer, crop, templateReference, dump);
@@ -647,7 +677,7 @@ async function recognizeDigitsCropDetailed(
       };
     }
 
-    const { wholeBox, perDigit } = await readDigitStrokes(found, dump);
+    const { wholeBox, perDigit } = await readDigitStrokes(found, dump, strokeSink);
     const evidence = `${describeReadings(wholeBox, perDigit)} ${describeShape(shape)}`;
     const wholeBoxValue = parseAgeOcrText(wholeBox.text);
     const perDigitValue = perDigit ? parseAgeOcrText(perDigit.text) : undefined;
@@ -862,6 +892,7 @@ interface DigitReading {
 function readDigitStrokes(
   strokes: DigitStrokes,
   dump?: DigitOcrDump,
+  strokeSink?: NonNullable<DigitOcrResult['strokes']>,
 ): Promise<{ wholeBox: DigitReading; perDigit?: DigitReading }> {
   return runDigitOcrExclusively(async () => {
     const worker = await getDigitWorker();
@@ -882,6 +913,13 @@ function readDigitStrokes(
     for (const stroke of ordered) {
       const image = await renderStrokesForOcr(strokes.mask, [stroke]);
       await dumpDigitOcrPng(dump, `stroke-${perStroke.length + 1}`, image);
+      if (strokeSink) {
+        // Decoded back from the same encoded PNG bytes handed to
+        // `dumpDigitOcrPng` above, so this is exactly the bitmap a dump would
+        // have written -- not a separately-computed render that could drift.
+        const { data, info } = await sharp(image).raw().toBuffer({ resolveWithObject: true });
+        strokeSink.push({ data: new Uint8Array(data), width: info.width, height: info.height });
+      }
       const reading = await readWith(worker, image, PSM.SINGLE_CHAR);
       text += reading.text;
       confidence = Math.min(confidence, reading.confidence);

@@ -42,10 +42,18 @@ import {
   normalizeBasicCheckboxRects,
   type BasicCheckboxGridDetection,
 } from './basicCheckboxDetection';
-import { recognizeDigitsInRegionDetailed, type DigitOcrOptions } from './ocrTextLines';
+import { recognizeDigitsInRegionDetailed, type DigitOcrOptions, type DigitOcrResult } from './ocrTextLines';
+import { classifyDigit, type DigitClassification } from './mnist12';
 import { buildFlattenedGeometryImage } from './illuminationFlatten';
 import { loadBlankFormBaseline } from './templateBaseline';
 import fs from 'fs/promises';
+
+// Digit-classifier fallback for `basic.age` (Task/AGE_CLASSIFIER_BRIEF_2026-09-05.md).
+// Opt-in via `AGE_DIGIT_CLASSIFIER === '1'` -- note the `=== '1'` convention,
+// not `!== '0'`; CLAUDE.md section 2 documents both conventions coexisting in
+// this repo, and this one is opt-in by design so the flag being unset (not
+// just `=0`) must leave every byte of the output unchanged.
+const AGE_DIGIT_CLASSIFIER_ENABLED = process.env.AGE_DIGIT_CLASSIFIER === '1';
 
 export { isAutomaticGridEligible } from './tableGridDetection';
 
@@ -261,6 +269,10 @@ export async function recognizeStudentForms(
       basicGroups,
       options.cagiPhotoProvenance ?? false,
     );
+    // Holds the age-OCR result (with stroke bitmaps, when exposed) for the
+    // digit-classifier fallback that runs after the choice-group loop below,
+    // once `basic.schoolType`/`basic.grade` are known.
+    let ageOcrResult: DigitOcrResult | undefined;
     if (!canAutoRecognizeCagi) {
       recognitionDecisionTrace['basic.age'] =
         'Age: automatic entry blocked because the CAGI form boundary was not verified.';
@@ -273,12 +285,13 @@ export async function recognizeStudentForms(
         cagiImage.width,
         cagiImage.height,
         getAgeDigitsRect(ageRect),
-        toDigitOcrOptions(options, cagiPreCalibration?.inputClass === 'grayscale-scan'),
+        toDigitOcrOptions(options, cagiPreCalibration?.inputClass === 'grayscale-scan', AGE_DIGIT_CLASSIFIER_ENABLED),
         cagiBaseline && templateAgeRect ? {
           image: cagiBaseline.image,
           rect: getAgeDigitsRect(templateAgeRect),
         } : undefined,
       );
+      ageOcrResult = ageResult;
       recognitionDecisionTrace['basic.age'] = ageResult.diagnostic;
       if (ageResult.value !== undefined) {
         draft.basic.age = ageResult.value;
@@ -449,6 +462,27 @@ export async function recognizeStudentForms(
         ? describeEvidence(result.evidence, group.candidates.map((candidate) => String(candidate.value)))
         : getRecognitionFieldLabel(result.field) + ': automatic entry completed from a verified grid and high-confidence mark evidence.'
           + (recognitionContested[result.field] ? ' contested=1' : '');
+    }
+
+    // Digit-classifier fallback for `basic.age` (Task/AGE_CLASSIFIER_BRIEF_2026-09-05.md).
+    // Runs only once `basic.schoolType`/`basic.grade` are known from the loop
+    // above, and only where the tesseract path above did not already accept a
+    // value -- it can fill a blank, never overrule an accepted read.
+    if (AGE_DIGIT_CLASSIFIER_ENABLED) {
+      const fallback = applyAgeDigitClassifierFallback({
+        ageValueSource: recognitionValueSource['basic.age'],
+        schoolTypeValueSource: recognitionValueSource['basic.schoolType'],
+        schoolType: draft.basic.schoolType,
+        gradeValueSource: recognitionValueSource['basic.grade'],
+        grade: draft.basic.grade,
+        strokes: ageOcrResult?.strokes,
+        existingTrace: recognitionDecisionTrace['basic.age'],
+      });
+      if (fallback) {
+        draft.basic.age = fallback.value;
+        recognitionValueSource['basic.age'] = 'auto';
+        recognitionDecisionTrace['basic.age'] = fallback.trace;
+      }
     }
 
     for (const [field, rect] of Object.entries(cagiGridDetection.fieldRects)) {
@@ -723,12 +757,95 @@ function toOcrOptions(options: RecognitionOptions): { deadlineAt?: number } | un
 // arms the photo-only confidence refusal. An options object is now always
 // produced: `deadlineAt: undefined` takes the same branch as no options at
 // all, so a caller that passed no deadline keeps the full digit-OCR budget.
-function toDigitOcrOptions(options: RecognitionOptions, grayscaleScan = false): DigitOcrOptions {
+function toDigitOcrOptions(options: RecognitionOptions, grayscaleScan = false, exposeStrokes = false): DigitOcrOptions {
   return {
     deadlineAt: options.digitOcrDeadlineAt,
     photoProvenance: options.cagiPhotoProvenance ?? false,
     grayscaleScan,
+    exposeStrokes,
   };
+}
+
+export interface AgeDigitClassifierInput {
+  ageValueSource: RecognitionValueSource;
+  schoolTypeValueSource: RecognitionValueSource;
+  schoolType: string | undefined;
+  gradeValueSource: RecognitionValueSource;
+  grade: string | undefined;
+  strokes: NonNullable<DigitOcrResult['strokes']> | undefined;
+  /** The trace already recorded for `basic.age`, appended after this gate's own sentence. */
+  existingTrace: string;
+}
+
+export interface AgeDigitClassifierAcceptance {
+  value: number;
+  trace: string;
+}
+
+/**
+ * The digit-classifier fallback gate for `basic.age`
+ * (Task/AGE_CLASSIFIER_BRIEF_2026-09-05.md), as a pure function so the gate
+ * table (confidence below floor, wrong stroke count, out of range, grade or
+ * school type unconfirmed, school type other than 중학교) can be tested
+ * without a real image pipeline. `classify` defaults to the real
+ * `classifyDigit` and is only overridden by tests.
+ *
+ * Every gate here only takes a value away: it never fires unless the
+ * tesseract path above left `basic.age` unfilled (checked by the caller,
+ * which does not call this at all when that path already accepted a value),
+ * and no school type other than 중학교 gets an assumed age range -- that
+ * range was measured only for 중학교 (brief §5) and does not generalise.
+ */
+export function applyAgeDigitClassifierFallback(
+  input: AgeDigitClassifierInput,
+  classify: (data: Uint8Array, width: number, height: number) => DigitClassification | null = classifyDigit,
+): AgeDigitClassifierAcceptance | undefined {
+  if (input.ageValueSource === 'auto') {
+    return undefined;
+  }
+
+  const schoolTypeIsMiddleSchool = input.schoolTypeValueSource === 'auto'
+    && input.schoolType === '중학교';
+  const gradeMatch = input.gradeValueSource === 'auto'
+    ? /^([1-6])학년$/.exec(String(input.grade))
+    : null;
+  const expectedRange = schoolTypeIsMiddleSchool && gradeMatch
+    ? {
+      grade: Number(gradeMatch[1]),
+      lo: 12 + Number(gradeMatch[1]) - 1,
+      hi: 12 + Number(gradeMatch[1]) + 1,
+    }
+    : undefined;
+  if (!expectedRange) {
+    return undefined;
+  }
+
+  const strokes = input.strokes;
+  if (!strokes || strokes.length !== 2) {
+    return undefined;
+  }
+
+  const tens = classify(strokes[0].data, strokes[0].width, strokes[0].height);
+  const ones = classify(strokes[1].data, strokes[1].width, strokes[1].height);
+  if (!tens || !ones) {
+    return undefined;
+  }
+
+  const minConfidence = Math.min(tens.confidence, ones.confidence);
+  const value = tens.digit * 10 + ones.digit;
+  if (
+    minConfidence < 0.95
+    || value < 10 || value > 19
+    || value < expectedRange.lo || value > expectedRange.hi
+  ) {
+    return undefined;
+  }
+
+  const trace = `Age OCR accepted ${value} [gate=digit-classifier]: the two strokes read as ${tens.digit} and ${ones.digit} `
+    + `at confidence ${Math.round(tens.confidence * 100)}/${Math.round(ones.confidence * 100)} of 95 needed, `
+    + `inside the ${expectedRange.lo}-${expectedRange.hi} range implied by 중학교 ${expectedRange.grade}학년. `
+    + input.existingTrace;
+  return { value, trace };
 }
 
 function mapRecognizedSchoolType(value: number | string): string {
