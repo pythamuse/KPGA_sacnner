@@ -43,6 +43,12 @@ interface NormalizedPoint {
 interface Match {
   candidateIndex: number;
   distance: number;
+  /** Section A (BASIC_BOX_MATCH_V2): true when this reference had no
+   * candidate at all and was assigned the missing-reference cost instead.
+   * `candidateIndex` is -1 in that case; constrainMatchesToLayout places it
+   * at the layout-predicted position, the same as it already does for a
+   * candidate that disagrees with the other eleven. */
+  missing?: boolean;
 }
 
 interface TranslationMatch {
@@ -50,6 +56,17 @@ interface TranslationMatch {
   matches: Match[];
   totalDistance: number;
   maxDistance: number;
+  /** Set only by the V2 path (BASIC_BOX_MATCH_V2): how many references were
+   * left missing instead of forced onto a distant candidate (Section A). */
+  missingCount?: number;
+  /** V2 only: mean frameScore among the matches that were not missing. */
+  frameMean?: number;
+  /** V2 only: whether any small-translation seed produced a full assignment
+   * at all (Section C), regardless of whether it was the one adopted. */
+  smallCandidateFound?: boolean;
+  /** V2 only: true when a larger-shift assignment cleared the margin over the
+   * best small-shift one and was adopted instead. */
+  usedLargeShift?: boolean;
 }
 
 const DARK_THRESHOLD = 180;
@@ -69,6 +86,52 @@ const MATCH_TOLERANCE = 0.018;
 const MAX_TRANSLATION = 0.03;
 const MIN_BASELINE_FRAME_SCORE = 0.65;
 const ROW_CLUSTER_TOLERANCE = 0.006;
+
+// BASIC_BOX_MATCH_V2 (default on since 2026-09-05, cycle 2 --
+// Task/CYCLE2_BASIC_PLACEMENT_AGENT_REPORT_2026-09-05.md; same "!== '0'"
+// convention as GRID_BAND_V2 in tableGridDetection.ts). Off restores the
+// exact pre-cycle-2 behaviour byte for byte: every one of the twelve
+// reference boxes must be matched to *some* candidate, which is what let a
+// student's own ink (swallowing the printed frame) push the assignment onto
+// the label glyph beside the box instead -- see the order's "확정된 사실" #2.
+function isBasicBoxMatchV2Enabled(): boolean {
+  return process.env.BASIC_BOX_MATCH_V2 !== '0';
+}
+
+/** Section A: at most one box per choice group (gender, school type, grade)
+ * is allowed to go unmatched -- a student marks one option per group, so a
+ * second missing reference in the same group is a different failure mode. */
+const MAX_MISSING_PER_GROUP = 1;
+/** Section A: at most three of the twelve references may go missing in total. */
+const MAX_MISSING_TOTAL = 3;
+/** Section C: seeds at or under this |translation| are preferred outright
+ * over a larger one unless the larger one clears getLargeShiftMargin(). Half
+ * of MATCH_TOLERANCE, mirroring tests/_probe-basic-boxes.test.ts's own copy
+ * of this constant. */
+const SMALL_TRANSLATION_LIMIT = MATCH_TOLERANCE / 2;
+
+function readNonNegativeNumberEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+/** Section B: how strongly a low frame score (a component that reads like a
+ * letter's corner, not the four sides of a printed box) inflates a
+ * candidate's distance cost. BASIC_BOX_FRAME_WEIGHT overrides it for sweeps;
+ * unset or invalid falls back to 1.0. */
+function getFrameWeight(): number {
+  return readNonNegativeNumberEnv('BASIC_BOX_FRAME_WEIGHT', 1);
+}
+
+/** Section C: how much cheaper (as a fraction of the small-shift best) a
+ * larger-shift assignment must be, by weighted cost, before it is allowed to
+ * win. BASIC_BOX_LARGE_SHIFT_MARGIN overrides it; unset or invalid falls back
+ * to 0.2. */
+function getLargeShiftMargin(): number {
+  return readNonNegativeNumberEnv('BASIC_BOX_LARGE_SHIFT_MARGIN', 0.2);
+}
 
 /**
  * Detects the checkbox-like components in the unmarked form. The components
@@ -107,8 +170,19 @@ export function detectBlankBasicCheckboxes(
 /**
  * Matches a scanned page's component set to the clean baseline. A translation
  * is estimated from every possible reference/candidate pair and the best
- * one-to-one assignment is retained. No field or candidate receives a special
- * rule; a page is verified only when the complete 12-box pattern is present.
+ * one-to-one assignment is retained.
+ *
+ * BASIC_BOX_MATCH_V2 (default on): up to one reference per choice group, and
+ * three overall, may go unmatched instead of being forced onto whatever
+ * candidate is nearest -- a real frame the student's own mark swallowed is
+ * common, and forcing a match used to drag the whole twelve-box layout onto
+ * the field-name glyphs beside the boxes instead (cycle 2 order, "확정된
+ * 사실" #2). A candidate's distance cost is weighted by how box-like its
+ * printed frame looks, and a small-shift assignment is preferred outright
+ * over a larger one unless the larger one is markedly cheaper. See
+ * matchReferencesToCandidates. BASIC_BOX_MATCH_V2=0 restores the exact-count
+ * matcher: every one of the twelve boxes must be matched to something,
+ * unweighted, at the seed with the least total distance.
  */
 export function matchBasicCheckboxes(
   image: ImageAnalysisData,
@@ -122,7 +196,7 @@ export function matchBasicCheckboxes(
     return undefined;
   }
 
-  const match = findTranslationMatch(references, candidates, MATCH_TOLERANCE);
+  const match = matchReferencesToCandidates(references, candidates, groups);
   if (!match || match.matches.length !== references.length) {
     return undefined;
   }
@@ -140,6 +214,14 @@ export function matchBasicCheckboxes(
   const movedNote = moved.length > 0
     ? ` ${moved.length} disagreed with that layout and were placed where it predicts (worst ${Math.max(...moved).toFixed(1)}px).`
     : '';
+  // Section D: only the V2 path (matchReferencesToCandidates) fills in
+  // missingCount, so this stays empty -- and the diagnostic stays byte
+  // identical to before this cycle -- whenever BASIC_BOX_MATCH_V2=0.
+  const v2Note = match.missingCount !== undefined
+    ? ` translation=${match.translation.x.toFixed(4)},${match.translation.y.toFixed(4)}`
+      + ` missing=${match.missingCount} frameMean=${(match.frameMean ?? 0).toFixed(3)}`
+      + ` altSmall=${match.smallCandidateFound ? (match.usedLargeShift ? 'found,large-won' : 'used') : 'none'}.`
+    : '';
   return {
     overrides,
     candidateCount: candidates.length,
@@ -147,7 +229,7 @@ export function matchBasicCheckboxes(
     maxResidual: match.maxDistance,
     translation: match.translation,
     corrections,
-    diagnostic: `Checkbox geometry matched ${match.matches.length}/${references.length} candidates; max normalized residual ${match.maxDistance.toFixed(4)}.${movedNote}`,
+    diagnostic: `Checkbox geometry matched ${match.matches.length}/${references.length} candidates; max normalized residual ${match.maxDistance.toFixed(4)}.${movedNote}${v2Note}`,
   };
 }
 
@@ -192,28 +274,36 @@ function constrainMatchesToLayout(
     return undefined;
   }
 
-  const matched = matches.map((match) => candidates[match.candidateIndex]);
-  if (matched.some((candidate) => !candidate)) {
+  // A `missing` match (BASIC_BOX_MATCH_V2, Section A) never had a candidate
+  // to begin with; it is left `undefined` here on purpose and falls into the
+  // "disagrees with the layout" branch below -- the same branch a genuinely
+  // mismatched candidate already fell into before this cycle. Everything in
+  // this function reduces to the pre-cycle-2 computation when no match is
+  // missing, since `matches[index].missing` is then always falsy.
+  const matched = matches.map((match) => (match.missing ? undefined : candidates[match.candidateIndex]));
+  if (matched.some((candidate, index) => !candidate && !matches[index].missing)) {
     return undefined;
   }
 
-  const residualX = matched.map((candidate, index) => candidate.center.x - references[index].x);
-  const residualY = matched.map((candidate, index) => candidate.center.y - references[index].y);
-  const shiftX = median(residualX);
-  const shiftY = median(residualY);
+  const residualX = matched.map((candidate, index) => (candidate ? candidate.center.x - references[index].x : NaN));
+  const residualY = matched.map((candidate, index) => (candidate ? candidate.center.y - references[index].y : NaN));
+  const shiftX = median(residualX.filter((value) => !Number.isNaN(value)));
+  const shiftY = median(residualY.filter((value) => !Number.isNaN(value)));
   const deviationX = residualX.map((value) => Math.abs(value - shiftX));
   const deviationY = residualY.map((value) => Math.abs(value - shiftY));
   // Floored at one page pixel: nothing locates a box centre more finely than
   // that, so a smaller disagreement is never evidence of a wrong match.
-  const limitX = Math.max(LAYOUT_OUTLIER_FACTOR * median(deviationX), 1 / width);
-  const limitY = Math.max(LAYOUT_OUTLIER_FACTOR * median(deviationY), 1 / height);
+  const limitX = Math.max(LAYOUT_OUTLIER_FACTOR * median(deviationX.filter((value) => !Number.isNaN(value))), 1 / width);
+  const limitY = Math.max(LAYOUT_OUTLIER_FACTOR * median(deviationY.filter((value) => !Number.isNaN(value))), 1 / height);
 
+  // NaN comparisons are always false, so a missing reference never "agrees"
+  // and always takes the layout-predicted placement below.
   const agrees = references.map((_, index) => deviationX[index] <= limitX && deviationY[index] <= limitY);
   if (agrees.filter(Boolean).length * 2 <= references.length) {
     return undefined;
   }
 
-  const agreeing = matched.filter((_, index) => agrees[index]);
+  const agreeing = matched.filter((candidate, index): candidate is BasicCheckboxCandidate => Boolean(candidate) && agrees[index]);
   const boxWidth = median(agreeing.map((candidate) => candidate.rect.right - candidate.rect.left));
   const boxHeight = median(agreeing.map((candidate) => candidate.rect.bottom - candidate.rect.top));
   const used = new Set(matches.filter((_, index) => agrees[index]).map((match) => match.candidateIndex));
@@ -222,7 +312,7 @@ function constrainMatchesToLayout(
   const corrections: number[] = [];
   for (let index = 0; index < references.length; index += 1) {
     if (agrees[index]) {
-      rects.push(matched[index].rect);
+      rects.push(matched[index]!.rect);
       corrections.push(0);
       continue;
     }
@@ -248,10 +338,21 @@ function constrainMatchesToLayout(
     const placed = replacementIndex >= 0
       ? candidates[replacementIndex].rect
       : rectAroundNormalizedPoint(bounds, predicted, boxWidth, boxHeight);
-    const movedX = (placed.left + placed.right) / 2 - (matched[index].rect.left + matched[index].rect.right) / 2;
-    const movedY = (placed.top + placed.bottom) / 2 - (matched[index].rect.top + matched[index].rect.bottom) / 2;
+    let correctionPx: number;
+    if (matched[index]) {
+      const movedX = (placed.left + placed.right) / 2 - (matched[index]!.rect.left + matched[index]!.rect.right) / 2;
+      const movedY = (placed.top + placed.bottom) / 2 - (matched[index]!.rect.top + matched[index]!.rect.bottom) / 2;
+      correctionPx = Math.sqrt(movedX * movedX + movedY * movedY);
+    } else {
+      // Section A: a missing reference never had a matched candidate to diff
+      // against. Report the assignment's own cost (MATCH_TOLERANCE,
+      // normalized) in page pixels instead, so this slot still carries a
+      // non-zero correction and shows up in the diagnostic rather than
+      // looking like an untouched match.
+      correctionPx = Math.hypot(MATCH_TOLERANCE * width, MATCH_TOLERANCE * height);
+    }
     rects.push(placed);
-    corrections.push(Math.sqrt(movedX * movedX + movedY * movedY));
+    corrections.push(correctionPx);
   }
 
   return { rects, corrections };
@@ -834,6 +935,229 @@ function distance(first: NormalizedPoint, second: NormalizedPoint): number {
   return Math.hypot(first.x - second.x, first.y - second.y);
 }
 
+/**
+ * Dispatches to the exact-count matcher (byte-identical to before cycle 2) or
+ * the missing-tolerant one, by BASIC_BOX_MATCH_V2. Exposed via __probe so the
+ * two paths can be exercised directly -- on synthetic references and
+ * candidates, without a rasterised page -- from
+ * tests/basicCheckboxDetection.test.ts.
+ */
+function matchReferencesToCandidates(
+  references: NormalizedPoint[],
+  candidates: BasicCheckboxCandidate[],
+  groups: ChoiceGroup[],
+): TranslationMatch | undefined {
+  if (!isBasicBoxMatchV2Enabled()) {
+    return findTranslationMatch(references, candidates, MATCH_TOLERANCE);
+  }
+  const groupOfReference = referenceGroupIndices(groups);
+  return findTranslationMatchV2(references, candidates, MATCH_TOLERANCE, groupOfReference, groups.length);
+}
+
+/** Which choice group (by index into `groups`) each flattened reference
+ * belongs to, in the same order flattenGroupRects lays references out in. */
+function referenceGroupIndices(groups: ChoiceGroup[]): number[] {
+  const indices: number[] = [];
+  groups.forEach((group, groupIndex) => {
+    for (let i = 0; i < group.candidates.length; i += 1) {
+      indices.push(groupIndex);
+    }
+  });
+  return indices;
+}
+
+/**
+ * Section C (BASIC_BOX_MATCH_V2): the translation-search analogue of
+ * findTranslationMatch, evaluated with assignCandidatesWithMissing instead of
+ * assignCandidates. Seeds at or under SMALL_TRANSLATION_LIMIT are preferred
+ * outright; a larger-shift seed's assignment is adopted only when its
+ * weighted cost clears getLargeShiftMargin() below the best small-shift one,
+ * so a page whose printed boxes sit essentially where the blank form says
+ * they do is never dragged onto a coincidentally cheaper label-glyph column.
+ */
+function findTranslationMatchV2(
+  references: NormalizedPoint[],
+  candidates: BasicCheckboxCandidate[],
+  tolerance: number,
+  groupOfReference: number[],
+  groupCount: number,
+): TranslationMatch | undefined {
+  if (references.length === 0) {
+    return undefined;
+  }
+
+  const candidatePoints = candidates.map((candidate) => candidate.center);
+  const seeds: NormalizedPoint[] = [{ x: 0, y: 0 }];
+  for (const reference of references) {
+    for (const point of candidatePoints) {
+      const seed = { x: point.x - reference.x, y: point.y - reference.y };
+      if (Math.abs(seed.x) <= MAX_TRANSLATION && Math.abs(seed.y) <= MAX_TRANSLATION) {
+        seeds.push(seed);
+      }
+    }
+  }
+
+  const frameWeight = getFrameWeight();
+  const seedMagnitude = (seed: NormalizedPoint) => Math.max(Math.abs(seed.x), Math.abs(seed.y));
+  // Ascending |t|, per the order: small-shift seeds are what the rest of this
+  // function treats as the default. The two best-of-bucket values below are
+  // taken over the whole seed list regardless of visit order, so this only
+  // affects how quickly a good bound is found, not the result.
+  const orderedSeeds = seeds.slice().sort((first, second) => seedMagnitude(first) - seedMagnitude(second));
+
+  type Assignment = NonNullable<ReturnType<typeof assignCandidatesWithMissing>>;
+  let bestSmall: (Assignment & { translation: NormalizedPoint }) | undefined;
+  let bestLarge: (Assignment & { translation: NormalizedPoint }) | undefined;
+
+  for (const seed of orderedSeeds) {
+    const assignment = assignCandidatesWithMissing(
+      references,
+      candidates,
+      seed,
+      tolerance,
+      groupOfReference,
+      groupCount,
+      frameWeight,
+    );
+    if (!assignment) continue;
+    if (seedMagnitude(seed) <= SMALL_TRANSLATION_LIMIT) {
+      if (!bestSmall || assignment.weightedTotal < bestSmall.weightedTotal) {
+        bestSmall = { ...assignment, translation: seed };
+      }
+    } else if (!bestLarge || assignment.weightedTotal < bestLarge.weightedTotal) {
+      bestLarge = { ...assignment, translation: seed };
+    }
+  }
+
+  const margin = getLargeShiftMargin();
+  let usedLargeShift = false;
+  let winner = bestSmall;
+  if (bestLarge && (!bestSmall || bestLarge.weightedTotal <= bestSmall.weightedTotal * (1 - margin))) {
+    winner = bestLarge;
+    usedLargeShift = true;
+  }
+  if (!winner) {
+    return undefined;
+  }
+
+  const frameScores = winner.matches
+    .filter((match) => !match.missing)
+    .map((match) => candidates[match.candidateIndex].frameScore);
+  const frameMean = frameScores.length > 0
+    ? frameScores.reduce((sum, value) => sum + value, 0) / frameScores.length
+    : 0;
+
+  return {
+    translation: winner.translation,
+    matches: winner.matches,
+    totalDistance: winner.totalDistance,
+    maxDistance: winner.maxDistance,
+    missingCount: winner.missingCount,
+    frameMean,
+    smallCandidateFound: Boolean(bestSmall),
+    usedLargeShift,
+  };
+}
+
+/**
+ * Section A + B (BASIC_BOX_MATCH_V2): the same one-to-one assignment as
+ * assignCandidates, except a reference may be left unassigned ("missing") at
+ * a flat cost of `tolerance` instead of being forced onto whatever candidate
+ * happens to sit within it -- capped at MAX_MISSING_PER_GROUP per choice
+ * group and MAX_MISSING_TOTAL overall, since a student marks at most one
+ * option per group and leaving more than that unassigned would stop being
+ * "one missed mark" and start being "no boxes detected at all". A real
+ * candidate's cost is weighted by how box-like its printed frame looks
+ * (Section B), so a letter glyph sitting just inside tolerance is no longer
+ * indistinguishable from the box it is impersonating.
+ */
+function assignCandidatesWithMissing(
+  references: NormalizedPoint[],
+  candidates: BasicCheckboxCandidate[],
+  translation: NormalizedPoint,
+  tolerance: number,
+  groupOfReference: number[],
+  groupCount: number,
+  frameWeight: number,
+): { matches: Match[]; totalDistance: number; maxDistance: number; weightedTotal: number; missingCount: number } | undefined {
+  const options = references.map((reference) => candidates
+    .map((candidate, candidateIndex) => {
+      const rawDistance = distance(reference, {
+        x: candidate.center.x - translation.x,
+        y: candidate.center.y - translation.y,
+      });
+      return {
+        candidateIndex,
+        distance: rawDistance,
+        weighted: rawDistance * (1 + frameWeight * (1 - candidate.frameScore)),
+      };
+    })
+    .filter((option) => option.distance <= tolerance)
+    .sort((first, second) => first.weighted - second.weighted));
+
+  // Fewest real options first, same heuristic as assignCandidates -- it only
+  // affects how quickly a good bound is found, not the result, since every
+  // reference can still fall back to "missing" if its budget allows.
+  const order = options
+    .map((list, referenceIndex) => ({ referenceIndex, count: list.length }))
+    .sort((first, second) => first.count - second.count)
+    .map(({ referenceIndex }) => referenceIndex);
+
+  const used = new Set<number>();
+  const missingPerGroup = new Array<number>(groupCount).fill(0);
+  const selected: Array<Match | undefined> = Array.from({ length: references.length });
+  let best: { matches: Match[]; totalDistance: number; maxDistance: number; weightedTotal: number; missingCount: number } | undefined;
+
+  const visit = (
+    depth: number,
+    totalDistance: number,
+    maxDistance: number,
+    weightedTotal: number,
+    missingCount: number,
+  ) => {
+    if (best && weightedTotal >= best.weightedTotal) return;
+    if (depth === order.length) {
+      best = { matches: selected.map((match) => match!), totalDistance, maxDistance, weightedTotal, missingCount };
+      return;
+    }
+
+    const referenceIndex = order[depth];
+
+    for (const option of options[referenceIndex]) {
+      if (used.has(option.candidateIndex)) continue;
+      used.add(option.candidateIndex);
+      selected[referenceIndex] = { candidateIndex: option.candidateIndex, distance: option.distance };
+      visit(
+        depth + 1,
+        totalDistance + option.distance,
+        Math.max(maxDistance, option.distance),
+        weightedTotal + option.weighted,
+        missingCount,
+      );
+      used.delete(option.candidateIndex);
+      selected[referenceIndex] = undefined;
+    }
+
+    const group = groupOfReference[referenceIndex];
+    if (missingPerGroup[group] < MAX_MISSING_PER_GROUP && missingCount < MAX_MISSING_TOTAL) {
+      missingPerGroup[group] += 1;
+      selected[referenceIndex] = { candidateIndex: -1, distance: tolerance, missing: true };
+      visit(
+        depth + 1,
+        totalDistance + tolerance,
+        Math.max(maxDistance, tolerance),
+        weightedTotal + tolerance,
+        missingCount + 1,
+      );
+      selected[referenceIndex] = undefined;
+      missingPerGroup[group] -= 1;
+    }
+  };
+
+  visit(0, 0, 0, 0, 0);
+  return best;
+}
+
 function findBestFrameCandidate(
   image: Pick<ImageAnalysisData, 'width' | 'height' | 'pixels'>,
   seed: PixelRect,
@@ -939,8 +1263,19 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 /**
- * Read-only handle onto three module-private functions, for
- * `tests/_probe-basic-boxes.test.ts` only. No behaviour changes: this adds a
- * reference to the same functions the module already calls, nothing more.
+ * Read-only handle onto module-private functions, for
+ * `tests/_probe-basic-boxes.test.ts` (the first three) and
+ * `tests/basicCheckboxDetection.test.ts` (cycle 2's BASIC_BOX_MATCH_V2
+ * additions) only. No behaviour changes: this adds a reference to the same
+ * functions the module already calls, nothing more.
  */
-export const __probe = { findTranslationMatch, assignCandidates, flattenGroupRects };
+export const __probe = {
+  findTranslationMatch,
+  assignCandidates,
+  flattenGroupRects,
+  matchReferencesToCandidates,
+  findTranslationMatchV2,
+  assignCandidatesWithMissing,
+  referenceGroupIndices,
+  isBasicBoxMatchV2Enabled,
+};
