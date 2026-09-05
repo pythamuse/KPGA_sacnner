@@ -937,3 +937,10 @@ function calculateFrameScore(
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
 }
+
+/**
+ * Read-only handle onto three module-private functions, for
+ * `tests/_probe-basic-boxes.test.ts` only. No behaviour changes: this adds a
+ * reference to the same functions the module already calls, nothing more.
+ */
+export const __probe = { findTranslationMatch, assignCandidates, flattenGroupRects };
