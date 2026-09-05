@@ -1107,8 +1107,13 @@ export function resolveRecognitionCropDiagnostic(
  * page, paired with the committed baseline geometry by group/index. The
  * scorer uses this only for the opt-in grayscale page calibration; the normal
  * group loop continues to own all recognition decisions.
+ *
+ * Exported (2026-09-05, Task/CYCLE3_AGE_OCR_PROBE_AGENT_REPORT_2026-09-05.md)
+ * so a probe can replay the exact call `recognizeStudentForms` makes instead
+ * of reimplementing it. Visibility only -- nothing about what this function
+ * does or when it is called from the product path changed.
  */
-function buildPageInkCalibration(
+export function buildPageInkCalibration(
   image: ImageAnalysisData,
   groups: ChoiceGroup[],
   gridOverrides: Record<string, PixelRect[]>,
@@ -1190,7 +1195,13 @@ function isVerifiedGrid(registration?: FieldRegistration): boolean {
   return registration?.source === 'grid' && registration.status === 'verified';
 }
 
-function mergeBasicCheckboxDetection(
+/**
+ * Exported (2026-09-05, Task/CYCLE3_AGE_OCR_PROBE_AGENT_REPORT_2026-09-05.md)
+ * for the same reason as `buildPageInkCalibration` above -- a probe replaying
+ * the CAGI grid-detection call order needs this exact function, not a copy of
+ * it. Visibility only.
+ */
+export function mergeBasicCheckboxDetection(
   base: GridDetectionResult,
   groups: ChoiceGroup[],
   detection: BasicCheckboxGridDetection | undefined,
