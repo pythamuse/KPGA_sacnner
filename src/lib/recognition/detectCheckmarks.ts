@@ -1367,9 +1367,16 @@ function describeBasicCheckboxDecision(
   const pick = result.value === undefined
     ? 0
     : group.candidates.findIndex((candidate) => candidate.value === result.value) + 1;
+  // Section B follow-up (CHECKBOX_RUNNERUP_CORE): only present when the
+  // switch is explicitly turned on ('1') -- omitted otherwise (it is off
+  // by default, see the rejection note above isRunnerUpCoreEnabled), so
+  // this trace stays byte identical to before cycle 4 in that case.
+  const runnerUpCoreNote = evidence?.runnerUpCore !== undefined
+    ? ` runnerUpCore=${Math.round(evidence.runnerUpCore * 1000)}`
+    : '';
   return `[pick=${pick} conf=${result.confidence.charAt(0)}`
     + ` gate=${evidence ? evidence.reason : 'not-applied'}`
-    + ` scr=${scores.join(',')}]`;
+    + ` scr=${scores.join(',')}${runnerUpCoreNote}]`;
 }
 
 /**
@@ -1393,6 +1400,38 @@ const CHECKBOX_DOMINANCE_RATIO = 4;
  */
 const CHECKBOX_RUNNER_UP_SIGNAL = 0.025;
 
+// CHECKBOX_RUNNERUP_CORE (opt-in, off by default since 2026-09-05 --
+// Task/IMPROVEMENT_CYCLES_2026-09-05.md cycle 4). Measured on the browser
+// 19-student run: it recovered nothing new but let student 1's basic.grade
+// fill 1학년 where the key says 2학년 -- the true mark sat inside the runner-up
+// box's outer 25% ring, exactly the ring this inset excludes, so the real
+// answer's ink dropped under CHECKBOX_RUNNER_UP_SIGNAL and the wrong box won.
+// That is the falsification case the cycle 4 order named up front, so the
+// switch defaults off (unset or any value other than exactly '1' keeps
+// today's full-window runner-up signal, byte-identical to before cycle 4);
+// only CHECKBOX_RUNNERUP_CORE=1 turns the inset window on.
+function isRunnerUpCoreEnabled(): boolean {
+  return process.env.CHECKBOX_RUNNERUP_CORE === '1';
+}
+
+/**
+ * The inner 50%x50% of a window -- inset 25% per side -- the same "core"
+ * region `measureBasicCheckboxPlacement` (basicCheckboxDetection.ts) already
+ * defines for its own `corePercent` measurement. A window that only slightly
+ * overlaps the printed box's outline sees that border ink at its rim; this
+ * keeps the runner-up comparison below away from that rim.
+ */
+function coreWindow(rect: PixelRect): PixelRect {
+  const width = rect.right - rect.left;
+  const height = rect.bottom - rect.top;
+  return {
+    left: rect.left + width * 0.25,
+    right: rect.right - width * 0.25,
+    top: rect.top + height * 0.25,
+    bottom: rect.bottom - height * 0.25,
+  };
+}
+
 type DirectCheckboxRefusal =
   | 'ok'
   | 'no-value'
@@ -1406,6 +1445,11 @@ interface DirectCheckboxEvidence {
   reason: DirectCheckboxRefusal;
   signals: number[];
   valueIndex: number;
+  /** Section B follow-up (CHECKBOX_RUNNERUP_CORE): the runner-up figure
+   * actually compared against, once past the no-value/named-box-empty
+   * checks. Undefined when the switch is off or evaluation stopped before
+   * a runner-up figure was needed. */
+  runnerUpCore?: number;
 }
 
 /**
@@ -1454,17 +1498,32 @@ function evaluateDirectCheckboxEvidence(
   }
 
   const named = signals[valueIndex];
-  const runnerUp = Math.max(0, ...signals.filter((_, index) => index !== valueIndex));
   if (named <= 0) {
     return { accepted: false, reason: 'named-box-empty', signals, valueIndex };
   }
+
+  // Section B follow-up (CHECKBOX_RUNNERUP_CORE): the runner-up checks below
+  // used to read the same full-window signal as `named`. A window that only
+  // slightly overlaps the printed box's outline sees that border ink at its
+  // rim as if it were inside the box (cycle 4 order, "확정된 사실" #2). The
+  // runner-up candidates only -- never the named box -- are re-measured on
+  // their inner 50%x50% core instead, which the border rim sits outside of.
+  const runnerUp = isRunnerUpCoreEnabled()
+    ? Math.max(0, ...actualRects.map((rect, index) => (
+      index === valueIndex
+        ? -Infinity
+        : calculateCheckboxInteriorDifference(image, coreWindow(rect), baselineImage, coreWindow(baselineRects[index]))
+    )))
+    : Math.max(0, ...signals.filter((_, index) => index !== valueIndex));
+  const runnerUpCore = isRunnerUpCoreEnabled() ? runnerUp : undefined;
+
   if (runnerUp > CHECKBOX_RUNNER_UP_SIGNAL) {
-    return { accepted: false, reason: 'runner-up-inked', signals, valueIndex };
+    return { accepted: false, reason: 'runner-up-inked', signals, valueIndex, runnerUpCore };
   }
   if (named < CHECKBOX_DOMINANCE_RATIO * runnerUp) {
-    return { accepted: false, reason: 'not-dominant', signals, valueIndex };
+    return { accepted: false, reason: 'not-dominant', signals, valueIndex, runnerUpCore };
   }
-  return { accepted: true, reason: 'ok', signals, valueIndex };
+  return { accepted: true, reason: 'ok', signals, valueIndex, runnerUpCore };
 }
 
 /**
@@ -1551,3 +1610,16 @@ function requiresHighVisualConfidence(field: string): boolean {
     'satisfaction.q10',
   ]).has(field);
 }
+
+/**
+ * Read-only handle onto module-private functions, for
+ * `tests/checkboxRunnerUpCore.test.ts` (cycle 4's CHECKBOX_RUNNERUP_CORE
+ * addition) only -- same convention as basicCheckboxDetection.ts's own
+ * `__probe`. No behaviour change: this adds a reference to the same
+ * functions the module already calls, nothing more.
+ */
+export const __probe = {
+  evaluateDirectCheckboxEvidence,
+  coreWindow,
+  isRunnerUpCoreEnabled,
+};
