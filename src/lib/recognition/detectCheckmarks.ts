@@ -48,12 +48,12 @@ import { buildFlattenedGeometryImage } from './illuminationFlatten';
 import { loadBlankFormBaseline } from './templateBaseline';
 import fs from 'fs/promises';
 
-// Digit-classifier fallback for `basic.age` (Task/AGE_CLASSIFIER_BRIEF_2026-09-05.md).
-// Opt-in via `AGE_DIGIT_CLASSIFIER === '1'` -- note the `=== '1'` convention,
-// not `!== '0'`; CLAUDE.md section 2 documents both conventions coexisting in
-// this repo, and this one is opt-in by design so the flag being unset (not
-// just `=0`) must leave every byte of the output unchanged.
-const AGE_DIGIT_CLASSIFIER_ENABLED = process.env.AGE_DIGIT_CLASSIFIER === '1';
+// Digit-classifier fallback for `basic.age` (Task/AGE_CLASSIFIER_BRIEF_2026-09-05.md,
+// Task/AGE_CLASSIFIER_2026-09-06.md). Default on; `AGE_DIGIT_CLASSIFIER=0` restores
+// the tesseract-only behaviour this replaced. Note the `!== '0'` convention -- CLAUDE.md
+// section 2 records that both conventions live in this repo, so read the operator here
+// before writing an off column into a judging script.
+const AGE_DIGIT_CLASSIFIER_ENABLED = process.env.AGE_DIGIT_CLASSIFIER !== '0';
 
 export { isAutomaticGridEligible } from './tableGridDetection';
 

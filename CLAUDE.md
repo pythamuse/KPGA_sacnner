@@ -207,11 +207,14 @@ REAL_SCAN_SAT_REVERSED=1   REAL_SCAN_CAGI_PDF=".../선별검사 샘플3반복.pd
 기준선(2026-09-03, 노드, V2 선 대응 기본값 — 이전 2026-08-28 값은 `355/7/75 · 343/8/86 · 342/3/92`):
 
 ```
-세트 1   CORRECT 354  WRONG 4  BLANK 79   OFF 30
-세트 2   CORRECT 343  WRONG 7  BLANK 87   OFF 16
-세트 3   CORRECT 348  WRONG 2  BLANK 87   OFF 9
-세트 4   CORRECT 305  WRONG 7  BLANK 125  OFF 64   (회색조, 계급 보정 + 나이 바닥 90 — Task/GRAYSCALE_CLASS_2026-09-03.md)
-사진     OLD 60/0 · Set1 34/0 · Set2 42/0 · Set3 32/0
+세트 1   CORRECT 360  WRONG 4  BLANK 73   OFF 30
+세트 2   CORRECT 348  WRONG 7  BLANK 82   OFF 16
+세트 3   CORRECT 353  WRONG 2  BLANK 82   OFF 9
+세트 4   CORRECT 308  WRONG 7  BLANK 122  OFF 64   (회색조, 계급 보정 + 나이 바닥 90 — Task/GRAYSCALE_CLASS_2026-09-03.md)
+사진     OLD 61/0 · Set1 36/0 · Set2 44/0 · Set3 34/0
+
+나이 숫자 분류기 병합(2026-09-06, 기본값 on, [Task/AGE_CLASSIFIER_2026-09-06.md](Task/AGE_CLASSIFIER_2026-09-06.md)) 전 값은
+`354/4/79 · 343/7/87 · 348/2/87 · 305/7/125`, 사진 `60/0 · 34/0 · 42/0 · 32/0`이었다. `AGE_DIGIT_CLASSIFIER=0`으로 그 값이 재현된다.
 
 기본정보 체크박스 배치 수정(2026-09-05 사이클 2, [Task/IMPROVEMENT_CYCLES_2026-09-05.md](Task/IMPROVEMENT_CYCLES_2026-09-05.md)) 전 값은
 `354/4/79 · 338/7/92 · 343/2/92 · 297/7/133`. `BASIC_BOX_MATCH_V2=0`으로 재현된다. 사진 경로는 이 수정을 쓰지 않는다(첫 시도에서 오답 1이 생겨 계급 분기).
@@ -333,6 +336,9 @@ REAL_SCAN_SAT_REVERSED=1   REAL_SCAN_CAGI_PDF=".../선별검사 샘플3반복.pd
 **취소 표시 거부권 병합 후(2026-09-03, 기본값 on, [Task/CANCEL_VETO_2026-09-03.md](Task/CANCEL_VETO_2026-09-03.md))**: 자동 335 · 정답 329 · **오답 6** · 미확정 빈칸 102. 남은 오답 6칸은 p15 q04, p16 q02·q03·q04·q06, p19 q09.
 **기본정보 배치 수정 후(2026-09-05 사이클 2)**: 자동 347 · 정답 341 · **오답 6** · 미확정 빈칸 90 — 회복 12칸은 전부 기본정보(성별 8→5·학교유형 12→8·학년 7→2).
 **프레임 우선 병합 후(사이클 4)**: 자동 350 · 정답 344 · **오답 6** · 미확정 빈칸 87 (p11 기본정보 세 칸). 노드 4세트는 변화 없음. `BASIC_BOX_FRAME_PREFER=0`이 이전 동작; `CHECKBOX_RUNNERUP_CORE=1`은 기각된 실험(오답 증가).
+**나이 숫자 분류기 병합 후(2026-09-06, [Task/AGE_CLASSIFIER_2026-09-06.md](Task/AGE_CLASSIFIER_2026-09-06.md))**: 자동 358 · 정답 352 · **오답 6**(같은 칸) · 미확정 빈칸 74.
+`basic.age`가 자동 2 → 10(정답 10·오답 0)이고 나이 외 칸은 19명 전원 다이제스트 동일. `AGE_DIGIT_CLASSIFIER=0`이 이전 동작.
+**빈칸 87은 정답표가 빈칸이어야 하는 5칸을 포함한 옛 집계다** — 응답 가능 칸 기준으로는 병합 전 82, 병합 후 74다.
 
 ```
 ```
@@ -395,6 +401,10 @@ node scripts/compare-runs.cjs baseline.log candidate.log
   있어 점수가 ~절반이 된다. 재보정 전까지 "회색조로 스캔하라"는 안내를 내보내지 않는다
 - **절대 밝기 문턱은 다른 기기·계조에서 세 곳이 무너졌다** — 격자 선(§16.7), 종이 경계(§17.1,
   수정됨), 수평선 대응(§17.3, 이쪽은 문턱이 아니라 대응 로직). 새 상수를 절대값으로 두지 않는다
+- **나이는 tesseract가 아니라 숫자 분류기로 읽는다**(2026-09-06 병합, [Task/AGE_CLASSIFIER_2026-09-06.md](Task/AGE_CLASSIFIER_2026-09-06.md)).
+  순수 TS로 구현한 MNIST CNN(`mnist12.ts`, 의존성 0, 가중치는 MIT `mnist-12` base64)이 기존 획 분할 결과를 읽고, tesseract가 거절한 칸만
+  채운다. 게이트는 두 자릿수 softmax ≥ 0.95 · 값 10~19 · 자동 확정된 `중학교 N학년`의 `12+N±1` 범위. **학년 범위가 없으면 채우지 않는다** —
+  신뢰도만으로는 1.5 크롭에서 세트당 오답 1~3이 남는다(3→7·5→7 혼동). 초등·고등은 범위를 잰 적이 없어 보류한다
 - **나이 OCR은 tesseract 전처리로 살아나지 않는다.** 68×17 손글씨 크롭에 배율·보간·이진화·팽창·PSM 144조합을 19쪽에 돌려 정답 0(원본·작업 이미지 모두);
   남는 지렛대는 손글씨 숫자 분류기(새 의존성) 하나로 사용자 결정 항목([Task/IMPROVEMENT_CYCLES_2026-09-05.md](Task/IMPROVEMENT_CYCLES_2026-09-05.md) 사이클 3)
 - **`runner-up-inked` 판정의 2위 신호를 안쪽 창으로 재면 오답이 는다**(사이클 4 B: 브라우저 +1, 스캔 +1·+2·+3) — 2위 상자의 진짜 표시가 테두리 쪽에 있을 때 놓친다.
