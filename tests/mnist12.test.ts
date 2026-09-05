@@ -137,4 +137,24 @@ describe('classifyDigit', () => {
     const blank = new Uint8Array(40 * 40).fill(255);
     expect(classifyDigit(blank, 40, 40)).toBeNull();
   });
+
+  it('throws when the buffer length does not match width * height', () => {
+    // Length is a structural fact about the buffer, not a heuristic -- a
+    // mismatch can only be a wiring bug (e.g. a caller handing over an
+    // interleaved multi-channel buffer uninterpreted), and that must be loud.
+    const tooShort = new Uint8Array(40 * 40 - 1);
+    expect(() => classifyDigit(tooShort, 40, 40)).toThrow('1600');
+    expect(() => classifyDigit(tooShort, 40, 40)).toThrow('1599');
+  });
+
+  it('rejects a 3-channel-shaped (interleaved RGB) buffer rather than silently misreading it', () => {
+    // Exactly the shape `sharp(...).raw()` returns for an RGB PNG: length is
+    // width * height * 3, not width * height. This must not be read as if it
+    // were single-channel -- it must throw, not decode into noise.
+    const width = 40;
+    const height = 40;
+    const interleavedRgb = new Uint8Array(width * height * 3).fill(255);
+    expect(() => classifyDigit(interleavedRgb, width, height)).toThrow('4800');
+    expect(() => classifyDigit(interleavedRgb, width, height)).toThrow('1600');
+  });
 });

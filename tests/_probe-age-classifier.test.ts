@@ -140,6 +140,16 @@ run('age digit-classifier probe', () => {
       );
 
       const strokes = ageResult.strokes ?? [];
+      // Buffer length and derived channel count -- printed so a wiring bug
+      // like the RGB/single-channel mismatch this probe was built to catch
+      // is visible in the log line itself, not just in a thrown error.
+      const bufPart = strokes
+        .map((stroke) => {
+          const pixelCount = stroke.width * stroke.height;
+          const channels = pixelCount > 0 ? stroke.data.length / pixelCount : NaN;
+          return `${stroke.data.length}/${stroke.width}x${stroke.height}(ch=${channels})`;
+        })
+        .join(',');
       const digitsPart = strokes
         .map((stroke) => {
           const read = classifyDigit(stroke.data, stroke.width, stroke.height);
@@ -186,7 +196,7 @@ run('age digit-classifier probe', () => {
       }
 
       emit(
-        `[ageclf] page=${n} strokes=${strokes.length} digits=${digitsPart} `
+        `[ageclf] page=${n} strokes=${strokes.length} buf=${bufPart} digits=${digitsPart} `
         + `range=${rangePart} value=${fallback ? fallback.value : '-'} gate=${gate}`,
       );
     }

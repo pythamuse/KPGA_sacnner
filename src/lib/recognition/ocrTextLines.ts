@@ -917,8 +917,21 @@ function readDigitStrokes(
         // Decoded back from the same encoded PNG bytes handed to
         // `dumpDigitOcrPng` above, so this is exactly the bitmap a dump would
         // have written -- not a separately-computed render that could drift.
+        // `renderStrokesForOcr` writes an RGB PNG (R === G === B; sharp never
+        // emitted the single-channel image the caller assumed), so `.raw()`
+        // hands back width*height*channels interleaved bytes. Keeping
+        // channel 0 losslessly recovers the single-channel bitmap -- exactly
+        // what PIL.Image.open(...).convert('L') produced for the reference
+        // measurement the gate was calibrated on -- without sharp's own
+        // .grayscale(), whose luma weighting is not guaranteed to match.
         const { data, info } = await sharp(image).raw().toBuffer({ resolveWithObject: true });
-        strokeSink.push({ data: new Uint8Array(data), width: info.width, height: info.height });
+        const channels = info.channels;
+        const pixelCount = info.width * info.height;
+        const single = new Uint8Array(pixelCount);
+        for (let i = 0; i < pixelCount; i++) {
+          single[i] = data[i * channels];
+        }
+        strokeSink.push({ data: single, width: info.width, height: info.height });
       }
       const reading = await readWith(worker, image, PSM.SINGLE_CHAR);
       text += reading.text;

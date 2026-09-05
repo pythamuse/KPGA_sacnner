@@ -351,6 +351,20 @@ export function classifyDigit(
   width: number,
   height: number,
 ): DigitClassification | null {
+  // The stroke bitmap must already be single-channel: width * height is a
+  // structural fact about the buffer the caller decoded, not a heuristic, so
+  // a mismatch can only mean a wiring bug upstream (e.g. an interleaved
+  // multi-channel buffer passed through uninterpreted). That bug is silent
+  // and expensive if swallowed here -- it reads as noisy misclassification
+  // instead of a caught defect -- so this throws instead of returning null,
+  // and callers must not catch it away.
+  if (gray.length !== width * height) {
+    throw new Error(
+      `classifyDigit received a buffer of length ${gray.length}, but width * height = ${width} * ${height} = ${width * height} was expected. `
+      + 'This buffer is not single-channel grayscale (a 3-channel RGB source, for example, would be width * height * 3).',
+    );
+  }
+
   const input = preprocessDigitImage(gray, width, height);
   if (!input) {
     return null;
