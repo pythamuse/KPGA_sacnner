@@ -67,6 +67,13 @@ interface TranslationMatch {
   /** V2 only: true when a larger-shift assignment cleared the margin over the
    * best small-shift one and was adopted instead. */
   usedLargeShift?: boolean;
+  /** Section C follow-up (BASIC_BOX_FRAME_PREFER): 'n/a' when there was no
+   * large-shift alternative to compare the small-shift one against, 'no' when
+   * both existed but the frame-mean margin was not met, 'yes' when it was met
+   * and the small-shift assignment was forced regardless of cost. Left
+   * undefined when the switch is off, so the diagnostic stays byte-identical
+   * to before this cycle. */
+  framePrefer?: 'n/a' | 'no' | 'yes';
 }
 
 const DARK_THRESHOLD = 180;
@@ -148,6 +155,44 @@ function getFrameWeight(): number {
  * to 0.2. */
 function getLargeShiftMargin(): number {
   return readNonNegativeNumberEnv('BASIC_BOX_LARGE_SHIFT_MARGIN', 0.2);
+}
+
+// BASIC_BOX_FRAME_PREFER (default on since 2026-09-05, cycle 4 --
+// Task/CYCLE4_BASIC_SIGNALS_AGENT_REPORT_2026-09-05.md). The cost margin above
+// only stops a large shift that is *coincidentally* cheap; it says nothing
+// about what the assignment actually lands on. p11's three remaining blanks
+// (cycle 4 order, "확정된 사실" #1) are the case this misses: a small-shift
+// assignment exists, but the large shift wins the cost margin anyway because
+// distance, not frame shape, is what that margin weighs -- and the winning
+// assignment's boxes score 0.461 mean frameScore (a label glyph) against
+// 0.54-0.63 (a real box) for the small-shift alternative it displaced.
+// `=0` restores cycle 2's exact selection (cost margin only).
+function isFramePreferEnabled(): boolean {
+  return process.env.BASIC_BOX_FRAME_PREFER !== '0';
+}
+
+/** Section C follow-up: how far the small-shift assignment's mean frameScore
+ * must clear the large-shift assignment's mean frameScore before the small
+ * shift is preferred outright, regardless of the cost margin.
+ * BASIC_BOX_FRAME_PREFER_MARGIN overrides it; unset or invalid falls back to
+ * 0.06. */
+function getFramePreferMargin(): number {
+  return readNonNegativeNumberEnv('BASIC_BOX_FRAME_PREFER_MARGIN', 0.06);
+}
+
+/** Mean frameScore among an assignment's non-missing matches, 0 when every
+ * match is missing. Shared by both alternatives so Section C's frame-prefer
+ * comparison and the returned `frameMean` use the same arithmetic. */
+function computeFrameMean(
+  assignment: { matches: Match[] },
+  candidates: BasicCheckboxCandidate[],
+): number {
+  const frameScores = assignment.matches
+    .filter((match) => !match.missing)
+    .map((match) => candidates[match.candidateIndex].frameScore);
+  return frameScores.length > 0
+    ? frameScores.reduce((sum, value) => sum + value, 0) / frameScores.length
+    : 0;
 }
 
 /**
@@ -243,10 +288,15 @@ export function matchBasicCheckboxes(
   // Section D: only the V2 path (matchReferencesToCandidates) fills in
   // missingCount, so this stays empty -- and the diagnostic stays byte
   // identical to before this cycle -- whenever BASIC_BOX_MATCH_V2=0.
+  // Section C follow-up: only present when BASIC_BOX_FRAME_PREFER is on (the
+  // default) -- omitted with it off, so the diagnostic stays byte identical
+  // to before this cycle in that case too.
+  const framePreferNote = match.framePrefer !== undefined ? ` framePrefer=${match.framePrefer}` : '';
   const v2Note = match.missingCount !== undefined
     ? ` translation=${match.translation.x.toFixed(4)},${match.translation.y.toFixed(4)}`
       + ` missing=${match.missingCount} frameMean=${(match.frameMean ?? 0).toFixed(3)}`
-      + ` altSmall=${match.smallCandidateFound ? (match.usedLargeShift ? 'found,large-won' : 'used') : 'none'}.`
+      + ` altSmall=${match.smallCandidateFound ? (match.usedLargeShift ? 'found,large-won' : 'used') : 'none'}`
+      + `${framePreferNote}.`
     : '';
   return {
     overrides,
@@ -1064,16 +1114,35 @@ function findTranslationMatchV2(
     winner = bestLarge;
     usedLargeShift = true;
   }
+
+  // Section C follow-up (BASIC_BOX_FRAME_PREFER): the cost margin above can
+  // let a large shift win purely on distance even though it lands on
+  // label-glyph columns instead of the printed boxes. When both alternatives
+  // exist and the small-shift one's mean frameScore clears the large-shift
+  // one's by getFramePreferMargin(), the small shift is adopted regardless of
+  // which one just won on cost.
+  let framePrefer: 'n/a' | 'no' | 'yes' | undefined;
+  if (isFramePreferEnabled()) {
+    if (bestSmall && bestLarge) {
+      const smallFrameMean = computeFrameMean(bestSmall, candidates);
+      const largeFrameMean = computeFrameMean(bestLarge, candidates);
+      if (smallFrameMean - largeFrameMean >= getFramePreferMargin()) {
+        framePrefer = 'yes';
+        winner = bestSmall;
+        usedLargeShift = false;
+      } else {
+        framePrefer = 'no';
+      }
+    } else {
+      framePrefer = 'n/a';
+    }
+  }
+
   if (!winner) {
     return undefined;
   }
 
-  const frameScores = winner.matches
-    .filter((match) => !match.missing)
-    .map((match) => candidates[match.candidateIndex].frameScore);
-  const frameMean = frameScores.length > 0
-    ? frameScores.reduce((sum, value) => sum + value, 0) / frameScores.length
-    : 0;
+  const frameMean = computeFrameMean(winner, candidates);
 
   return {
     translation: winner.translation,
@@ -1084,6 +1153,7 @@ function findTranslationMatchV2(
     frameMean,
     smallCandidateFound: Boolean(bestSmall),
     usedLargeShift,
+    framePrefer,
   };
 }
 
