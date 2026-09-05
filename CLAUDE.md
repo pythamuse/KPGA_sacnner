@@ -208,10 +208,13 @@ REAL_SCAN_SAT_REVERSED=1   REAL_SCAN_CAGI_PDF=".../선별검사 샘플3반복.pd
 
 ```
 세트 1   CORRECT 354  WRONG 4  BLANK 79   OFF 30
-세트 2   CORRECT 338  WRONG 7  BLANK 92   OFF 16
-세트 3   CORRECT 343  WRONG 2  BLANK 92   OFF 9
-세트 4   CORRECT 297  WRONG 7  BLANK 133  OFF 64   (회색조, 계급 보정 + 나이 바닥 90 — Task/GRAYSCALE_CLASS_2026-09-03.md)
+세트 2   CORRECT 343  WRONG 7  BLANK 87   OFF 16
+세트 3   CORRECT 348  WRONG 2  BLANK 87   OFF 9
+세트 4   CORRECT 305  WRONG 7  BLANK 125  OFF 64   (회색조, 계급 보정 + 나이 바닥 90 — Task/GRAYSCALE_CLASS_2026-09-03.md)
 사진     OLD 60/0 · Set1 34/0 · Set2 42/0 · Set3 32/0
+
+기본정보 체크박스 배치 수정(2026-09-05 사이클 2, [Task/IMPROVEMENT_CYCLES_2026-09-05.md](Task/IMPROVEMENT_CYCLES_2026-09-05.md)) 전 값은
+`354/4/79 · 338/7/92 · 343/2/92 · 297/7/133`. `BASIC_BOX_MATCH_V2=0`으로 재현된다. 사진 경로는 이 수정을 쓰지 않는다(첫 시도에서 오답 1이 생겨 계급 분기).
 
 취소 표시 거부권 병합(2026-09-03, [Task/CANCEL_VETO_2026-09-03.md](Task/CANCEL_VETO_2026-09-03.md)) 전 값은
 `361/5/71 · 346/8/83 · 348/3/86 · 307/9/121`, 사진 `61/0 · 34/0 · 42/0 · 32/0`이었다. `MARK_CANCEL_VETO=0`으로 그 값이 재현된다.
@@ -328,6 +331,7 @@ REAL_SCAN_SAT_REVERSED=1   REAL_SCAN_CAGI_PDF=".../선별검사 샘플3반복.pd
 **밴드+되찾기 병합 후(2026-09-03 저녁, dev, [Task/V2_BAND_RESCUE_2026-09-03.md](Task/V2_BAND_RESCUE_2026-09-03.md) §3)**: 자동 345 · 정답 336 · **오답 9**(같은 칸) · 미확정 빈칸 92. 셀 diff는 빈칸→정답 6칸뿐(p4 q07~q10, p9 q01, p10 q08).
 **열 밴드 병합 후(같은 날 밤, [Task/V2_BAND_COLS_2026-09-03.md](Task/V2_BAND_COLS_2026-09-03.md))**: 자동 346 · 정답 337 · **오답 9** · 미확정 빈칸 91 (p5 q10 한 칸).
 **취소 표시 거부권 병합 후(2026-09-03, 기본값 on, [Task/CANCEL_VETO_2026-09-03.md](Task/CANCEL_VETO_2026-09-03.md))**: 자동 335 · 정답 329 · **오답 6** · 미확정 빈칸 102. 남은 오답 6칸은 p15 q04, p16 q02·q03·q04·q06, p19 q09.
+**기본정보 배치 수정 후(2026-09-05 사이클 2)**: 자동 347 · 정답 341 · **오답 6** · 미확정 빈칸 90 — 회복 12칸은 전부 기본정보(성별 8→5·학교유형 12→8·학년 7→2).
 
 ```
 ```
