@@ -46,15 +46,14 @@ export function loadBlankFormBaseline(formType: FormType): Promise<BlankFormBase
 async function createBlankFormBaseline(formType: FormType): Promise<BlankFormBaseline> {
   const template = getTemplate(formType);
   const filename = formType === 'cagi' ? 'cagi-blank.png' : 'satisfaction-blank.png';
+  // Measurement hook (node only): point BLANK_FORM_BASELINE_DIR at a directory
+  // holding cagi-blank.png / satisfaction-blank.png to score against a
+  // different blank reference. Unset in the product, so the asset path below
+  // is the only one the deployment ever reads.
+  const baselineDir = process.env.BLANK_FORM_BASELINE_DIR
+    || path.join(process.cwd(), 'src', 'lib', 'recognition', 'assets');
   const image = applyTemplateRegistrationFrame(
-    await loadImageAnalysisData(path.join(
-      process.cwd(),
-      'src',
-      'lib',
-      'recognition',
-      'assets',
-      filename,
-    )),
+    await loadImageAnalysisData(path.join(baselineDir, filename)),
     template.registrationFrame,
   );
   const grid = formType === 'cagi'
