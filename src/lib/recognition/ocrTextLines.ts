@@ -1,6 +1,7 @@
 import sharp from 'sharp';
 import os from 'os';
 import path from 'path';
+import fs from 'fs/promises';
 import { createWorker, OEM, PSM, type Worker } from 'tesseract.js';
 import type { ImageAnalysisData, PixelRect } from './markDensity';
 
@@ -28,6 +29,25 @@ export interface DigitOcrOptions extends OcrOptions {
    * this class gets its own, higher floor.
    */
   grayscaleScan?: boolean;
+  /**
+   * Debug-only identifier for the age-OCR dump hook
+   * (Task/CYCLE3_AGE_OCR_PROBE_AGENT_REPORT_2026-09-05.md). When this is set
+   * *and* the `AGE_OCR_DUMP_DIR` environment variable is set,
+   * `recognizeDigitsCropDetailed` writes `<AGE_OCR_DUMP_DIR>/<dumpLabel>-crop.png`
+   * (the raw age crop, grayscale, native size), `<dumpLabel>-work.png` (the
+   * upscaled crop after template-digit subtraction and Otsu binarization --
+   * what feeds every stroke render), and `<dumpLabel>-stroke-N.png` (each
+   * shape handed to the per-digit reader, left to right). Unset in
+   * production: `detectCheckmarks.ts` never passes it, and without it (or
+   * without `AGE_OCR_DUMP_DIR`) no dump code runs at all.
+   */
+  dumpLabel?: string;
+}
+
+/** Where and under what name the debug dump hook writes its PNGs. */
+interface DigitOcrDump {
+  dir: string;
+  label: string;
 }
 
 export type DigitOcrStatus =
@@ -335,11 +355,20 @@ export async function recognizeDigitsInRegionDetailed(
       }, photoProvenance);
     }
 
+    // Debug-only: both an env var and an explicit label are required, so a
+    // caller that forgets one gets no dump rather than files with no name.
+    // No caller in the product sets either -- `detectCheckmarks.ts` never
+    // passes `dumpLabel` -- so this is always `undefined` outside a probe.
+    const dumpDir = process.env.AGE_OCR_DUMP_DIR;
+    const dump: DigitOcrDump | undefined = dumpDir && options?.dumpLabel
+      ? { dir: dumpDir, label: options.dumpLabel }
+      : undefined;
+
     // The photo-only refusal is applied to the finished read, after every gate
     // inside `recognizeDigitsCropDetailed` has had its say, so it can subtract
     // a value but never add one back.
     const read = await withTimeout(
-      recognizeDigitsCropDetailed(imageBuffer, crop, templateReference),
+      recognizeDigitsCropDetailed(imageBuffer, crop, templateReference, dump),
       remainingMs,
     );
 
@@ -607,9 +636,10 @@ async function recognizeDigitsCropDetailed(
   imageBuffer: Buffer,
   crop: { left: number; top: number; width: number; height: number },
   templateReference?: DigitTemplateReference,
+  dump?: DigitOcrDump,
 ): Promise<DigitOcrResult> {
   try {
-    const { found, shape } = await buildDigitStrokes(imageBuffer, crop, templateReference);
+    const { found, shape } = await buildDigitStrokes(imageBuffer, crop, templateReference, dump);
     if (!found) {
       return {
         status: 'no_handwriting_found',
@@ -617,7 +647,7 @@ async function recognizeDigitsCropDetailed(
       };
     }
 
-    const { wholeBox, perDigit } = await readDigitStrokes(found);
+    const { wholeBox, perDigit } = await readDigitStrokes(found, dump);
     const evidence = `${describeReadings(wholeBox, perDigit)} ${describeShape(shape)}`;
     const wholeBoxValue = parseAgeOcrText(wholeBox.text);
     const perDigitValue = perDigit ? parseAgeOcrText(perDigit.text) : undefined;
@@ -831,6 +861,7 @@ interface DigitReading {
  */
 function readDigitStrokes(
   strokes: DigitStrokes,
+  dump?: DigitOcrDump,
 ): Promise<{ wholeBox: DigitReading; perDigit?: DigitReading }> {
   return runDigitOcrExclusively(async () => {
     const worker = await getDigitWorker();
@@ -850,6 +881,7 @@ function readDigitStrokes(
     const perStroke: NonNullable<DigitReading['perStroke']> = [];
     for (const stroke of ordered) {
       const image = await renderStrokesForOcr(strokes.mask, [stroke]);
+      await dumpDigitOcrPng(dump, `stroke-${perStroke.length + 1}`, image);
       const reading = await readWith(worker, image, PSM.SINGLE_CHAR);
       text += reading.text;
       confidence = Math.min(confidence, reading.confidence);
@@ -906,10 +938,59 @@ interface DigitStrokes {
  * Nothing in this path relaxes `MIN_DIGIT_CONFIDENCE`; a cleaner image is the
  * only way a value gets through.
  */
+/**
+ * Writes one already-encoded PNG under the dump directory, named
+ * `<label>-<suffix>.png`. Every dump call goes through here or through
+ * `dumpDigitOcrRaw` below. `dump` is `undefined` on every path except a
+ * probe that explicitly asked for it (see `DigitOcrOptions.dumpLabel`), so
+ * this is a no-op in production. A write failure is swallowed: the dump is
+ * instrumentation and must never change what the OCR gates decide.
+ */
+async function dumpDigitOcrPng(
+  dump: DigitOcrDump | undefined,
+  suffix: string,
+  png: Buffer,
+): Promise<void> {
+  if (!dump) return;
+  try {
+    await fs.mkdir(dump.dir, { recursive: true });
+    await fs.writeFile(path.join(dump.dir, `${dump.label}-${suffix}.png`), png);
+  } catch {
+    // Instrumentation only.
+  }
+}
+
+/** As `dumpDigitOcrPng`, but for a raw single-channel pixel buffer. */
+async function dumpDigitOcrRaw(
+  dump: DigitOcrDump | undefined,
+  suffix: string,
+  pixels: Buffer,
+  width: number,
+  height: number,
+): Promise<void> {
+  if (!dump) return;
+  try {
+    const png = await sharp(pixels, { raw: { width, height, channels: 1 } }).png().toBuffer();
+    await dumpDigitOcrPng(dump, suffix, png);
+  } catch {
+    // Instrumentation only.
+  }
+}
+
+/** `InkMask.data` is 1 = ink, 0 = paper. A viewable PNG wants black-on-white. */
+function invertMaskToGrayscale(mask: Uint8Array): Buffer {
+  const output = Buffer.alloc(mask.length);
+  for (let index = 0; index < mask.length; index++) {
+    output[index] = mask[index] ? 0 : 255;
+  }
+  return output;
+}
+
 async function buildDigitStrokes(
   imageBuffer: Buffer,
   crop: { left: number; top: number; width: number; height: number },
   templateReference?: DigitTemplateReference,
+  dump?: DigitOcrDump,
 ): Promise<{ found?: DigitStrokes; shape: DigitShape }> {
   const upscale = Math.max(
     DIGIT_MIN_UPSCALE,
@@ -918,6 +999,20 @@ async function buildDigitStrokes(
   );
   const width = Math.round(crop.width * upscale);
   const height = Math.round(crop.height * upscale);
+
+  if (dump) {
+    // The native-resolution crop, before anything below upscales or touches
+    // it -- a second, independent decode so the dump can never perturb the
+    // pixels the real pipeline resizes.
+    const { data: rawCropPixels } = await sharp(imageBuffer)
+      .rotate()
+      .extract(crop)
+      .flatten({ background: '#ffffff' })
+      .grayscale()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    await dumpDigitOcrRaw(dump, 'crop', rawCropPixels, crop.width, crop.height);
+  }
 
   const { data: croppedPixels } = await sharp(imageBuffer)
     .rotate()
@@ -932,6 +1027,10 @@ async function buildDigitStrokes(
     : croppedPixels;
 
   const { mask, threshold, inkCount } = buildInkMask(inkPixels, width, height);
+  // The upscaled crop right after template-digit subtraction and Otsu
+  // binarization -- everything the strokes below are built from, before rule
+  // erasure or frame-width filtering touch it.
+  await dumpDigitOcrRaw(dump, 'work', invertMaskToGrayscale(mask.data), width, height);
   const shape: DigitShape = {
     cropWidth: crop.width,
     cropHeight: crop.height,
