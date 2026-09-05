@@ -9,6 +9,15 @@ import { __probe } from '../src/lib/recognition/detectCheckmarks';
  * rasterised page or student file needed. See cycle4-order.md and
  * Task/CYCLE4_BASIC_SIGNALS_AGENT_REPORT_2026-09-05.md.
  *
+ * **Rejected, opt-in only (2026-09-05 follow-up, Task/IMPROVEMENT_CYCLES_
+ * 2026-09-05.md cycle 4).** The browser 19-student measurement found this
+ * inset window let a real mark in the runner-up box's outer 25% ring drop
+ * under CHECKBOX_RUNNER_UP_SIGNAL, filling the wrong value (student 1
+ * basic.grade). So the switch defaults off; these tests exercise the
+ * opt-in path with CHECKBOX_RUNNERUP_CORE=1 set explicitly, and pin that
+ * leaving it unset (or any value other than '1') keeps today's full-window
+ * behaviour.
+ *
  * One choice group, two candidates: box 0 (the one the scorer names) and box
  * 1 (the runner-up). Both are 40x40-pixel windows on a shared page image, a
  * blank baseline of the same size (all white -- no printed content modeled,
@@ -28,10 +37,14 @@ import { __probe } from '../src/lib/recognition/detectCheckmarks';
  *     the same definition `measureBasicCheckboxPlacement` uses -- excludes
  *     the entire 5px ring (core is [10,30)x[10,30) of a 40x40 window), so the
  *     core-windowed signal is 0 while the full-window signal is far past
- *     CHECKBOX_RUNNER_UP_SIGNAL (0.025).
+ *     CHECKBOX_RUNNER_UP_SIGNAL (0.025). This is also, not coincidentally,
+ *     the shape of the real failure: a genuine mark sitting in that outer
+ *     ring reads the same way the inset window cannot tell it apart from
+ *     border bleed -- which is exactly why the switch is rejected by default.
  *   - "core inked": dark across the whole window, rim and interior alike --
- *     a real second mark. Both the full-window and the core-windowed signal
- *     are far past the threshold here, so both settings must refuse.
+ *     a real second mark reaching into the core itself. Both the full-window
+ *     and the core-windowed signal are far past the threshold here, so both
+ *     settings must refuse.
  */
 
 const WIDTH = 90;
@@ -89,7 +102,7 @@ describe('coreWindow (measureBasicCheckboxPlacement\'s core, restated)', () => {
   });
 });
 
-describe('isRunnerUpCoreEnabled (CHECKBOX_RUNNERUP_CORE)', () => {
+describe('isRunnerUpCoreEnabled (CHECKBOX_RUNNERUP_CORE, opt-in only)', () => {
   const ORIGINAL = process.env.CHECKBOX_RUNNERUP_CORE;
   afterEach(() => {
     if (ORIGINAL === undefined) {
@@ -99,10 +112,12 @@ describe('isRunnerUpCoreEnabled (CHECKBOX_RUNNERUP_CORE)', () => {
     }
   });
 
-  it('defaults on, and only "0" turns it off', () => {
+  it('defaults off; only exactly "1" turns it on', () => {
     delete process.env.CHECKBOX_RUNNERUP_CORE;
-    expect(__probe.isRunnerUpCoreEnabled()).toBe(true);
+    expect(__probe.isRunnerUpCoreEnabled()).toBe(false);
     process.env.CHECKBOX_RUNNERUP_CORE = '0';
+    expect(__probe.isRunnerUpCoreEnabled()).toBe(false);
+    process.env.CHECKBOX_RUNNERUP_CORE = 'true'; // anything other than exactly '1' stays off
     expect(__probe.isRunnerUpCoreEnabled()).toBe(false);
     process.env.CHECKBOX_RUNNERUP_CORE = '1';
     expect(__probe.isRunnerUpCoreEnabled()).toBe(true);
@@ -119,8 +134,20 @@ describe('evaluateDirectCheckboxEvidence runner-up core windowing', () => {
     }
   });
 
-  it('border-bleed runner-up: CHECKBOX_RUNNERUP_CORE on (default) accepts', () => {
+  it('border-bleed runner-up: unset (default off) refuses, same as today', () => {
     delete process.env.CHECKBOX_RUNNERUP_CORE;
+    const image = buildImage('border');
+    const baseline = blankImage();
+    const evidence = __probe.evaluateDirectCheckboxEvidence(
+      image, baseline, GROUP, [NAMED_RECT, RUNNER_UP_RECT], [NAMED_RECT, RUNNER_UP_RECT], 0,
+    );
+    expect(evidence.accepted).toBe(false);
+    expect(evidence.reason).toBe('runner-up-inked');
+    expect(evidence.runnerUpCore).toBeUndefined();
+  });
+
+  it('border-bleed runner-up: CHECKBOX_RUNNERUP_CORE=1 (opt-in) accepts', () => {
+    process.env.CHECKBOX_RUNNERUP_CORE = '1';
     const image = buildImage('border');
     const baseline = blankImage();
     const evidence = __probe.evaluateDirectCheckboxEvidence(
@@ -130,13 +157,13 @@ describe('evaluateDirectCheckboxEvidence runner-up core windowing', () => {
     expect(evidence.reason).toBe('ok');
     expect(evidence.runnerUpCore).toBeDefined();
     expect(evidence.runnerUpCore!).toBeLessThanOrEqual(0.025);
-    // The full-window signal the pre-cycle-4 check used is still reported in
-    // `signals`, and it is well past the threshold -- the border ring alone
-    // would have refused this field.
+    // The full-window signal the default (off) path uses is still reported
+    // in `signals`, and it is well past the threshold -- the border ring
+    // alone is exactly what the default path refuses on.
     expect(evidence.signals[1]).toBeGreaterThan(0.025);
   });
 
-  it('border-bleed runner-up: CHECKBOX_RUNNERUP_CORE=0 refuses (today\'s behaviour)', () => {
+  it('border-bleed runner-up: CHECKBOX_RUNNERUP_CORE=0 is the same as unset', () => {
     process.env.CHECKBOX_RUNNERUP_CORE = '0';
     const image = buildImage('border');
     const baseline = blankImage();
@@ -148,11 +175,11 @@ describe('evaluateDirectCheckboxEvidence runner-up core windowing', () => {
     expect(evidence.runnerUpCore).toBeUndefined();
   });
 
-  it('core genuinely inked: both settings refuse', () => {
+  it('core genuinely inked: both settings refuse (the opt-in falsification case)', () => {
     const image = buildImage('inked');
     const baseline = blankImage();
 
-    delete process.env.CHECKBOX_RUNNERUP_CORE;
+    process.env.CHECKBOX_RUNNERUP_CORE = '1';
     const withCore = __probe.evaluateDirectCheckboxEvidence(
       image, baseline, GROUP, [NAMED_RECT, RUNNER_UP_RECT], [NAMED_RECT, RUNNER_UP_RECT], 0,
     );
@@ -160,7 +187,7 @@ describe('evaluateDirectCheckboxEvidence runner-up core windowing', () => {
     expect(withCore.reason).toBe('runner-up-inked');
     expect(withCore.runnerUpCore!).toBeGreaterThan(0.025);
 
-    process.env.CHECKBOX_RUNNERUP_CORE = '0';
+    delete process.env.CHECKBOX_RUNNERUP_CORE;
     const withoutCore = __probe.evaluateDirectCheckboxEvidence(
       image, baseline, GROUP, [NAMED_RECT, RUNNER_UP_RECT], [NAMED_RECT, RUNNER_UP_RECT], 0,
     );
@@ -171,11 +198,11 @@ describe('evaluateDirectCheckboxEvidence runner-up core windowing', () => {
   it('named box is always measured on the full window, regardless of the switch', () => {
     const image = buildImage('border');
     const baseline = blankImage();
-    delete process.env.CHECKBOX_RUNNERUP_CORE;
+    process.env.CHECKBOX_RUNNERUP_CORE = '1';
     const withCore = __probe.evaluateDirectCheckboxEvidence(
       image, baseline, GROUP, [NAMED_RECT, RUNNER_UP_RECT], [NAMED_RECT, RUNNER_UP_RECT], 0,
     );
-    process.env.CHECKBOX_RUNNERUP_CORE = '0';
+    delete process.env.CHECKBOX_RUNNERUP_CORE;
     const withoutCore = __probe.evaluateDirectCheckboxEvidence(
       image, baseline, GROUP, [NAMED_RECT, RUNNER_UP_RECT], [NAMED_RECT, RUNNER_UP_RECT], 0,
     );

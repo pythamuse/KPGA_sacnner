@@ -141,3 +141,75 @@ frameMean(bestLarge) >= getFramePreferMargin()`(기본 0.06)이면 비용 마진
   계산도 같은 특성을 갖고 있어 새 실패 유형을 추가한 것은 아니라고 판단했지만,
   실제 상자 크기(12-34px, `MIN_COMPONENT_SIZE`/`MAX_COMPONENT_SIZE`)에서는 발생하지
   않을 것으로 본다 — 확인은 하지 않았다.
+
+## 후속: B 기각, 옵트인으로 전환 (2026-09-05)
+
+브라우저 19명 측정에서 A는 p11 세 칸을 오답 없이 회복했지만, B는 새 오답을
+하나 만들었다 — 학생 1 `basic.grade`가 정답표상 2학년인데 1학년로 채워졌다.
+정확히 주문서가 미리 지목한 B의 반증 조건이다: 러너업 상자(2학년)에 학생의
+진짜 표시가 있었는데, 안쪽 창으로 재면 그 표시가 창의 바깥쪽 25% 링(=core가
+제외하는 영역)에 걸쳐 있어 문턱 아래로 떨어졌고, 그 결과 오답 쪽이 게이트를
+통과했다. **B는 기각, A는 유지.** 위임자 지시에 따라 B를 옵트인으로 전환했다.
+
+### 변경 파일: 행 번호
+
+- `src/lib/recognition/detectCheckmarks.ts`
+  - 1402-1415: `isRunnerUpCoreEnabled()`를 `process.env.CHECKBOX_RUNNERUP_CORE
+    !== '0'`(기본 on)에서 `=== '1'`(기본 off, `'1'`일 때만 on)로 변경. 주석을
+    측정 결과·기각 사유·`Task/IMPROVEMENT_CYCLES_2026-09-05.md` cycle 4 인용으로
+    교체.
+  - 1370-1373: `describeBasicCheckboxDecision`의 `runnerUpCoreNote` 주석 —
+    "the switch is on (the default)"가 더 이상 사실이 아니므로 "explicitly
+    turned on ('1')"로 고침. 로직(값이 `undefined`가 아닐 때만 찍는다)은 무변경.
+  - Section A(`BASIC_BOX_FRAME_PREFER`, `basicCheckboxDetection.ts`)는 손대지
+    않음 — 기본 on 그대로.
+- `tests/checkboxRunnerUpCore.test.ts`: 기본 상태 기대값을 on→off로 뒤집음.
+  - `isRunnerUpCoreEnabled` 테스트: `delete`(미설정) 시 `false`를 기대하도록
+    변경, `'0'`도 `false`, 임의의 다른 문자열(`'true'`)도 `false`, `'1'`만
+    `true`임을 추가로 확인.
+  - `evaluateDirectCheckboxEvidence` 테스트 4개 모두에서 "core 켜짐" 기대 결과가
+    필요한 경우 `process.env.CHECKBOX_RUNNERUP_CORE = '1'`을 명시적으로 설정하도록
+    바꾸고, "기본(미설정)" 케이스와 "명시적 `'0'`" 케이스를 별도 테스트로 분리해
+    두 경로가 같은 결과(거절)를 내는 것을 각각 확인 — 파일 상단 설명에 기각 배경과
+    `Task/IMPROVEMENT_CYCLES_2026-09-05.md` cycle 4 인용을 추가.
+  - `coreWindow` 순수 함수 테스트는 무변경(스위치와 무관).
+
+### 시험 결과 전문
+
+`npx tsc --noEmit`: 출력 없음, 종료 코드 0.
+
+`npx vitest run` (B는 기본 off, A는 기본 on):
+```
+ Test Files  56 passed | 21 skipped (77)
+      Tests  550 passed | 21 skipped (571)
+   Duration  30.51s
+```
+(이전 라운드의 549개에서 1개 늘어난 것은 `checkboxRunnerUpCore.test.ts`의
+"border-bleed 기본(미설정)"과 "명시적 `'0'`" 테스트를 둘로 나눴기 때문 —
+로직 변경으로 인한 실패/스킵은 없음.)
+
+`BASIC_BOX_FRAME_PREFER=0 npx vitest run` (A만 끔, B는 여전히 기본 off):
+```
+ Test Files  56 passed | 21 skipped (77)
+      Tests  550 passed | 21 skipped (571)
+   Duration  31.60s
+```
+
+### 명세와 다르게 한 것과 이유
+
+- 주문서가 요구한 세 명령 중 `BASIC_BOX_FRAME_PREFER=0 CHECKBOX_RUNNERUP_CORE=0`
+  조합 실행은 이번 라운드 지시에 포함되지 않았다(코디네이터가 지정한 세 명령은
+  `tsc`, 기본 `vitest run`, `BASIC_BOX_FRAME_PREFER=0 vitest run`뿐) — B가 이제
+  기본 off이므로 이 조합은 기본 실행과 사실상 같은 신호(B off, A on/off)이고
+  별도로 요구되지 않아 생략했다.
+- `git diff --stat`으로 확인한 변경 파일은 `detectCheckmarks.ts`와
+  `checkboxRunnerUpCore.test.ts` 둘뿐이다 — `basicCheckboxDetection.ts`,
+  `basicCheckboxDetection.test.ts`(Section A 관련 파일)는 이번 라운드에서
+  건드리지 않았다.
+
+### 확신 없는 부분
+
+- `isRunnerUpCoreEnabled` 테스트에서 `'true'`같은 임의 문자열도 off로 남는지
+  확인하는 케이스를 추가했는데, 주문서는 이를 요구하지 않았다 — "정확히 `'1'`일
+  때만"이라는 조건을 더 분명히 검증하려는 판단이었다. 과하다고 보면 제거해도
+  로직에는 영향 없다.

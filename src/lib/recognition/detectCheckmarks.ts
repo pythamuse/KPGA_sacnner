@@ -1368,8 +1368,9 @@ function describeBasicCheckboxDecision(
     ? 0
     : group.candidates.findIndex((candidate) => candidate.value === result.value) + 1;
   // Section B follow-up (CHECKBOX_RUNNERUP_CORE): only present when the
-  // switch is on (the default) -- omitted with it off, so this trace stays
-  // byte identical to before cycle 4 in that case.
+  // switch is explicitly turned on ('1') -- omitted otherwise (it is off
+  // by default, see the rejection note above isRunnerUpCoreEnabled), so
+  // this trace stays byte identical to before cycle 4 in that case.
   const runnerUpCoreNote = evidence?.runnerUpCore !== undefined
     ? ` runnerUpCore=${Math.round(evidence.runnerUpCore * 1000)}`
     : '';
@@ -1399,13 +1400,18 @@ const CHECKBOX_DOMINANCE_RATIO = 4;
  */
 const CHECKBOX_RUNNER_UP_SIGNAL = 0.025;
 
-// CHECKBOX_RUNNERUP_CORE (default on since 2026-09-05, cycle 4 --
-// Task/CYCLE4_BASIC_SIGNALS_AGENT_REPORT_2026-09-05.md; same "!== '0'"
-// convention as BASIC_BOX_MATCH_V2 in basicCheckboxDetection.ts). `=0`
-// restores today's exact behaviour: every signal, named or not, measured on
-// the full window.
+// CHECKBOX_RUNNERUP_CORE (opt-in, off by default since 2026-09-05 --
+// Task/IMPROVEMENT_CYCLES_2026-09-05.md cycle 4). Measured on the browser
+// 19-student run: it recovered nothing new but let student 1's basic.grade
+// fill 1학년 where the key says 2학년 -- the true mark sat inside the runner-up
+// box's outer 25% ring, exactly the ring this inset excludes, so the real
+// answer's ink dropped under CHECKBOX_RUNNER_UP_SIGNAL and the wrong box won.
+// That is the falsification case the cycle 4 order named up front, so the
+// switch defaults off (unset or any value other than exactly '1' keeps
+// today's full-window runner-up signal, byte-identical to before cycle 4);
+// only CHECKBOX_RUNNERUP_CORE=1 turns the inset window on.
 function isRunnerUpCoreEnabled(): boolean {
-  return process.env.CHECKBOX_RUNNERUP_CORE !== '0';
+  return process.env.CHECKBOX_RUNNERUP_CORE === '1';
 }
 
 /**
