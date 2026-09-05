@@ -158,3 +158,72 @@ Test Files  55 passed | 19 skipped (74)
 ## 커밋
 
 `git -C wt-c2 add -A && git -C wt-c2 commit` (브랜치 `cycle2-basic-placement`), 푸시하지 않음.
+
+## Scoped to non-photo images (2026-09-05 follow-up)
+
+위임자 측정: 브라우저 19명 +12정답·오답 0, 노드 4세트 +18정답·오답 0으로 스캔 경로는 개선됐지만, 사진 경로에서
+새 오답 1건(사진 세트2 p4 `basic.schoolType`이 정답표의 `중학교`(수평으로 이웃한 상자) 대신 `학교외기관`을
+읽음)과 정답 1건 손실(사진 세트3)이 나왔다. 사진은 오답이 0이어야 하는 판정 표본이므로, 새 배정(Section A~C)을
+사진 출처 이미지에서는 끈다.
+
+### 변경
+
+- `matchBasicCheckboxes`에 `options: MatchBasicCheckboxesOptions = {}` 매개변수를 추가했다(`photoProvenance?: boolean`).
+- `matchReferencesToCandidates`에 `photoProvenance = false` 매개변수를 추가하고, 분기 조건을
+  `isBasicBoxMatchV2Enabled()` 대신 `isBasicBoxMatchV2EnabledFor(photoProvenance)`로 바꿨다:
+  ```ts
+  function isBasicBoxMatchV2EnabledFor(photoProvenance: boolean): boolean {
+    if (!isBasicBoxMatchV2Enabled()) return false;
+    if (!photoProvenance) return true;
+    return process.env.BASIC_BOX_MATCH_V2_PHOTOS === '1';
+  }
+  ```
+  즉 `photoProvenance`가 거짓이면 기존과 완전히 동일(`BASIC_BOX_MATCH_V2`만 본다). 참이면 `BASIC_BOX_MATCH_V2`가
+  꺼져 있을 때는 당연히 꺼지고, 켜져 있어도 `BASIC_BOX_MATCH_V2_PHOTOS`가 정확히 `'1'`이 아니면 꺼져 사진에서는
+  사이클 2 이전(`BASIC_BOX_MATCH_V2=0`)과 같은 경로(`findTranslationMatch`/`assignCandidates`)를 탄다.
+- `src/lib/recognition/detectCheckmarks.ts`의 유일한 호출부(`matchBasicCheckboxes` 호출, 원래 232-238줄)에
+  다섯 번째 인자 `{ photoProvenance: options.cagiPhotoProvenance ?? false }`를 추가했다 -- CAGI 시트에 이미
+  들어오는 `options.cagiPhotoProvenance` 값을 그대로 넘긴다(바로 위 `selectGridDetectionStream` 호출이 쓰는
+  것과 같은 표현식). 이 파일의 diff는 `git diff --stat`으로 `1 file changed, 1 insertion(+)` 한 줄임을 확인했다
+  -- 다른 어떤 것도 옮기지 않았다.
+- `__probe`에 `isBasicBoxMatchV2EnabledFor`를 추가로 노출했다.
+
+### 시험 (`tests/basicCheckboxDetection.test.ts`에 3건 추가, 신규 `describe` 블록)
+
+기존 12기준/9상자+3결손/비균일 글자오프셋 합성 픽스처를 그대로 재사용한다.
+
+1. `photoProvenance=true`는 `BASIC_BOX_MATCH_V2`가 켜져 있어도 `BASIC_BOX_MATCH_V2=0`(사진 아님)과 바이트
+   동일하다 -- `toEqual`로 두 `TranslationMatch` 객체 전체(번역·매치 배열·missingCount 등 선택 필드 포함)를
+   비교해 확인.
+2. `BASIC_BOX_MATCH_V2_PHOTOS=1`이면 사진 경로도 새 배정이 재활성화되어 비사진 경로와 동일한 결과(`missingCount
+   3`, `translation {0,0}`)를 낸다.
+3. `isBasicBoxMatchV2EnabledFor`의 진리표를 직접 확인: 비사진은 항상 `BASIC_BOX_MATCH_V2`만 따르고, 사진은
+   `BASIC_BOX_MATCH_V2_PHOTOS='1'`이 없으면 `BASIC_BOX_MATCH_V2`가 켜져 있어도 꺼진다.
+
+### 시험 결과 전문
+
+`npx tsc --noEmit`: 출력 없음(통과).
+
+`npx vitest run`:
+```
+Test Files  55 passed | 19 skipped (74)
+     Tests  539 passed | 19 skipped (558)
+```
+
+`BASIC_BOX_MATCH_V2=0 npx vitest run`:
+```
+Test Files  55 passed | 19 skipped (74)
+     Tests  539 passed | 19 skipped (558)
+```
+
+두 실행 모두 개수가 완전히 같다(팔로업 이전 536건 + 신규 3건 = 539건). `tests/_probe-basic-boxes.test.ts`는
+여전히 수집되고 `IMAGE`/`OUT` 미설정으로 스킵된다.
+
+### 확신 없는 부분 (팔로업)
+
+- `BASIC_BOX_MATCH_V2_PHOTOS`가 `BASIC_BOX_MATCH_V2`보다 하위 개념(사진에서만 의미 있음)이라, `BASIC_BOX_MATCH_V2=0`
+  이면 `BASIC_BOX_MATCH_V2_PHOTOS=1`을 줘도 사진에서 여전히 꺼진다(`isBasicBoxMatchV2EnabledFor`가 먼저
+  `isBasicBoxMatchV2Enabled()`를 확인). 위임 메시지가 이 조합을 명시하지 않아서 내가 고른 우선순위이며,
+  "측정용 재활성화 스위치"라는 취지에는 맞다고 판단했다.
+- 실제 사진 세트2 p4·세트3에서 이 변경이 오답을 정말로 없애는지는 확인하지 않았다(자체 합격 판정 금지,
+  학생 파일 미접근). 위임자가 사진 4세트로 재측정해야 한다.

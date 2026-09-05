@@ -234,6 +234,7 @@ export async function recognizeStudentForms(
         basicGroups,
         cagiBaseline.image,
         cagiBaseline.basicCheckboxCandidateRects,
+        { photoProvenance: options.cagiPhotoProvenance ?? false },
       )
       : undefined;
     const cagiGridDetection = mergeBasicCheckboxDetection(

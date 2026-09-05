@@ -165,3 +165,66 @@ describe('matchReferencesToCandidates (BASIC_BOX_MATCH_V2)', () => {
     });
   });
 });
+
+describe('matchReferencesToCandidates photoProvenance scoping (2026-09-05 follow-up)', () => {
+  const ORIGINAL_PHOTOS_FLAG = process.env.BASIC_BOX_MATCH_V2_PHOTOS;
+
+  afterEach(() => {
+    if (ORIGINAL_FLAG === undefined) {
+      delete process.env.BASIC_BOX_MATCH_V2;
+    } else {
+      process.env.BASIC_BOX_MATCH_V2 = ORIGINAL_FLAG;
+    }
+    if (ORIGINAL_PHOTOS_FLAG === undefined) {
+      delete process.env.BASIC_BOX_MATCH_V2_PHOTOS;
+    } else {
+      process.env.BASIC_BOX_MATCH_V2_PHOTOS = ORIGINAL_PHOTOS_FLAG;
+    }
+  });
+
+  it('photoProvenance=true is byte-identical to the flag-off (BASIC_BOX_MATCH_V2=0) result, even with V2 on', () => {
+    delete process.env.BASIC_BOX_MATCH_V2;
+    delete process.env.BASIC_BOX_MATCH_V2_PHOTOS;
+    const groups = buildGroups();
+    const references = buildReferences();
+    const candidates = buildCandidates(references);
+
+    const photoMatch = __probe.matchReferencesToCandidates(references, candidates, groups, true);
+
+    process.env.BASIC_BOX_MATCH_V2 = '0';
+    const flagOffMatch = __probe.matchReferencesToCandidates(references, candidates, groups, false);
+
+    expect(photoMatch).toBeDefined();
+    expect(photoMatch).toEqual(flagOffMatch);
+  });
+
+  it('BASIC_BOX_MATCH_V2_PHOTOS=1 re-enables the V2 assignment for photos', () => {
+    delete process.env.BASIC_BOX_MATCH_V2;
+    process.env.BASIC_BOX_MATCH_V2_PHOTOS = '1';
+    const groups = buildGroups();
+    const references = buildReferences();
+    const candidates = buildCandidates(references);
+
+    const photoMatch = __probe.matchReferencesToCandidates(references, candidates, groups, true);
+    const nonPhotoMatch = __probe.matchReferencesToCandidates(references, candidates, groups, false);
+
+    expect(photoMatch).toBeDefined();
+    expect(photoMatch).toEqual(nonPhotoMatch);
+    expect(photoMatch?.missingCount).toBe(3);
+    expect(photoMatch?.translation).toEqual({ x: 0, y: 0 });
+  });
+
+  it('isBasicBoxMatchV2EnabledFor: photos need the override even when BASIC_BOX_MATCH_V2 is on; non-photos never need it', () => {
+    delete process.env.BASIC_BOX_MATCH_V2;
+    delete process.env.BASIC_BOX_MATCH_V2_PHOTOS;
+    expect(__probe.isBasicBoxMatchV2EnabledFor(false)).toBe(true);
+    expect(__probe.isBasicBoxMatchV2EnabledFor(true)).toBe(false);
+
+    process.env.BASIC_BOX_MATCH_V2_PHOTOS = '1';
+    expect(__probe.isBasicBoxMatchV2EnabledFor(true)).toBe(true);
+
+    process.env.BASIC_BOX_MATCH_V2 = '0';
+    expect(__probe.isBasicBoxMatchV2EnabledFor(true)).toBe(false);
+    expect(__probe.isBasicBoxMatchV2EnabledFor(false)).toBe(false);
+  });
+});

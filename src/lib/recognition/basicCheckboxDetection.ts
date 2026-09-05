@@ -98,6 +98,23 @@ function isBasicBoxMatchV2Enabled(): boolean {
   return process.env.BASIC_BOX_MATCH_V2 !== '0';
 }
 
+/**
+ * 2026-09-05 follow-up: cycle 2's missing-tolerant assignment measured one
+ * new WRONG value on the photo judging sample (photo set 2 p4 basic.
+ * schoolType read the horizontal neighbour box, 학교외기관 instead of the
+ * keyed 중학교) and lost one correct cell on photo set 3. Photos are a
+ * sample where WRONG must stay 0, so the V2 assignment is scoped out for
+ * photo-provenance images regardless of BASIC_BOX_MATCH_V2, unless
+ * BASIC_BOX_MATCH_V2_PHOTOS is exactly '1' -- a measurement override for
+ * further work on that regression, default off. A non-photo call is
+ * unaffected: only BASIC_BOX_MATCH_V2 governs it, exactly as before.
+ */
+function isBasicBoxMatchV2EnabledFor(photoProvenance: boolean): boolean {
+  if (!isBasicBoxMatchV2Enabled()) return false;
+  if (!photoProvenance) return true;
+  return process.env.BASIC_BOX_MATCH_V2_PHOTOS === '1';
+}
+
 /** Section A: at most one box per choice group (gender, school type, grade)
  * is allowed to go unmatched -- a student marks one option per group, so a
  * second missing reference in the same group is a different failure mode. */
@@ -184,11 +201,20 @@ export function detectBlankBasicCheckboxes(
  * matcher: every one of the twelve boxes must be matched to something,
  * unweighted, at the seed with the least total distance.
  */
+export interface MatchBasicCheckboxesOptions {
+  /** True for a photographed sheet rather than a scanned one. Scopes out
+   * BASIC_BOX_MATCH_V2's missing-tolerant assignment by default -- see
+   * isBasicBoxMatchV2EnabledFor -- since it measured a new wrong value and a
+   * lost correct cell on the photo judging sample (2026-09-05 follow-up). */
+  photoProvenance?: boolean;
+}
+
 export function matchBasicCheckboxes(
   image: ImageAnalysisData,
   groups: ChoiceGroup[],
   baselineImage: ImageAnalysisData,
   baselineCandidateRects: Record<string, PixelRect[]>,
+  options: MatchBasicCheckboxesOptions = {},
 ): BasicCheckboxGridDetection | undefined {
   const candidates = detectBasicCheckboxCandidates(image, true, true);
   const references = flattenGroupRects(groups, baselineCandidateRects, baselineImage);
@@ -196,7 +222,7 @@ export function matchBasicCheckboxes(
     return undefined;
   }
 
-  const match = matchReferencesToCandidates(references, candidates, groups);
+  const match = matchReferencesToCandidates(references, candidates, groups, options.photoProvenance ?? false);
   if (!match || match.matches.length !== references.length) {
     return undefined;
   }
@@ -937,17 +963,19 @@ function distance(first: NormalizedPoint, second: NormalizedPoint): number {
 
 /**
  * Dispatches to the exact-count matcher (byte-identical to before cycle 2) or
- * the missing-tolerant one, by BASIC_BOX_MATCH_V2. Exposed via __probe so the
- * two paths can be exercised directly -- on synthetic references and
- * candidates, without a rasterised page -- from
- * tests/basicCheckboxDetection.test.ts.
+ * the missing-tolerant one, by BASIC_BOX_MATCH_V2 -- and, when
+ * `photoProvenance` is true, scoped further by BASIC_BOX_MATCH_V2_PHOTOS
+ * (see isBasicBoxMatchV2EnabledFor). Exposed via __probe so the paths can be
+ * exercised directly -- on synthetic references and candidates, without a
+ * rasterised page -- from tests/basicCheckboxDetection.test.ts.
  */
 function matchReferencesToCandidates(
   references: NormalizedPoint[],
   candidates: BasicCheckboxCandidate[],
   groups: ChoiceGroup[],
+  photoProvenance = false,
 ): TranslationMatch | undefined {
-  if (!isBasicBoxMatchV2Enabled()) {
+  if (!isBasicBoxMatchV2EnabledFor(photoProvenance)) {
     return findTranslationMatch(references, candidates, MATCH_TOLERANCE);
   }
   const groupOfReference = referenceGroupIndices(groups);
@@ -1278,4 +1306,5 @@ export const __probe = {
   assignCandidatesWithMissing,
   referenceGroupIndices,
   isBasicBoxMatchV2Enabled,
+  isBasicBoxMatchV2EnabledFor,
 };
