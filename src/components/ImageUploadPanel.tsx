@@ -2132,7 +2132,7 @@ export default function ImageUploadPanel({
                         onClick={() => setSatisfactionOrder(option.value)}
                         disabled={isBatchProcessing}
                         aria-pressed={satisfactionOrder === option.value}
-                        style={{ textAlign: 'left', lineHeight: 1.35 }}
+                        style={{ textAlign: 'left', lineHeight: 1.35, flex: '1 1 200px', minWidth: 0, flexDirection: 'column', alignItems: 'flex-start', justifyContent: 'center', gap: 2 }}
                       >
                         <span style={{ display: 'block' }}>{option.label}</span>
                         <span style={{ display: 'block', fontSize: 12, opacity: 0.75 }}>{option.hint}</span>
