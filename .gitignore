@@ -54,3 +54,6 @@ public/zz-sample/
 
 # Local esbuild bundles for standalone Node checks (scripts/check-orb-align.cjs)
 .tmp/
+
+# Local probe fixtures (real scan PDFs -- never commit, see CLAUDE.md 6)
+/public/_probe/

@@ -339,28 +339,20 @@ export async function recognizeDigitsInRegionDetailed(
   templateReference?: DigitTemplateReference,
 ): Promise<DigitOcrResult> {
   const photoProvenance = options?.photoProvenance === true;
+  // Declared outside the try so every exit -- including the catch, which is the
+  // branch production actually took for the first student of a cold request --
+  // can still hand back whatever strokes were captured.
+  const strokeSink: NonNullable<DigitOcrResult['strokes']> | undefined = options?.exposeStrokes
+    ? []
+    : undefined;
+  const withStrokes = (result: DigitOcrResult): DigitOcrResult => (
+    strokeSink ? { ...result, strokes: strokeSink } : result
+  );
   try {
     if (!Buffer.isBuffer(imageBuffer) || imageWidth <= 0 || imageHeight <= 0) {
       return recordAgeOcrConfidence({
         status: 'invalid_input',
         diagnostic: 'Age OCR was skipped because the input image was invalid.',
-      }, photoProvenance);
-    }
-
-    const remainingMs = options?.deadlineAt
-      ? Math.min(DIGIT_OCR_TOTAL_TIMEOUT_MS, options.deadlineAt - Date.now())
-      : DIGIT_OCR_TOTAL_TIMEOUT_MS;
-    if (remainingMs <= 0) {
-      return recordAgeOcrConfidence({
-        status: 'deadline_exhausted',
-        diagnostic: 'Age OCR was skipped because the per-student deadline had expired.',
-      }, photoProvenance);
-    }
-
-    if (digitWorkerPromise && !digitWorkerReady) {
-      return recordAgeOcrConfidence({
-        status: 'worker_pending',
-        diagnostic: 'Age OCR was skipped because the shared OCR worker was still initializing.',
       }, photoProvenance);
     }
 
@@ -387,15 +379,46 @@ export async function recognizeDigitsInRegionDetailed(
     // rather than a field on `read` because `read` may come back through
     // either confidence-gate function below, and only one of them threads its
     // input object through untouched.
-    const strokeSink: NonNullable<DigitOcrResult['strokes']> | undefined = options?.exposeStrokes
-      ? []
-      : undefined;
+    // ---- stroke capture, before the tesseract gates -----------------------
+    // The digit classifier needs only these bitmaps and has no dependencies;
+    // `buildDigitStrokes` and `renderStrokesForOcr` are sharp only. Until
+    // 2026-09-07 the sink was filled inside `readDigitStrokes`, after
+    // `await getDigitWorker()`, so every path that skipped tesseract withheld
+    // the bitmaps too and the classifier could not run. In production that was
+    // every student -- the first paid the cold start and timed out, the rest
+    // found the per-student deadline already spent, and all nine ages came
+    // back blank (Task/AGE_PROD_STROKES_2026-09-07.md).
+    let prepared: { found?: DigitStrokes; shape: DigitShape } | undefined;
+    if (strokeSink) {
+      prepared = await buildDigitStrokes(imageBuffer, crop, templateReference, dump);
+      if (prepared.found) {
+        await captureStrokeBitmaps(prepared.found, strokeSink);
+      }
+    }
+
+    const remainingMs = options?.deadlineAt
+      ? Math.min(DIGIT_OCR_TOTAL_TIMEOUT_MS, options.deadlineAt - Date.now())
+      : DIGIT_OCR_TOTAL_TIMEOUT_MS;
+    if (remainingMs <= 0) {
+      return withStrokes(recordAgeOcrConfidence({
+        status: 'deadline_exhausted',
+        diagnostic: 'Age OCR was skipped because the per-student deadline had expired.',
+      }, photoProvenance));
+    }
+
+    if (digitWorkerPromise && !digitWorkerReady) {
+      return withStrokes(recordAgeOcrConfidence({
+        status: 'worker_pending',
+        diagnostic: 'Age OCR was skipped because the shared OCR worker was still initializing.',
+      }, photoProvenance));
+    }
 
     // The photo-only refusal is applied to the finished read, after every gate
     // inside `recognizeDigitsCropDetailed` has had its say, so it can subtract
-    // a value but never add one back.
+    // a value but never add one back. The sink is not passed on: it is already
+    // filled above, and letting the reader path refill it would double the work.
     const read = await withTimeout(
-      recognizeDigitsCropDetailed(imageBuffer, crop, templateReference, dump, strokeSink),
+      recognizeDigitsCropDetailed(imageBuffer, crop, templateReference, dump, undefined, prepared),
       remainingMs,
     );
 
@@ -407,12 +430,12 @@ export async function recognizeDigitsInRegionDetailed(
       photoProvenance,
     );
 
-    return strokeSink ? { ...gated, strokes: strokeSink } : gated;
+    return withStrokes(gated);
   } catch {
-    return recordAgeOcrConfidence({
+    return withStrokes(recordAgeOcrConfidence({
       status: 'timeout_or_error',
       diagnostic: 'Age OCR did not finish within the allowed time.',
-    }, photoProvenance);
+    }, photoProvenance));
   }
 }
 
@@ -667,9 +690,17 @@ async function recognizeDigitsCropDetailed(
   templateReference?: DigitTemplateReference,
   dump?: DigitOcrDump,
   strokeSink?: NonNullable<DigitOcrResult['strokes']>,
+  /**
+   * Strokes the caller already built. `recognizeDigitsInRegionDetailed`
+   * builds them before the worker gates so the digit classifier can have
+   * the bitmaps even when tesseract is skipped; passing them back here
+   * keeps that from costing a second pass over the crop.
+   */
+  prepared?: { found?: DigitStrokes; shape: DigitShape },
 ): Promise<DigitOcrResult> {
   try {
-    const { found, shape } = await buildDigitStrokes(imageBuffer, crop, templateReference, dump);
+    const { found, shape } = prepared
+      ?? await buildDigitStrokes(imageBuffer, crop, templateReference, dump);
     if (!found) {
       return {
         status: 'no_handwriting_found',
@@ -889,6 +920,35 @@ interface DigitReading {
  * page segmentation mode is worker state: two overlapping requests setting it
  * would otherwise recognise each other's images in the wrong mode.
  */
+/**
+ * Renders each stroke exactly as the per-digit reader would and stores the
+ * single-channel bitmap. Split out of `readDigitStrokes` on 2026-09-07: it is
+ * sharp only, so the digit classifier can have these bitmaps without a
+ * tesseract worker and without spending the OCR deadline. It shares
+ * `renderStrokesForOcr` with the reader path, so the bitmaps are the same
+ * bytes either way.
+ */
+async function captureStrokeBitmaps(
+  strokes: DigitStrokes,
+  sink: NonNullable<DigitOcrResult['strokes']>,
+): Promise<void> {
+  // Same shape rule as the per-digit reader: anything but one or two strokes
+  // is not a pair of digits, and the classifier gate wants exactly two.
+  if (strokes.strokes.length < 1 || strokes.strokes.length > 2) return;
+  const ordered = [...strokes.strokes].sort((first, second) => first.left - second.left);
+  for (const stroke of ordered) {
+    const image = await renderStrokesForOcr(strokes.mask, [stroke]);
+    const { data, info } = await sharp(image).raw().toBuffer({ resolveWithObject: true });
+    const channels = info.channels;
+    const pixelCount = info.width * info.height;
+    const single = new Uint8Array(pixelCount);
+    for (let i = 0; i < pixelCount; i++) {
+      single[i] = data[i * channels];
+    }
+    sink.push({ data: single, width: info.width, height: info.height });
+  }
+}
+
 function readDigitStrokes(
   strokes: DigitStrokes,
   dump?: DigitOcrDump,
