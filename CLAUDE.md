@@ -247,7 +247,7 @@ REAL_SCAN_SAT_REVERSED=1   REAL_SCAN_CAGI_PDF=".../선별검사 샘플3반복.pd
 
 자동 구동 경로는 [Task/MEASUREMENT_RENDER_PARITY_2026-08-19.md](Task/MEASUREMENT_RENDER_PARITY_2026-08-19.md)에 있고, **에이전트가 사람 없이 19명 전체를 돌리는 절차는 §5**에 있다.
 
-**제약 하나만 기억한다: `requestAnimationFrame`이 발화해야 한다.** 숨겨진 탭에서는 발화하지 않고, pdf.js의 `page.render()`가 그것으로 이어달리기를 하므로 **영원히 완료되지 않는다.** 이것을 제품 결함으로 오진한 적이 있다. 창을 보이게 하거나, §5.2처럼 rAF를 타이머로 대체한다.
+**제약 하나만 기억한다: `requestAnimationFrame`이 발화해야 한다.** 숨겨진 탭에서는 발화하지 않고, pdf.js의 `page.render()`가 그것으로 이어달리기를 하므로 **영원히 완료되지 않는다.** 이것을 제품 결함으로 오진한 적이 있다. 창을 보이게 하거나, §5.2처럼 rAF를 `MessageChannel`로 대체한다(숨은 탭에서는 타이머 대체도 스로틀링에 걸린다).
 
 `requestAnimationFrame`에 얹힌 것이 pdf.js만은 아니다. **`behavior: 'smooth'`도 rAF로 구동된다.** 보이지 않는 창에서는 스크롤이 조용히 아무것도 안 한다 — 같은 창에서 `smooth`는 `scrollY 1813`, `auto`는 `0`이었다. 더 나쁜 조합은 스크롤과 포커스를 함께 쓸 때다. 스크롤만 죽고 `focus()`는 살아서 **화면 밖 입력란에 포커스가 남는다.**
 
@@ -307,10 +307,21 @@ REAL_SCAN_SAT_REVERSED=1   REAL_SCAN_CAGI_PDF=".../선별검사 샘플3반복.pd
 1. dev 서버를 띄운다 (`.claude/launch.json`의 `gambling-prevention-app`). **`npm run build`를 같이 돌리지 마라** — §4.
 2. 브라우저로 `http://localhost:3000`을 연다. 파일 첨부가 필요하므로 `claude-in-chrome`을 쓴다.
 3. `localStorage`의 `kpga*` 키를 지우고, 일괄 스캔 모드로 시작한다.
-4. **rAF를 타이머로 대체한다.** 배경 탭에서 pdf.js 렌더가 끝나지 않는다. 그리는 내용이 아니라 예약 시점만 바뀌며, 스케줄러를 바꿔 재실행해도 19명 결과가 동일함을 확인했다.
+4. **rAF를 `MessageChannel`로 대체한다.** 배경 탭에서 pdf.js 렌더가 끝나지 않는다 — `page.render()`가 rAF로 이어달리기를 한다.
+   **타이머 대체(`setTimeout`)는 탭이 실제로 보일 때만 성립한다.** 2026-09-06에 MCP 탭이 `visibilityState: hidden`이라 크롬
+   타이머 스로틀링(숨은 탭의 중첩 타이머 1Hz, 5분 뒤 집중 스로틀링은 분당 1회)에 걸렸다. `MessageChannel`의 `postMessage`는
+   스로틀링을 받지 않으므로 숨은 탭에서도 그대로 돈다 — 초당 rAF 틱 약 147,000, 19명 인식 63초.
    ```js
-   window.requestAnimationFrame = (cb) => setTimeout(() => cb(performance.now()), 8);
+   Object.defineProperty(document, 'visibilityState', { get: () => 'visible', configurable: true });
+   Object.defineProperty(document, 'hidden', { get: () => false, configurable: true });
+   const ch = new MessageChannel(); let q = []; let id = 0; const cancelled = new Set();
+   ch.port1.onmessage = () => { const b = q; q = []; const t = performance.now(); for (const it of b) if (!cancelled.has(it.id)) it.cb(t); };
+   window.requestAnimationFrame = (cb) => { const i = ++id; q.push({ id: i, cb }); ch.port2.postMessage(0); return i; };
+   window.cancelAnimationFrame = (i) => cancelled.add(i);
    ```
+   `visibilityState`를 함께 덮어쓰는 것은 **앱 코드**가 숨은 탭에서 스스로 멈추는 것을 막기 위한 것이고, 크롬의 스로틀링은
+   끄지 못한다 — 스로틀링을 피하는 쪽은 `MessageChannel`이다. 그리는 내용이 아니라 예약 시점만 바뀌며, 스케줄러를 바꿔도
+   19명 결과는 같다(2026-09-06 재측정에서 자동 358 · 정답 352 · 오답 6 · 빈칸 74로 기준선을 그대로 재현했다).
 5. **파일 입력을 보이게 만든다.** `파일 선택` 버튼 뒤에 숨어 있어 `read_page`가 `ref`를 주지 않는다. `style`을 덮어쓰면 잡힌다.
 6. 두 PDF를 첨부하고 `전체 설문지 인식 시작`을 누른다.
 7. 학생을 순회하며 `확인 필요 항목 N개`와 항목 이름을 읽는다.
