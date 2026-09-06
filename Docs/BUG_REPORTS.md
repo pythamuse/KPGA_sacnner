@@ -27,6 +27,7 @@
 | 21 | 계측기가 배포본과 다른 해상도·형식의 이미지를 측정해 모든 판정이 무효 | 계측기 수정 완료, 기준선 재설정 | [MEASUREMENT_RENDER_PARITY_2026-08-19](../Task/MEASUREMENT_RENDER_PARITY_2026-08-19.md) |
 | 22 | `contentBoundsConfident`와 `contentBoundsSource`가 같은 사실을 이중 저장해 분류·인식 게이트가 갈라질 수 있음 | **미발현 — 기록만** | — (본 문서 §22) |
 | 23 | tesseract.js 노드 워커 경로가 Next 번들 안에서 `.next/worker-script/...`로 해석돼 **나이 OCR이 dev·prod 모두 한 번도 돈 적이 없음**(타임아웃 문장이 가림) | **수정 완료 2026-09-03** — `workerPath` 명시 + 배포 트레이스 포함. `next start`에서 세트 1 나이 2칸(p1·p18) 정답, 오답 0 | [B11_SETTLEMENT_GATE_2026-09-03](../Task/B11_SETTLEMENT_GATE_2026-09-03.md) §0, [17_TECH_STACK_REVALIDATION](17_TECH_STACK_REVALIDATION.md) §3.6 |
+| 24 | 표시 없는 칸을 **빈칸으로 저장할 수 없어** 검수자가 값을 지어내게 됨 — `blank_ok`를 UI는 권하고 저장 검증은 거부 | **미해결 — 상류 서식에 무응답 코드 없음** | — (본 문서 §24), [18_GROUND_TRUTH_VALIDITY](18_GROUND_TRUTH_VALIDITY.md) |
 
 ---
 
@@ -205,3 +206,23 @@
 실제로 갈라지는 장면이 관측되면 그때 근거와 함께 착수한다.
 
 **상태**: 미발현 — 현재 두 필드는 일치한다.
+
+## 24. 표시 없는 칸을 빈칸으로 저장할 수 없다
+
+**증상**: 검수 화면에서 값을 비운 채로는 다음 항목으로 넘어가거나 학생을 저장할 수 없다. 검수자는 종이에 표시가
+없는 칸에도 값을 **지어내야** 진행할 수 있다(사용자 보고 2026-09-06).
+
+**원인**: 세 층이 어긋나 있다. 검수 UI는 무응답을 기록하도록 `blank_ok`(배지 `빈칸 확인`)를 두었고
+([RecognitionReview.tsx:308](../src/components/RecognitionReview.tsx)), 확정 게이트도 그것을 확정으로 인정한다
+([settlement.ts:50](../src/lib/review/settlement.ts)). 그런데 저장 검증
+[validateStudent.ts](../src/lib/validation/validateStudent.ts)는 23개 필드 전부에 값이 없으면 오류를 내고,
+`/api/students`가 저장 전에 이를 호출한다. 상류 원인은 공식 워크북의 `코드` 시트에 **무응답·결측 코드가 없다는 것**이다.
+
+**영향**: 지어낸 값이 "사람이 확인한 것"으로 중앙 시스템에 저장된다 — [CLAUDE.md](../CLAUDE.md) §3이 막으려던 형태다.
+더욱이 그렇게 만들어진 워크북이 정답표 p7~p19의 재료로 쓰였고, 새 표본(2026-09-06)의 정답표는 수정 패스 없는 앱
+내보내기 그대로다. 피해 범위와 무엇이 무효인지는 [18_GROUND_TRUTH_VALIDITY](18_GROUND_TRUTH_VALIDITY.md).
+
+**대응**: 기관의 무응답 코드 유무 확인이 선행 조건이다. 코드 수정만으로 결정할 수 없다 — 셀을 비운 채 올리면
+중앙에서 거부될 수 있다. 결정 전까지 UI와 저장의 모순만이라도 사용자에게 보이게 해야 한다.
+
+**상태**: 미해결 — 사용자 결정 대기(무응답 코드 확인).
