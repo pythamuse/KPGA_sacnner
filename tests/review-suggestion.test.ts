@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it, beforeAll } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import sharp from 'sharp';
@@ -204,6 +204,16 @@ describe('review suggestion on a scored group', () => {
 });
 
 describe('review suggestion metadata path', () => {
+  // This block asserts the suggestion path: a group the gates did not confirm
+  // is left blank with a suggestion attached. That is the RECOMMEND_BEST=0
+  // behaviour; the default since 2026-09-07 promotes such groups to contested
+  // recommendations and drops the separate suggestion (detectCheckmarks.ts).
+  let previousRecommendBest: string | undefined;
+  beforeAll(() => { previousRecommendBest = process.env.RECOMMEND_BEST; process.env.RECOMMEND_BEST = '0'; });
+  afterAll(() => {
+    if (previousRecommendBest === undefined) delete process.env.RECOMMEND_BEST;
+    else process.env.RECOMMEND_BEST = previousRecommendBest;
+  });
   it('reaches the draft, and only for fields it left blank', async () => {
     const cagiPath = path.join(fixtureDir, 'cagi.png');
     const satisfactionPath = path.join(fixtureDir, 'satisfaction.png');
@@ -239,6 +249,11 @@ describe('review suggestion metadata path', () => {
       const value = group === 'basic'
         ? (draft.basic as Record<string, unknown>)[name]
         : group === 'cagi' ? draft.cagi[name] : draft.satisfaction[name];
+      // Under recommend-the-best (default since 2026-09-07) a group the gates
+      // did not confirm is ENTERED as a contested recommendation and its
+      // separate suggestion is removed, so a field that still carries a
+      // suggestion here is one that read as unanswered -- and it stays blank.
+      // With RECOMMEND_BEST=0 every suggested field stays blank, as before.
       expect(value, `${field} should still be blank`).toBeUndefined();
       expect(draft.confidence[field], field).not.toBe('high');
       expect(draft.recognitionValueSource?.[field], field).not.toBe('auto');

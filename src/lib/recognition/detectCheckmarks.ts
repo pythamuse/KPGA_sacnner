@@ -20,6 +20,7 @@ import type {
 import type { SheetQualityAttachment } from './sheetQualityDisplay';
 import { describeEvidence } from '../review/evidence';
 import { BASELINE_ALIGNMENT_RADIUS } from './markDensityConstants';
+import type { CandidateScore } from './markDensity';
 import { getTemplate, type ChoiceGroup } from './roiTemplates';
 import {
   buildCagiRowDetection,
@@ -54,6 +55,37 @@ import fs from 'fs/promises';
 // section 2 records that both conventions live in this repo, so read the operator here
 // before writing an off column into a judging script.
 const AGE_DIGIT_CLASSIFIER_ENABLED = process.env.AGE_DIGIT_CLASSIFIER !== '0';
+
+// Recommend-the-best mode (2026-09-07, user decision). The product contract is:
+// a checkbox group is left blank ONLY when the student did not answer it;
+// otherwise the most likely option is entered as a low-confidence, contested
+// recommendation for the reviewer to confirm or fix. The refusal gates
+// (absolute floor, gap, contrast, the 8x8 inset evidence check, ...) were
+// built for the earlier contract where an automatic value was saved as
+// verified; since B-11 every automatic value needs a reviewer decision, so a
+// gate that turns "not sure" into "blank" now costs the reviewer a lookup and
+// a keystroke instead of one click. On the four scan sets the cells these
+// gates withheld were 33 right to 13 wrong (Task/BASIC_BOX_GRAYSCALE_2026-09-07.md).
+// `RECOMMEND_BEST=0` restores the refuse-unless-sure behaviour.
+const recommendBestEnabled = (): boolean => process.env.RECOMMEND_BEST !== '0';
+// Below this residual score every box in the group reads as the blank form:
+// on the grayscale set unmarked boxes scored <= 0.005 and every refused box
+// the paper showed marked scored >= 0.012. Chosen once, not swept.
+const RECOMMEND_NO_INK_SCORE = 0.008;
+
+/**
+ * The option to recommend for a group the gates did not confirm, or undefined
+ * when the group looks unanswered. A cancelled top box (cancel-crossing) is
+ * skipped in favour of the next one, which is how V -> X -> V elsewhere reads.
+ */
+function pickRecommendation(result: ChoiceGroupResult): CandidateScore | undefined {
+  const ranked = [...result.candidates].sort((a, b) => b.score - a.score);
+  if (ranked.length === 0) return undefined;
+  const cancelled = result.decision.includes('cancel-crossing');
+  const pick = cancelled ? ranked[1] : ranked[0];
+  if (!pick || !(pick.score >= RECOMMEND_NO_INK_SCORE)) return undefined;
+  return pick;
+}
 
 export { isAutomaticGridEligible } from './tableGridDetection';
 
@@ -435,6 +467,30 @@ export async function recognizeStudentForms(
       // Medium confidence stays a suggestion only. Automatic values require a
       // verified grid and the stricter high-confidence mark evidence.
       if (result.value === undefined || result.confidence !== 'high' || !directCheckboxEvidence) {
+        // Recommend-the-best: the same frame/grid guards as an automatic value
+        // (a fallback boundary never produces one -- B-1), then the top-scoring
+        // box unless the whole group reads as blank paper.
+        const recommended = recommendBestEnabled() && canAutoRecognizeCagi && isAutomaticGridEligible(registration)
+          ? pickRecommendation(result)
+          : undefined;
+        if (recommended) {
+          if (result.field === 'basic.gender') {
+            draft.basic.gender = String(recommended.value);
+          } else if (result.field === 'basic.schoolType') {
+            draft.basic.schoolType = mapRecognizedSchoolType(recommended.value);
+          } else if (result.field === 'basic.grade') {
+            draft.basic.grade = mapRecognizedGrade(recommended.value);
+          } else if (result.field.startsWith('cagi.')) {
+            draft.cagi[result.field.replace('cagi.', '')] = Number(recommended.value);
+          }
+          recognitionValueSource[result.field] = 'auto';
+          recognitionContested[result.field] = true;
+          // The recommendation IS the suggestion, promoted to a value; keeping
+          // both would show the reviewer the same box twice.
+          delete recognitionSuggestion[result.field];
+          recognitionDecisionTrace[result.field] = getRecognitionFieldLabel(result.field) + ' [gate=recommend-best]: gates did not confirm, best box score ' + recommended.score.toFixed(3) + ' entered for review. ' + result.decision;
+          continue;
+        }
         if (!directCheckboxEvidence) {
           recognitionDecisionTrace[result.field] =
             getRecognitionFieldLabel(result.field) + ': automatic entry deferred because direct checkbox ink evidence was absent or ambiguous.';
@@ -642,6 +698,19 @@ export async function recognizeStudentForms(
       draft.candidates![result.field] = result.candidates;
 
       if (result.value === undefined || result.confidence !== 'high') {
+        const recommended = recommendBestEnabled() && canAutoRecognizeSatisfaction && isAutomaticGridEligible(registration)
+          ? pickRecommendation(result)
+          : undefined;
+        if (recommended) {
+          draft.satisfaction[result.field.replace('satisfaction.', '')] = Number(recommended.value);
+          recognitionValueSource[result.field] = 'auto';
+          recognitionContested[result.field] = true;
+          // The recommendation IS the suggestion, promoted to a value; keeping
+          // both would show the reviewer the same box twice.
+          delete recognitionSuggestion[result.field];
+          recognitionDecisionTrace[result.field] = getRecognitionFieldLabel(result.field) + ' [gate=recommend-best]: gates did not confirm, best box score ' + recommended.score.toFixed(3) + ' entered for review. ' + result.decision;
+          continue;
+        }
         if (canAutoRecognizeSatisfaction && isAutomaticGridEligible(registration)) {
           recognitionDecisionTrace[result.field] =
             getRecognitionFieldLabel(result.field) + ': automatic entry deferred because high-confidence mark evidence was not found.';
