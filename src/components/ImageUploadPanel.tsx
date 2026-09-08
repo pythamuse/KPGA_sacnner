@@ -1317,7 +1317,7 @@ export default function ImageUploadPanel({
         const known = item.source === 'image' ? previewByFile.get(item.file) : undefined;
         return {
           page: index + 1,
-          previewUrl: known?.previewUrl ?? null,
+          previewUrl: known?.previewUrl ?? (item.source === 'pdf' ? URL.createObjectURL(item.file) : null),
           captureTime: known?.captureTime ?? null,
           filename: item.file.name,
         };
