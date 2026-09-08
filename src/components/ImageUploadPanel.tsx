@@ -43,6 +43,7 @@ import {
 } from '@/lib/pdf/pdfRenderConfig';
 import { cagiTemplate, satisfactionTemplate } from '@/lib/recognition/roiTemplates';
 import { describePairing, type StackOrder } from '@/lib/recognition/batchMatcher';
+import { readCaptureTime, sortBatchImages } from '@/lib/uploadOrder';
 import {
   STATELESS_RECOGNIZE_ENABLED,
   type StatelessPage,
@@ -94,6 +95,34 @@ type BatchNormalizationResult = {
 type BatchUploadItem = {
   file: File;
   source: 'image' | 'pdf';
+};
+
+/**
+ * One row of the pre-upload review list (Task/PHOTO_BATCH_ORDER_2026-09-09.md
+ * §3 item B) -- selection, not preparation. `kind: 'pdf'` holds the raw PDF
+ * file unexpanded (its page count is unknown until `convertPdfToImages`
+ * runs), so it never gets a `previewUrl` and shows a placeholder tile
+ * instead of rendering the PDF a second time just for a thumbnail.
+ */
+type PendingBatchEntry = {
+  id: string;
+  kind: 'image' | 'pdf';
+  file: File;
+  captureTime: number | null;
+  previewUrl: string | null;
+};
+
+/**
+ * A page's thumbnail carried forward from the review list to after upload,
+ * for the pairing strip (item C). `previewUrl` is null for a page that came
+ * from a PDF -- the review list never rendered PDF pages to build a
+ * thumbnail, so none is available without doing that rendering again.
+ */
+type BatchPagePreview = {
+  page: number;
+  previewUrl: string | null;
+  captureTime: number | null;
+  filename: string;
 };
 
 /** A batch page prepared for upload, held back until the F2 review gate. */
@@ -284,6 +313,27 @@ const createBatchId = () => (
   || `batch_${Date.now()}_${Math.random().toString(36).slice(2, 12)}`
 );
 
+const revokePendingBatchEntries = (entries: PendingBatchEntry[]) => {
+  entries.forEach((entry) => {
+    if (entry.previewUrl) URL.revokeObjectURL(entry.previewUrl);
+  });
+};
+
+const revokeBatchPagePreviews = (previews: BatchPagePreview[]) => {
+  previews.forEach((preview) => {
+    if (preview.previewUrl) URL.revokeObjectURL(preview.previewUrl);
+  });
+};
+
+const formatCaptureTime = (captureTime: number | null): string => {
+  if (captureTime == null) return '시각 없음';
+  const date = new Date(captureTime);
+  const hh = String(date.getUTCHours()).padStart(2, '0');
+  const mm = String(date.getUTCMinutes()).padStart(2, '0');
+  const ss = String(date.getUTCSeconds()).padStart(2, '0');
+  return `${hh}:${mm}:${ss}`;
+};
+
 const canvasToBlob = (canvas: HTMLCanvasElement, mimeType: string, quality: number): Promise<Blob> => (
   new Promise((resolve, reject) => {
     canvas.toBlob((blob) => {
@@ -445,6 +495,35 @@ export default function ImageUploadPanel({
     pages: PreparedBatchPage[];
     warnings: BatchCorrectionWarning[];
   } | null>(null);
+
+  // §3 item B: files picked for a batch land here first, ordered and
+  // reviewable, instead of preparing/uploading immediately. Null means "no
+  // review pending" (either nothing picked yet, or the pick was PDF-only and
+  // skipped the review list per item D).
+  const [pendingBatch, setPendingBatch] = useState<Record<UploadKind, PendingBatchEntry[] | null>>({
+    cagi: null,
+    satisfaction: null,
+  });
+  // §3 item C: per-page thumbnails kept after upload for the pairing strip.
+  const [uploadedPreviews, setUploadedPreviews] = useState<Record<UploadKind, BatchPagePreview[]>>({
+    cagi: [],
+    satisfaction: [],
+  });
+  // Mirrors the two states above for the unmount cleanup effect, which must
+  // see the latest object URLs and not whatever was current when the effect
+  // was installed.
+  const pendingBatchRef = useRef(pendingBatch);
+  const uploadedPreviewsRef = useRef(uploadedPreviews);
+  useEffect(() => { pendingBatchRef.current = pendingBatch; }, [pendingBatch]);
+  useEffect(() => { uploadedPreviewsRef.current = uploadedPreviews; }, [uploadedPreviews]);
+  useEffect(() => {
+    return () => {
+      revokePendingBatchEntries(pendingBatchRef.current.cagi ?? []);
+      revokePendingBatchEntries(pendingBatchRef.current.satisfaction ?? []);
+      revokeBatchPagePreviews(uploadedPreviewsRef.current.cagi);
+      revokeBatchPagePreviews(uploadedPreviewsRef.current.satisfaction);
+    };
+  }, []);
 
   // Live capture guidance (CAPTURE_GUIDANCE §9 stages 1-3).
   const [liveGuidance, setLiveGuidance] = useState<LiveGuidance | null>(null);
@@ -1066,146 +1145,317 @@ export default function ImageUploadPanel({
     }
   };
 
-  const handleBatchFileChange = async (e: React.ChangeEvent<HTMLInputElement>, type: UploadKind) => {
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
-
-    setIsBatchProcessing(true);
-    setBatchStatusMessage('파일을 확인하고 있습니다.');
-    setBatchCorrectionWarnings((previous) => previous.filter((warning) => warning.type !== type));
-
+  /**
+   * File collection: raw picked files -> per-page image items, PDFs expanded
+   * via `convertPdfToImages` and every other file passed through unchanged.
+   * `rawFiles` order is preserved -- a PDF's pages land as a block at the
+   * slot the PDF file itself occupied (§3 item A).
+   */
+  const collectBatchItems = async (rawFiles: File[], type: UploadKind): Promise<BatchUploadItem[]> => {
     let filesToUpload: BatchUploadItem[] = [];
+    for (const file of rawFiles) {
+      if (file.type === 'application/pdf') {
+        const extractedImages = await convertPdfToImages(file, type);
+        filesToUpload = [
+          ...filesToUpload,
+          ...extractedImages.map((extracted) => ({ file: extracted, source: 'pdf' as const })),
+        ];
+      } else if (file.type.startsWith('image/')) {
+        filesToUpload.push({ file, source: 'image' });
+      }
+    }
+    return filesToUpload;
+  };
+
+  /**
+   * The existing prepare+upload pipeline (perspective correction, F2 retake
+   * gate, upload) -- unchanged from before the review list, just extracted
+   * so both entry points below share it (§3 item B/D): the PDF-only fast
+   * path and the reviewed/reordered image list both call this with the same
+   * kind of `BatchUploadItem[]`, once PDFs (if any) are already expanded.
+   */
+  const processBatchItems = async (type: UploadKind, filesToUpload: BatchUploadItem[]) => {
     const correctionWarnings: BatchCorrectionWarning[] = [];
     let correctionEngineReady = false;
     let correctionEngineUnavailable = false;
 
-    try {
-      for (let i = 0; i < files.length; i++) {
-        const file = files[i];
-        if (file.type === 'application/pdf') {
-          const extractedImages = await convertPdfToImages(file, type);
-          filesToUpload = [
-            ...filesToUpload,
-            ...extractedImages.map((extracted) => ({ file: extracted, source: 'pdf' as const })),
-          ];
-        } else if (file.type.startsWith('image/')) {
-          filesToUpload.push({ file, source: 'image' });
+    const hasPerspectiveCorrectionCandidate = hasBatchPerspectiveCorrectionCandidate(
+      filesToUpload.map(({ source }) => source),
+    );
+    if (PERSPECTIVE_CORRECTION_ENABLED && hasPerspectiveCorrectionCandidate) {
+      setBatchStatusMessage('페이지 보정 엔진을 준비하고 있습니다.');
+      correctionEngineReady = await warmupPerspectiveWorker(BATCH_WORKER_WARMUP_TIMEOUT_MS);
+      correctionEngineUnavailable = !correctionEngineReady;
+    }
+
+    const total = filesToUpload.length;
+    if (total === 0) {
+      throw new Error('업로드할 이미지 파일이 없습니다.');
+    }
+    const batch = { batchId: createBatchId(), expectedPageCount: total };
+
+    // Prepare every page first; upload only after the F2 review gate. The
+    // old loop uploaded originals for refused pages in the same breath as
+    // the warning -- a silent pass in batch clothing.
+    const preparedPages: PreparedBatchPage[] = [];
+    for (let i = 0; i < total; i++) {
+      const { file: sourceFile, source } = filesToUpload[i];
+      // PDF.js has already rasterized PDF pages into a flat rectangle. Its
+      // per-page offsets are handled by server-side template registration;
+      // running the camera-only OpenCV worker here both adds latency and
+      // turns an unavailable Worker into a warning for every PDF page.
+      const needsPerspectiveCorrection = shouldCorrectBatchPerspective(source);
+      let prepared: PreparedBatchPage = {
+        file: sourceFile,
+        page: i + 1,
+        filename: sourceFile.name,
+        corrected: false,
+        registration: null,
+        retake: false,
+      };
+
+      if (needsPerspectiveCorrection && PERSPECTIVE_CORRECTION_ENABLED && !correctionEngineUnavailable) {
+        if (!correctionEngineReady) {
+          setBatchStatusMessage(`페이지 보정 엔진을 다시 준비하고 있습니다. (${i + 1}/${total})`);
+          correctionEngineReady = await warmupPerspectiveWorker(BATCH_WORKER_WARMUP_TIMEOUT_MS);
+          correctionEngineUnavailable = !correctionEngineReady;
         }
-      }
 
-      const hasPerspectiveCorrectionCandidate = hasBatchPerspectiveCorrectionCandidate(
-        filesToUpload.map(({ source }) => source),
-      );
-      if (PERSPECTIVE_CORRECTION_ENABLED && hasPerspectiveCorrectionCandidate) {
-        setBatchStatusMessage('페이지 보정 엔진을 준비하고 있습니다.');
-        correctionEngineReady = await warmupPerspectiveWorker(BATCH_WORKER_WARMUP_TIMEOUT_MS);
-        correctionEngineUnavailable = !correctionEngineReady;
-      }
+        if (correctionEngineReady) {
+          setBatchStatusMessage(`페이지를 보정하고 있습니다. (${i + 1}/${total})`);
 
-      const total = filesToUpload.length;
-      if (total === 0) {
-        throw new Error('업로드할 이미지 파일이 없습니다.');
-      }
-      const batch = { batchId: createBatchId(), expectedPageCount: total };
+          try {
+            const normalized = await normalizeBatchFile(sourceFile, type);
+            prepared = {
+              ...prepared,
+              file: normalized.file,
+              corrected: normalized.corrected,
+              registration: normalized.registration,
+              // The detector looked and refused: F2 asks for a retake.
+              // Engine trouble (timeout/worker-error) is not the photo's
+              // fault and stays a warning, as before.
+              retake: !normalized.corrected
+                && normalized.reason !== 'timeout'
+                && normalized.reason !== 'worker-error',
+            };
 
-      // Prepare every page first; upload only after the F2 review gate. The
-      // old loop uploaded originals for refused pages in the same breath as
-      // the warning -- a silent pass in batch clothing.
-      const preparedPages: PreparedBatchPage[] = [];
-      for (let i = 0; i < total; i++) {
-        const { file: sourceFile, source } = filesToUpload[i];
-        // PDF.js has already rasterized PDF pages into a flat rectangle. Its
-        // per-page offsets are handled by server-side template registration;
-        // running the camera-only OpenCV worker here both adds latency and
-        // turns an unavailable Worker into a warning for every PDF page.
-        const needsPerspectiveCorrection = shouldCorrectBatchPerspective(source);
-        let prepared: PreparedBatchPage = {
-          file: sourceFile,
-          page: i + 1,
-          filename: sourceFile.name,
-          corrected: false,
-          registration: null,
-          retake: false,
-        };
-
-        if (needsPerspectiveCorrection && PERSPECTIVE_CORRECTION_ENABLED && !correctionEngineUnavailable) {
-          if (!correctionEngineReady) {
-            setBatchStatusMessage(`페이지 보정 엔진을 다시 준비하고 있습니다. (${i + 1}/${total})`);
-            correctionEngineReady = await warmupPerspectiveWorker(BATCH_WORKER_WARMUP_TIMEOUT_MS);
-            correctionEngineUnavailable = !correctionEngineReady;
-          }
-
-          if (correctionEngineReady) {
-            setBatchStatusMessage(`페이지를 보정하고 있습니다. (${i + 1}/${total})`);
-
-            try {
-              const normalized = await normalizeBatchFile(sourceFile, type);
-              prepared = {
-                ...prepared,
-                file: normalized.file,
-                corrected: normalized.corrected,
-                registration: normalized.registration,
-                // The detector looked and refused: F2 asks for a retake.
-                // Engine trouble (timeout/worker-error) is not the photo's
-                // fault and stays a warning, as before.
-                retake: !normalized.corrected
-                  && normalized.reason !== 'timeout'
-                  && normalized.reason !== 'worker-error',
-              };
-
-              if (normalized.reason === 'timeout' || normalized.reason === 'worker-error') {
-                correctionWarnings.push({
-                  type,
-                  page: i + 1,
-                  filename: sourceFile.name,
-                  reason: formatCorrectionWarning(normalized.reason),
-                });
-                correctionEngineReady = false;
-                correctionEngineUnavailable = true;
-              }
-            } catch {
+            if (normalized.reason === 'timeout' || normalized.reason === 'worker-error') {
               correctionWarnings.push({
                 type,
                 page: i + 1,
                 filename: sourceFile.name,
-                reason: '페이지 이미지 보정 중 오류가 발생해 원본으로 업로드했습니다.',
+                reason: formatCorrectionWarning(normalized.reason),
               });
               correctionEngineReady = false;
               correctionEngineUnavailable = true;
             }
+          } catch {
+            correctionWarnings.push({
+              type,
+              page: i + 1,
+              filename: sourceFile.name,
+              reason: '페이지 이미지 보정 중 오류가 발생해 원본으로 업로드했습니다.',
+            });
+            correctionEngineReady = false;
+            correctionEngineUnavailable = true;
           }
         }
+      }
 
-        if (needsPerspectiveCorrection && correctionEngineUnavailable && PERSPECTIVE_CORRECTION_ENABLED
-          && !prepared.corrected && !prepared.retake
-          && !correctionWarnings.some((warning) => warning.page === i + 1)) {
-          correctionWarnings.push({
-            type,
-            page: i + 1,
-            filename: sourceFile.name,
-            reason: '보정 엔진을 사용할 수 없어 원본으로 업로드했습니다.',
-          });
+      if (needsPerspectiveCorrection && correctionEngineUnavailable && PERSPECTIVE_CORRECTION_ENABLED
+        && !prepared.corrected && !prepared.retake
+        && !correctionWarnings.some((warning) => warning.page === i + 1)) {
+        correctionWarnings.push({
+          type,
+          page: i + 1,
+          filename: sourceFile.name,
+          reason: '보정 엔진을 사용할 수 없어 원본으로 업로드했습니다.',
+        });
+      }
+
+      preparedPages.push(prepared);
+    }
+
+    const retakePages = preparedPages.filter((page) => page.retake);
+    if (retakePages.length > 0) {
+      // F2 batch gate: hold the whole bundle and let the user decide with
+      // the failed pages named, instead of uploading originals silently.
+      setBatchReview({ type, batch, pages: preparedPages, warnings: correctionWarnings });
+      return;
+    }
+
+    await uploadPreparedBatch(type, batch, preparedPages, correctionWarnings);
+  };
+
+  /**
+   * Shared tail for both entry points: the PDF-only fast path and the
+   * "이 순서로 등록" confirm both call this with the final, ordered raw file
+   * list. Builds the §3 item C thumbnails (by File identity against any
+   * review-list entries) before handing off to the existing pipeline, so a
+   * PDF-only pick -- which never had a review list -- simply gets an empty
+   * lookup and every page falls back to a placeholder tile.
+   */
+  const runBatchFromRawFiles = async (type: UploadKind, rawFiles: File[]) => {
+    setIsBatchProcessing(true);
+    setBatchStatusMessage('파일을 확인하고 있습니다.');
+    setBatchCorrectionWarnings((previous) => previous.filter((warning) => warning.type !== type));
+
+    const previewByFile = new Map<File, { previewUrl: string; captureTime: number | null }>();
+    const reviewEntries = pendingBatch[type];
+    if (reviewEntries) {
+      for (const entry of reviewEntries) {
+        if (entry.previewUrl) {
+          previewByFile.set(entry.file, { previewUrl: entry.previewUrl, captureTime: entry.captureTime });
         }
-
-        preparedPages.push(prepared);
       }
+    }
 
-      const retakePages = preparedPages.filter((page) => page.retake);
-      if (retakePages.length > 0) {
-        // F2 batch gate: hold the whole bundle and let the user decide with
-        // the failed pages named, instead of uploading originals silently.
-        setBatchReview({ type, batch, pages: preparedPages, warnings: correctionWarnings });
-        return;
-      }
+    try {
+      const collected = await collectBatchItems(rawFiles, type);
 
-      await uploadPreparedBatch(type, batch, preparedPages, correctionWarnings);
+      const previews: BatchPagePreview[] = collected.map((item, index) => {
+        const known = item.source === 'image' ? previewByFile.get(item.file) : undefined;
+        return {
+          page: index + 1,
+          previewUrl: known?.previewUrl ?? null,
+          captureTime: known?.captureTime ?? null,
+          filename: item.file.name,
+        };
+      });
+      setUploadedPreviews((previous) => {
+        // Anything not carried forward into `previews` (e.g. a page removed
+        // via "빼기" that never made it into `collected`) is not reachable
+        // any more; revoke the kind's old previews now that ownership of the
+        // survivors has moved into `previews` above.
+        revokeBatchPagePreviews(previous[type]);
+        return { ...previous, [type]: previews };
+      });
+
+      await processBatchItems(type, collected);
     } catch (err: any) {
       alert(`업로드 처리 중 오류가 발생했습니다: ${err.message}`);
     } finally {
       setIsBatchProcessing(false);
       setBatchStatusMessage('');
-      if (e.target) e.target.value = '';
     }
+  };
+
+  const handleBatchFileChange = async (e: React.ChangeEvent<HTMLInputElement>, type: UploadKind) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+    const fileArray = Array.from(files);
+    if (e.target) e.target.value = '';
+
+    // §3 item D: a PDF's page order is not ambiguous, so a PDF-only pick
+    // skips the review list and goes straight through the shared pipeline.
+    const isPdfOnly = fileArray.every((file) => file.type === 'application/pdf');
+    if (isPdfOnly) {
+      await runBatchFromRawFiles(type, fileArray);
+      return;
+    }
+
+    await buildPendingBatchReview(type, fileArray);
+  };
+
+  /** §3 item B: read capture times, sort the loose images, and stage the
+   *  ordered, reviewable list instead of preparing/uploading right away. */
+  const buildPendingBatchReview = async (type: UploadKind, fileArray: File[]) => {
+    setIsBatchProcessing(true);
+    setBatchStatusMessage('사진 촬영 시각을 확인하고 있습니다.');
+    try {
+      const imageFiles = fileArray.filter((file) => file.type.startsWith('image/'));
+      const captureTimes = await Promise.all(imageFiles.map((file) => readCaptureTime(file)));
+      const sortedImages = sortBatchImages(
+        imageFiles.map((file, i) => ({ file, captureTime: captureTimes[i] })),
+      );
+
+      let imageCursor = 0;
+      const entries: PendingBatchEntry[] = fileArray
+        .filter((file) => file.type === 'application/pdf' || file.type.startsWith('image/'))
+        .map((file) => {
+          if (file.type === 'application/pdf') {
+            return {
+              id: createBatchId(),
+              kind: 'pdf' as const,
+              file,
+              captureTime: null,
+              previewUrl: null,
+            };
+          }
+          // A PDF stays fixed at its own slot (above); the images filling
+          // every other slot are taken in their newly sorted order, which is
+          // exactly "sort the images among themselves" without moving the
+          // PDF block (§3 item A).
+          const sorted = sortedImages[imageCursor];
+          imageCursor += 1;
+          return {
+            id: createBatchId(),
+            kind: 'image' as const,
+            file: sorted.file,
+            captureTime: sorted.captureTime,
+            previewUrl: URL.createObjectURL(sorted.file),
+          };
+        });
+
+      if (entries.length === 0) {
+        throw new Error('업로드할 이미지 파일이 없습니다.');
+      }
+
+      setPendingBatch((previous) => {
+        const existing = previous[type];
+        if (existing) revokePendingBatchEntries(existing);
+        return { ...previous, [type]: entries };
+      });
+    } catch (err: any) {
+      alert(`파일 목록을 만드는 중 오류가 발생했습니다: ${err.message}`);
+    } finally {
+      setIsBatchProcessing(false);
+      setBatchStatusMessage('');
+    }
+  };
+
+  /** Primary review-list button: "이 순서로 등록". */
+  const confirmPendingBatch = async (type: UploadKind) => {
+    const entries = pendingBatch[type];
+    if (!entries || entries.length === 0) return;
+    const rawFiles = entries.map((entry) => entry.file);
+    // Ownership of any preview URLs transfers into `uploadedPreviews` inside
+    // `runBatchFromRawFiles` (matched by File identity) -- they are not
+    // revoked here.
+    setPendingBatch((previous) => ({ ...previous, [type]: null }));
+    await runBatchFromRawFiles(type, rawFiles);
+  };
+
+  /** Secondary review-list button: "다시 선택". */
+  const clearPendingBatch = (type: UploadKind) => {
+    setPendingBatch((previous) => {
+      const existing = previous[type];
+      if (existing) revokePendingBatchEntries(existing);
+      return { ...previous, [type]: null };
+    });
+  };
+
+  const movePendingBatchItem = (type: UploadKind, index: number, direction: -1 | 1) => {
+    setPendingBatch((previous) => {
+      const list = previous[type];
+      if (!list) return previous;
+      const target = index + direction;
+      if (target < 0 || target >= list.length) return previous;
+      const next = [...list];
+      [next[index], next[target]] = [next[target], next[index]];
+      return { ...previous, [type]: next };
+    });
+  };
+
+  const removePendingBatchItem = (type: UploadKind, index: number) => {
+    setPendingBatch((previous) => {
+      const list = previous[type];
+      if (!list) return previous;
+      const removed = list[index];
+      if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
+      const next = list.filter((_, i) => i !== index);
+      return { ...previous, [type]: next };
+    });
   };
 
   /**
@@ -1629,6 +1879,16 @@ export default function ImageUploadPanel({
       uploadInventoryRef.current = { cagi: null, satisfaction: null };
       setBatchCorrectionWarnings([]);
       setCameraError('');
+      setPendingBatch((previous) => {
+        revokePendingBatchEntries(previous.cagi ?? []);
+        revokePendingBatchEntries(previous.satisfaction ?? []);
+        return { cagi: null, satisfaction: null };
+      });
+      setUploadedPreviews((previous) => {
+        revokeBatchPagePreviews(previous.cagi);
+        revokeBatchPagePreviews(previous.satisfaction);
+        return { cagi: [], satisfaction: [] };
+      });
     } catch (err: any) {
       alert(`업로드 초기화 중 오류가 발생했습니다: ${err.message}`);
     } finally {
@@ -1656,6 +1916,34 @@ export default function ImageUploadPanel({
   const pairing = describePairing(Math.min(cagiCount, satCount), satisfactionOrder);
   const pairingFirst = pairing[0];
   const pairingLast = pairing[pairing.length - 1];
+
+  // §3 item C: the pairing strip's thumbnails, looked up by final page
+  // number from whatever the review list (or upload) carried forward.
+  const cagiPreviewByPage = new Map(uploadedPreviews.cagi.map((p) => [p.page, p]));
+  const satPreviewByPage = new Map(uploadedPreviews.satisfaction.map((p) => [p.page, p]));
+
+  // §3 item D: only checked once every paired page has a known capture time
+  // -- a batch with no EXIF data anywhere has nothing to compare and must
+  // not appear to have a "consistent" order it never actually verified.
+  const captureTimeWarnings: Array<{ student: number; side: 'front' | 'back' | 'both' }> = (() => {
+    if (cagiCount === 0 || satCount === 0 || isMismatch || pairing.length < 2) return [];
+    const times: Array<{ student: number; front: number; back: number }> = [];
+    for (const row of pairing) {
+      const front = cagiPreviewByPage.get(row.cagiPage)?.captureTime;
+      const back = satPreviewByPage.get(row.satisfactionPage)?.captureTime;
+      if (front == null || back == null) return [];
+      times.push({ student: row.student, front, back });
+    }
+    const offenders: Array<{ student: number; side: 'front' | 'back' | 'both' }> = [];
+    for (let i = 1; i < times.length; i += 1) {
+      const frontEarlier = times[i].front < times[i - 1].front;
+      const backEarlier = times[i].back < times[i - 1].back;
+      if (frontEarlier || backEarlier) {
+        offenders.push({ student: times[i].student, side: frontEarlier && backEarlier ? 'both' : frontEarlier ? 'front' : 'back' });
+      }
+    }
+    return offenders;
+  })();
   const cameraStepLabel = cameraFlow.step === 'cagi' ? '선별검사지 촬영' : '만족도조사 촬영';
   const cameraStepDescription = cameraFlow.step === 'cagi'
     ? '종이 전체가 화면 안에 들어오도록 맞춘 뒤 선별검사지 앞면을 촬영해주세요.'
@@ -1744,6 +2032,166 @@ export default function ImageUploadPanel({
         {uploading ? '업로드 중' : count > 0 ? '다시 업로드' : '파일 선택'}
       </button>
     </div>
+  );
+
+  /** §3 item B: the numbered, reorderable review list shown inside a kind's
+   *  batch drop zone before its pages are prepared/uploaded. */
+  const renderPendingBatchReview = (type: UploadKind) => {
+    const entries = pendingBatch[type];
+    if (!entries || entries.length === 0) return null;
+    const label = type === 'cagi' ? '선별검사지' : '만족도조사';
+
+    return (
+      <div className="panel panel-pad" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div>
+          <strong style={{ fontSize: 15 }}>{label} 순서 확인 ({entries.length}장)</strong>
+          <p style={{ margin: '4px 0 0', fontSize: 13, color: 'var(--text-muted)' }}>
+            촬영 시각을 기준으로 자동 정렬했습니다. 순서가 맞는지 확인하고, 다르면 버튼으로 바꾸거나 빼주세요.
+          </p>
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 420, overflowY: 'auto' }}>
+          {entries.map((entry, index) => (
+            <div
+              key={entry.id}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 10,
+                border: '1px solid var(--border-subtle)',
+                borderRadius: 8,
+                padding: 8,
+              }}
+            >
+              <span
+                aria-hidden="true"
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  width: 28,
+                  height: 28,
+                  flexShrink: 0,
+                  borderRadius: '50%',
+                  background: 'var(--brand-soft)',
+                  color: 'var(--brand-primary)',
+                  fontWeight: 700,
+                  fontSize: 14,
+                }}
+              >
+                {index + 1}
+              </span>
+              {entry.previewUrl ? (
+                <img
+                  src={entry.previewUrl}
+                  alt=""
+                  style={{ width: 64, height: 64, objectFit: 'cover', borderRadius: 6, flexShrink: 0 }}
+                />
+              ) : (
+                <div
+                  style={{
+                    width: 64,
+                    height: 64,
+                    flexShrink: 0,
+                    borderRadius: 6,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    background: 'var(--border-subtle)',
+                    color: 'var(--text-muted)',
+                    fontSize: 12,
+                    fontWeight: 700,
+                  }}
+                >
+                  PDF
+                </div>
+              )}
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13, color: 'var(--text-secondary)', wordBreak: 'break-all' }}>
+                  {entry.file.name}
+                </div>
+                <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{formatCaptureTime(entry.captureTime)}</div>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4, flexShrink: 0 }}>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  style={{ minHeight: 40, padding: '4px 10px', fontSize: 12 }}
+                  onClick={() => movePendingBatchItem(type, index, -1)}
+                  disabled={index === 0 || isBatchProcessing}
+                >
+                  위로
+                </button>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  style={{ minHeight: 40, padding: '4px 10px', fontSize: 12 }}
+                  onClick={() => movePendingBatchItem(type, index, 1)}
+                  disabled={index === entries.length - 1 || isBatchProcessing}
+                >
+                  아래로
+                </button>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  style={{ minHeight: 40, padding: '4px 10px', fontSize: 12 }}
+                  onClick={() => removePendingBatchItem(type, index)}
+                  disabled={isBatchProcessing}
+                >
+                  빼기
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          <button
+            className="btn-primary"
+            type="button"
+            onClick={() => void confirmPendingBatch(type)}
+            disabled={isBatchProcessing || entries.length === 0}
+          >
+            이 순서로 등록 ({entries.length}장)
+          </button>
+          <button
+            className="btn-secondary"
+            type="button"
+            onClick={() => clearPendingBatch(type)}
+            disabled={isBatchProcessing}
+          >
+            다시 선택
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  /** §3 item C: one pairing-strip thumbnail tile; a placeholder with the
+   *  page number when no preview is available (PDF-origin pages). */
+  const renderPairingThumb = (preview: BatchPagePreview | undefined) => (
+    preview?.previewUrl ? (
+      <img
+        src={preview.previewUrl}
+        alt=""
+        style={{ width: 36, height: 36, objectFit: 'cover', borderRadius: 4 }}
+      />
+    ) : (
+      <div
+        style={{
+          width: 36,
+          height: 36,
+          borderRadius: 4,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          background: 'var(--border-subtle)',
+          color: 'var(--text-muted)',
+          fontSize: 10,
+          fontWeight: 700,
+        }}
+      >
+        {preview ? preview.page : '?'}
+      </div>
+    )
   );
 
   return (
@@ -2070,27 +2518,36 @@ export default function ImageUploadPanel({
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 16 }}>
-            {renderUploadBox({
-              type: 'cagi',
-              title: '1단계: 선별검사지 묶음',
-              description: '앞면 이미지 여러 장 또는 선별검사지 PDF 1개를 업로드합니다.',
-              count: cagiCount,
-              uploading: isBatchProcessing,
-              inputRef: cagiInputRef,
-              multiple: true,
-              onChange: handleBatchFileChange,
-            })}
-            {renderUploadBox({
-              type: 'satisfaction',
-              title: '2단계: 만족도조사 묶음',
-              description: '뒷면 이미지 여러 장 또는 만족도조사 PDF 1개를 업로드합니다.',
-              count: satCount,
-              uploading: isBatchProcessing,
-              inputRef: satInputRef,
-              multiple: true,
-              onChange: handleBatchFileChange,
-            })}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+              {renderUploadBox({
+                type: 'cagi',
+                title: '1단계: 선별검사지 묶음',
+                description: '앞면 이미지 여러 장 또는 선별검사지 PDF 1개를 업로드합니다.',
+                count: cagiCount,
+                uploading: isBatchProcessing,
+                inputRef: cagiInputRef,
+                multiple: true,
+                onChange: handleBatchFileChange,
+              })}
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+              {renderUploadBox({
+                type: 'satisfaction',
+                title: '2단계: 만족도조사 묶음',
+                description: '뒷면 이미지 여러 장 또는 만족도조사 PDF 1개를 업로드합니다.',
+                count: satCount,
+                uploading: isBatchProcessing,
+                inputRef: satInputRef,
+                multiple: true,
+                onChange: handleBatchFileChange,
+              })}
+            </div>
           </div>
+          {/* The numbered review lists sit below the two-column grid at full width:
+              inside a column the filename wrapped letter by letter and the three
+              buttons ate the thumbnail (seen on the 2026-09-09 dev check). */}
+          {renderPendingBatchReview('cagi')}
+          {renderPendingBatchReview('satisfaction')}
 
           {(cagiCount > 0 || satCount > 0 || isBatchProcessing) && (
             <div className="panel panel-pad" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -2159,6 +2616,51 @@ export default function ImageUploadPanel({
                           {pairingLast.student}번 학생 = 선별검사지 {pairingLast.cagiPage}장 + 만족도조사 {pairingLast.satisfactionPage}장
                         </>
                       )}
+                    </div>
+                  )}
+                  {/* §3 item C: both kinds are uploaded here (isMismatch is
+                      false in this branch), so every student in `pairing`
+                      has a front and (mapped) back page to show. */}
+                  {(uploadedPreviews.cagi.length > 0 || uploadedPreviews.satisfaction.length > 0) && (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      <strong style={{ fontSize: 14 }}>학생별 짝 미리보기</strong>
+                      <div style={{ display: 'flex', gap: 10, overflowX: 'auto', paddingBottom: 4 }}>
+                        {pairing.map((row) => (
+                          <div
+                            key={row.student}
+                            style={{
+                              flex: '0 0 auto',
+                              width: 96,
+                              display: 'flex',
+                              flexDirection: 'column',
+                              alignItems: 'center',
+                              gap: 4,
+                              border: '1px solid var(--border-subtle)',
+                              borderRadius: 8,
+                              padding: 8,
+                            }}
+                          >
+                            <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-secondary)' }}>
+                              {row.student}번
+                            </span>
+                            <div style={{ display: 'flex', gap: 4 }}>
+                              {renderPairingThumb(cagiPreviewByPage.get(row.cagiPage))}
+                              {renderPairingThumb(satPreviewByPage.get(row.satisfactionPage))}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {/* §3 item D: no auto-fix -- just point at the students to check. */}
+                  {captureTimeWarnings.length > 0 && (
+                    <div className="notice" role="status" style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 14 }}>
+                      <strong>촬영 시각 순서 확인 필요</strong>
+                      {captureTimeWarnings.slice(0, 5).map(({ student, side }) => (
+                        <div key={student}>
+                          {student}번 학생: {side === 'both' ? '앞면·뒷면' : side === 'front' ? '앞면(선별검사지)' : '뒷면(만족도조사)'} 촬영 시각이 앞 학생보다 이릅니다 — 순서를 확인하세요.
+                        </div>
+                      ))}
                     </div>
                   )}
                 </div>
