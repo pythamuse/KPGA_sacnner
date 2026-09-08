@@ -1752,6 +1752,16 @@ export default function ImageUploadPanel({
         <strong>순서 확인:</strong> 앞면과 뒷면을 따로 올리는 경우 두 묶음의 학생 순서가 같아야 합니다.
         장수가 다르면 분석을 시작할 수 없습니다.
       </div>
+      {/* Pencil and mechanical-pencil marks are lost by the scanner (1-bit almost
+          entirely, grayscale faintly) and felt pen by 1-bit scans; the recogniser
+          cannot read what the scan never recorded (Task/VISION_THREEWAY_2026-09-08.md).
+          Tell the reviewer so those sheets get checked by eye, and the field so the
+          next class is filled in with ballpoint. */}
+      <div className="notice">
+        <strong>연필·샤프 안내:</strong> 연필이나 샤프로 작성된 응답은 스캔 과정에서 거의 사라져 인식률이 매우 낮습니다.
+        해당 학생은 원본을 보고 직접 확인해 주세요. 현장에서는 <strong>볼펜</strong>으로 작성하도록 안내해 주세요
+        (사인펜은 흑백 스캔에서 사라질 수 있습니다).
+      </div>
       {cameraError && <div className="error-box">{cameraError}</div>}
 
       {retakePrompt && (

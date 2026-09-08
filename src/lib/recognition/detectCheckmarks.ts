@@ -75,14 +75,29 @@ const RECOMMEND_NO_INK_SCORE = 0.008;
 
 /**
  * The option to recommend for a group the gates did not confirm, or undefined
- * when the group looks unanswered. A cancelled top box (cancel-crossing) is
- * skipped in favour of the next one, which is how V -> X -> V elsewhere reads.
+ * when the group looks unanswered or the refusal pattern is one that measured
+ * as ambiguous (rule D below).
  */
 function pickRecommendation(result: ChoiceGroupResult): CandidateScore | undefined {
+  // Which gates refused, from the decision string (fixed labels only).
+  const refused = ((result.decision.match(/refused=([^ \]]+)/) || [])[1] || 'none')
+    .split(',')
+    .filter((clause) => clause && !clause.startsWith('rescued'));
+  // Rule D (2026-09-08, Task/RECOMMEND_BEST_2026-09-07.md §6): over the four
+  // scan sets, recommending every unconfirmed group ran 64% right; the loss
+  // came from three strata. A cancelled top box, promoted to the runner-up,
+  // was right 4 times in 32 -- the X usually is the answer that got struck,
+  // not a pointer to the next box. Groups refused on gap / relative-contrast /
+  // medium-gap are the ambiguous two-box cases (14-40% right). mark-shape
+  // alone is a good sign (15/1) but with any other clause it is not (6/12).
+  // Keeping only the rest -- refused=none, absolute-floor, medium-path-not-
+  // offered, grid-unverified, lone mark-shape -- gives 97 right to 17 wrong
+  // (85%), 79-92% on every set, at half the recommendation count.
+  const ambiguous = ['cancel-crossing', 'gap', 'relative-contrast', 'medium-gap'];
+  if (refused.some((clause) => ambiguous.includes(clause))) return undefined;
+  if (refused.includes('mark-shape') && refused.length > 1) return undefined;
   const ranked = [...result.candidates].sort((a, b) => b.score - a.score);
-  if (ranked.length === 0) return undefined;
-  const cancelled = result.decision.includes('cancel-crossing');
-  const pick = cancelled ? ranked[1] : ranked[0];
+  const pick = ranked[0];
   if (!pick || !(pick.score >= RECOMMEND_NO_INK_SCORE)) return undefined;
   return pick;
 }
