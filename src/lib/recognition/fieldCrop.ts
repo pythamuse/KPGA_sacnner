@@ -128,6 +128,18 @@ export function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
 }
 
+/** The basic-info review window: label to the left, one box height above and below. */
+function widenForLabel(rect: PixelRect, image: { width: number; height: number }): PixelRect {
+  const width = rect.right - rect.left;
+  const height = rect.bottom - rect.top;
+  return {
+    left: clamp(Math.round(rect.left - width * 0.45), 0, image.width - 1),
+    right: clamp(Math.round(rect.right + width * 0.12), 1, image.width),
+    top: clamp(Math.round(rect.top - height * 1.2), 0, image.height - 1),
+    bottom: clamp(Math.round(rect.bottom + height * 1.2), 1, image.height),
+  };
+}
+
 export async function generateFieldCropBuffer(
   imagePath: string,
   field: string,
@@ -145,8 +157,20 @@ export async function generateFieldCropBuffer(
     await loadImageAnalysisData(imagePath),
     template.registrationFrame,
   );
-  const cropBox = pixelRect
-    ? getPixelCropBox(analysis, pixelRect, debug ? 0.07 : 0.022)
+  // Basic-info checkboxes are ~12px boxes beside a printed label, and the
+  // detected rect is the union of the boxes alone: with the cell-relative
+  // padding below, the review crop came out as a strip a few pixels taller
+  // than the boxes. A tick that lands on the label, or above the box -- which
+  // is how these forms are actually marked -- fell outside the strip, so the
+  // reviewer saw an empty box and called a marked cell blank (Docs/18 §5.3,
+  // Task/VISION_THREEWAY_2026-09-08.md). Widen the rect itself for basic
+  // fields: the label to the left, a box height above and below. The
+  // recogniser never reads this crop, so nothing here can change a value.
+  const reviewRect = pixelRect && field.startsWith('basic.')
+    ? widenForLabel(pixelRect, analysis)
+    : pixelRect;
+  const cropBox = reviewRect
+    ? getPixelCropBox(analysis, reviewRect, debug ? 0.07 : 0.022)
     : getCropBox(analysis, cropRect!, debug ? 0.07 : 0.022);
 
   const extracted = sharp(imagePath)

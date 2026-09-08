@@ -208,7 +208,10 @@ describe.skipIf(!CAGI_PDF || !SAT_PDF)('real scan measurement', () => {
     let tBlank = 0;
     let tOff = 0;
     let tMissing = 0;
+    let tCorrectRec = 0;
+    let tWrongRec = 0;
     const wrongDetail: string[] = [];
+    const wrongRecDetail: string[] = [];
 
     for (let i = 0; i < Math.min(cagiPngs.length, satPngs.length); i += 1) {
       const draft = await recognizeStudentForms(cagiPngs[i], satPngs[i]);
@@ -226,6 +229,11 @@ describe.skipIf(!CAGI_PDF || !SAT_PDF)('real scan measurement', () => {
       let correct = 0;
       let wrong = 0;
       let blank = 0;
+      // Recommend-the-best (2026-09-07) enters the top box as a contested
+      // recommendation where the gates did not confirm. Those are counted
+      // apart: the absolute condition below is about confirmed values.
+      let correctRec = 0;
+      let wrongRec = 0;
       const rows: string[] = [];
       // A null answer means the form itself carries no mark there, so the only
       // right behaviour is to leave the field blank. It is not scored as
@@ -238,6 +246,7 @@ describe.skipIf(!CAGI_PDF || !SAT_PDF)('real scan measurement', () => {
         const got = values[field];
         const hasKey = key ? field in key : false;
         const want = key?.[field];
+        const recommended = String(draft.recognitionDecisionTrace?.[field] ?? '').includes('recommend-best');
         let verdict = '-';
         if (got === undefined || got === null || got === '') {
           blank += 1;
@@ -245,30 +254,35 @@ describe.skipIf(!CAGI_PDF || !SAT_PDF)('real scan measurement', () => {
         } else if (!hasKey) {
           verdict = 'filled';
         } else if (want === null) {
-          wrong += 1;
-          verdict = 'WRONG (the form is unmarked here)';
-          wrongDetail.push(`p${i + 1} ${field}: got ${got}, but the form is unmarked, conf=${draft.confidence?.[field]}`);
+          if (recommended) wrongRec += 1; else wrong += 1;
+          verdict = recommended ? 'WRONG-rec (the form is unmarked here)' : 'WRONG (the form is unmarked here)';
+          (recommended ? wrongRecDetail : wrongDetail).push(`p${i + 1} ${field}: got ${got}, but the form is unmarked, conf=${draft.confidence?.[field]}`);
         } else if (String(got) === String(want)) {
-          correct += 1;
-          verdict = 'ok';
+          if (recommended) correctRec += 1; else correct += 1;
+          verdict = recommended ? 'ok-rec' : 'ok';
         } else {
-          wrong += 1;
-          verdict = `WRONG (want ${want})`;
-          wrongDetail.push(`p${i + 1} ${field}: got ${got}, want ${want}, conf=${draft.confidence?.[field]}`);
+          if (recommended) wrongRec += 1; else wrong += 1;
+          verdict = recommended ? `WRONG-rec (want ${want})` : `WRONG (want ${want})`;
+          (recommended ? wrongRecDetail : wrongDetail).push(`p${i + 1} ${field}: got ${got}, want ${want}, conf=${draft.confidence?.[field]}`);
         }
         rows.push(`  ${field.padEnd(18)} got=${String(got ?? '-').padEnd(7)} conf=${String(draft.confidence?.[field] ?? '-').padEnd(7)} src=${String(draft.recognitionCropSource?.[field] ?? '-').padEnd(12)} ${verdict}`);
       }
 
-      tCorrect += correct; tWrong += wrong; tBlank += blank; tAnswerable += answerable;
+      tCorrect += correct; tWrong += wrong; tBlank += blank; tAnswerable += answerable; tCorrectRec += correctRec; tWrongRec += wrongRec;
       tOff += coords.off; tMissing += coords.missing;
 
       report.push(`\n--- student page ${i + 1} ---`);
-      report.push(`CORRECT ${correct}/${answerable}   WRONG ${wrong}   BLANK ${blank}   OFF ${coords.off}   MISSING ${coords.missing}`);
+      report.push(`CORRECT ${correct}/${answerable}   WRONG ${wrong}   BLANK ${blank}   OFF ${coords.off}   MISSING ${coords.missing}   REC ok ${correctRec} wrong ${wrongRec}`);
       report.push(...rows);
     }
 
     report.push('\n================ TOTAL ================');
     report.push(`CORRECT ${tCorrect}/${tAnswerable}   WRONG ${tWrong}   BLANK ${tBlank}   OFF ${tOff}   MISSING ${tMissing}`);
+    report.push(`RECOMMENDED (contested, reviewer confirms): ok ${tCorrectRec}   wrong ${tWrongRec}   precision ${tCorrectRec + tWrongRec ? Math.round((100 * tCorrectRec) / (tCorrectRec + tWrongRec)) : 0}%`);
+    if (wrongRecDetail.length) {
+      report.push('\n--- wrong recommendations (badged, not confirmed values) ---');
+      report.push(...wrongRecDetail.map((d) => `  ${d}`));
+    }
     if (wrongDetail.length) {
       report.push('\n!!! WRONG AUTO-FILLED VALUES !!!');
       report.push(...wrongDetail.map((d) => `  ${d}`));
