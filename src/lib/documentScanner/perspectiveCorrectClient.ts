@@ -1,5 +1,6 @@
 import type { QuadRejection } from './perspectiveCorrect';
 import type { FrameExposureSample, LiveQuadQuality } from './captureGuidance';
+import type { FormAlignScore, FormAlignScores } from '../formSplit';
 
 export type PerspectiveCorrectionReason =
   | 'no-document'
@@ -56,6 +57,12 @@ type WorkerRequest =
     requestId: string;
     imageData: ImageData;
     expectedAspectRatio: number;
+  }
+  | {
+    /** Front-or-back classification: ORB against both templates, no warp. */
+    type: 'classifyForm';
+    requestId: string;
+    imageData: ImageData;
   };
 
 type WorkerResponse =
@@ -87,6 +94,13 @@ type WorkerResponse =
     reason: 'no-document' | 'low-confidence' | 'worker-error';
     rejection?: QuadRejection | null;
     registration: RegistrationMeta;
+  }
+  | {
+    type: 'classify-result';
+    requestId: string;
+    ok: boolean;
+    cagi: FormAlignScore;
+    satisfaction: FormAlignScore;
   };
 
 type InFlightRequest = {
@@ -173,7 +187,10 @@ function getWorker(): Worker | null {
     const message = event.data;
     if (
       !message ||
-      (message.type !== 'ready' && message.type !== 'result' && message.type !== 'detect-result')
+      (message.type !== 'ready'
+        && message.type !== 'result'
+        && message.type !== 'detect-result'
+        && message.type !== 'classify-result')
     ) {
       return;
     }
@@ -334,6 +351,53 @@ export async function correctImageInWorkerDetailed(
     blob: response.blob,
     registration: response.registration ?? emptyRegistration(),
   };
+}
+
+const EMPTY_FORM_SCORES: FormAlignScores = {
+  cagi: { inliers: 0, goodMatches: 0, inlierRatio: 0 },
+  satisfaction: { inliers: 0, goodMatches: 0, inlierRatio: 0 },
+};
+
+/**
+ * Front or back? Aligns one photo against BOTH ORB templates in the worker and
+ * returns the two scores (PHOTO_BATCH_ORDER §3 item E). The rule that turns
+ * them into a side lives in `src/lib/formSplit.ts`.
+ *
+ * All-zero scores on worker unavailability/timeout/error: `decideFormSide`
+ * refuses those, so a failure shows up as an undecided row the user sets by
+ * hand -- never as a guessed side. Uses the same shared worker (and therefore
+ * the same warmed-up OpenCV) as the correction that follows.
+ */
+export async function classifyFormInWorker(
+  bitmapSource: HTMLCanvasElement,
+  timeoutMs = 9000,
+): Promise<FormAlignScores> {
+  if (typeof window === 'undefined') return EMPTY_FORM_SCORES;
+
+  const worker = getWorker();
+  if (!worker) return EMPTY_FORM_SCORES;
+
+  const context = bitmapSource.getContext('2d');
+  if (!context || bitmapSource.width <= 0 || bitmapSource.height <= 0) return EMPTY_FORM_SCORES;
+
+  let imageData: ImageData;
+  try {
+    imageData = context.getImageData(0, 0, bitmapSource.width, bitmapSource.height);
+  } catch {
+    return EMPTY_FORM_SCORES;
+  }
+
+  const response = await requestWorker(worker, {
+    type: 'classifyForm',
+    requestId: createRequestId(),
+    imageData,
+  }, timeoutMs, [imageData.data.buffer]);
+
+  if (!response || response.type !== 'classify-result' || !response.ok) {
+    return EMPTY_FORM_SCORES;
+  }
+
+  return { cagi: response.cagi, satisfaction: response.satisfaction };
 }
 
 /** Reply shape of a live guidance frame; points are in `width` x `height`. */

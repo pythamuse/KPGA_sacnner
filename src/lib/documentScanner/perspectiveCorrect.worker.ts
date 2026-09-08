@@ -78,6 +78,19 @@ type WorkerRequest =
     requestId: string;
     imageData: ImageData;
     expectedAspectRatio: number;
+  }
+  | {
+    /**
+     * Which form is this photo? (PHOTO_BATCH_ORDER_2026-09-09.md §3 item E.)
+     * Builds the same detection frame `correct` builds and runs
+     * `alignToTemplate` against BOTH templates, returning the two scores. No
+     * quad detection, no warp, no blob -- the caller only needs the numbers,
+     * and it is about to run the real correction on the same photo once its
+     * side is known.
+     */
+    type: 'classifyForm';
+    requestId: string;
+    imageData: ImageData;
   };
 
 /** The subset of QuadQuality the live overlay needs; see the client's mirror. */
@@ -125,7 +138,22 @@ type CorrectResponse =
     reason: 'no-document' | 'low-confidence' | 'worker-error';
     rejection?: QuadRejection | null;
     registration: RegistrationMeta;
+  }
+  | {
+    /** Reply to `classifyForm`; `ok: false` means the frame was unreadable. */
+    type: 'classify-result';
+    requestId: string;
+    ok: boolean;
+    cagi: FormAlignScore;
+    satisfaction: FormAlignScore;
   };
+
+/** Mirrors FormAlignScore in src/lib/formSplit.ts (the exported home). */
+interface FormAlignScore {
+  inliers: number;
+  goodMatches: number;
+  inlierRatio: number;
+}
 
 const workerSelf = self as unknown as {
   cv?: any;
@@ -454,6 +482,63 @@ async function detectAndWarp(
 }
 
 /**
+ * Aligns one photo against BOTH ORB templates and reports the two scores
+ * (PHOTO_BATCH_ORDER §3 item E). The decision itself is NOT made here -- it
+ * lives in the pure, unit-tested `src/lib/formSplit.ts` so the UI, the tests
+ * and the offline e2e script all use the same rule.
+ *
+ * The detection frame is built exactly as `detectAndWarp` builds it (resize to
+ * DETECTION_LONG_SIDE with INTER_AREA, then RGBA -> GRAY): stage 1's 114/114
+ * was measured on that frame, so classifying on any other one would be
+ * measuring something else.
+ */
+function classifyBothTemplates(
+  cv: any,
+  imageData: ImageData,
+): { cagi: FormAlignScore; satisfaction: FormAlignScore } {
+  const sourceFull = cv.matFromImageData(imageData);
+  let detection = sourceFull;
+  let detectionOwned = false;
+  const gray = new cv.Mat();
+
+  try {
+    const fullWidth = imageData.width;
+    const fullHeight = imageData.height;
+    const longSide = Math.max(fullWidth, fullHeight);
+    if (longSide > DETECTION_LONG_SIDE) {
+      const scale = DETECTION_LONG_SIDE / longSide;
+      detection = new cv.Mat();
+      detectionOwned = true;
+      cv.resize(
+        sourceFull,
+        detection,
+        new cv.Size(Math.max(1, Math.round(fullWidth * scale)), Math.max(1, Math.round(fullHeight * scale))),
+        0,
+        0,
+        cv.INTER_AREA,
+      );
+    }
+
+    cv.cvtColor(detection, gray, cv.COLOR_RGBA2GRAY);
+
+    const score = (form: 'cagi' | 'satisfaction'): FormAlignScore => {
+      const alignment = alignToTemplate(cv, gray, ORB_TEMPLATES[form]);
+      return {
+        inliers: alignment.inliers,
+        goodMatches: alignment.goodMatches,
+        inlierRatio: alignment.inlierRatio,
+      };
+    };
+
+    return { cagi: score('cagi'), satisfaction: score('satisfaction') };
+  } finally {
+    gray.delete();
+    if (detectionOwned) detection.delete();
+    sourceFull.delete();
+  }
+}
+
+/**
  * Quad detection and tone, on the frame exactly as received.
  *
  * The exposure pass is deliberately downstream of the quad: it needs the four
@@ -517,9 +602,17 @@ function detectOnly(
   }
 }
 
+const EMPTY_FORM_SCORE: FormAlignScore = { inliers: 0, goodMatches: 0, inlierRatio: 0 };
+
 workerSelf.onmessage = (event) => {
   const message = event.data;
-  if (!message || (message.type !== 'correct' && message.type !== 'warmup' && message.type !== 'detect')) {
+  if (
+    !message
+    || (message.type !== 'correct'
+      && message.type !== 'warmup'
+      && message.type !== 'detect'
+      && message.type !== 'classifyForm')
+  ) {
     return;
   }
 
@@ -542,6 +635,18 @@ workerSelf.onmessage = (event) => {
           width: message.imageData.width,
           height: message.imageData.height,
           exposure: detection.exposure,
+        });
+        return;
+      }
+
+      if (message.type === 'classifyForm') {
+        const scores = classifyBothTemplates(cv, message.imageData);
+        workerSelf.postMessage({
+          type: 'classify-result',
+          requestId: message.requestId,
+          ok: true,
+          cagi: scores.cagi,
+          satisfaction: scores.satisfaction,
         });
         return;
       }
@@ -590,6 +695,19 @@ workerSelf.onmessage = (event) => {
           width: 0,
           height: 0,
           exposure: null,
+        });
+        return;
+      }
+
+      if (message.type === 'classifyForm') {
+        // Zero scores decide nothing: `decideFormSide` refuses them and the
+        // row stays undecided for the user to set.
+        workerSelf.postMessage({
+          type: 'classify-result',
+          requestId: message.requestId,
+          ok: false,
+          cagi: EMPTY_FORM_SCORE,
+          satisfaction: EMPTY_FORM_SCORE,
         });
         return;
       }

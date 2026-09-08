@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { withTimeout } from '@/lib/pdf/withTimeout';
 import {
+  classifyFormInWorker,
   correctImageInWorkerDetailed,
   detectQuadInWorker,
   warmupPerspectiveWorker,
@@ -44,6 +45,7 @@ import {
 import { cagiTemplate, satisfactionTemplate } from '@/lib/recognition/roiTemplates';
 import { describePairing, type StackOrder } from '@/lib/recognition/batchMatcher';
 import { readCaptureTime, sortBatchImages } from '@/lib/uploadOrder';
+import { decideFormSide, splitBySide, type FormSide } from '@/lib/formSplit';
 import {
   STATELESS_RECOGNIZE_ENABLED,
   type StatelessPage,
@@ -113,6 +115,27 @@ type PendingBatchEntry = {
 };
 
 /**
+ * One row of the COMBINED review list (§3 item E): both sides picked in one
+ * go, ordered by capture time, each row carrying the side the ORB classifier
+ * decided. `side` is what the split actually uses -- it starts as the
+ * classifier's answer (null when refused) and the user can override it with
+ * the row's 앞면/뒷면 toggle, so a wrong classification costs one tap.
+ * Images only: a PDF's pages are already one form's stack and belong in that
+ * form's own drop zone.
+ */
+type CombinedBatchEntry = {
+  id: string;
+  file: File;
+  captureTime: number | null;
+  previewUrl: string;
+  side: FormSide | null;
+  /** What the classifier said, kept so the row can show when the user overrode it. */
+  predictedSide: FormSide | null;
+  bestInliers: number;
+  margin: number;
+};
+
+/**
  * A page's thumbnail carried forward from the review list to after upload,
  * for the pairing strip (item C). `previewUrl` is null for a page that came
  * from a PDF -- the review list never rendered PDF pages to build a
@@ -161,6 +184,12 @@ const PERSPECTIVE_CORRECTION_TIMEOUT_MS = 9000;
 const BATCH_DETECTION_DIMENSION = 1100;
 const BATCH_WORKER_WARMUP_TIMEOUT_MS = 9000;
 const BATCH_PAGE_CORRECTION_TIMEOUT_MS = 3000;
+/**
+ * Budget for one photo's front/back classification (§3 item E). Two
+ * `alignToTemplate` calls: stage 1 measured 194ms each in Node, so this is
+ * ~20x headroom for a slow phone. A timeout leaves the row undecided.
+ */
+const FORM_CLASSIFY_TIMEOUT_MS = 8000;
 const BATCH_MIN_CORRECTION_CONFIDENCE = 0.62;
 // Re-enabled: OpenCV work now runs in a dedicated Worker (see perspectiveCorrectClient.ts /
 // perspectiveCorrect.worker.ts) instead of the main thread, with a real, enforceable timeout
@@ -317,6 +346,10 @@ const revokePendingBatchEntries = (entries: PendingBatchEntry[]) => {
   entries.forEach((entry) => {
     if (entry.previewUrl) URL.revokeObjectURL(entry.previewUrl);
   });
+};
+
+const revokeCombinedBatchEntries = (entries: CombinedBatchEntry[]) => {
+  entries.forEach((entry) => URL.revokeObjectURL(entry.previewUrl));
 };
 
 const revokeBatchPagePreviews = (previews: BatchPagePreview[]) => {
@@ -504,22 +537,28 @@ export default function ImageUploadPanel({
     cagi: null,
     satisfaction: null,
   });
+  // §3 item E: one pick holding both sides, before it is split into the two
+  // stacks above. Null means no combined pick is being reviewed.
+  const [pendingCombined, setPendingCombined] = useState<CombinedBatchEntry[] | null>(null);
   // §3 item C: per-page thumbnails kept after upload for the pairing strip.
   const [uploadedPreviews, setUploadedPreviews] = useState<Record<UploadKind, BatchPagePreview[]>>({
     cagi: [],
     satisfaction: [],
   });
-  // Mirrors the two states above for the unmount cleanup effect, which must
+  // Mirrors the states above for the unmount cleanup effect, which must
   // see the latest object URLs and not whatever was current when the effect
   // was installed.
   const pendingBatchRef = useRef(pendingBatch);
+  const pendingCombinedRef = useRef(pendingCombined);
   const uploadedPreviewsRef = useRef(uploadedPreviews);
   useEffect(() => { pendingBatchRef.current = pendingBatch; }, [pendingBatch]);
+  useEffect(() => { pendingCombinedRef.current = pendingCombined; }, [pendingCombined]);
   useEffect(() => { uploadedPreviewsRef.current = uploadedPreviews; }, [uploadedPreviews]);
   useEffect(() => {
     return () => {
       revokePendingBatchEntries(pendingBatchRef.current.cagi ?? []);
       revokePendingBatchEntries(pendingBatchRef.current.satisfaction ?? []);
+      revokeCombinedBatchEntries(pendingCombinedRef.current ?? []);
       revokeBatchPagePreviews(uploadedPreviewsRef.current.cagi);
       revokeBatchPagePreviews(uploadedPreviewsRef.current.satisfaction);
     };
@@ -552,6 +591,22 @@ export default function ImageUploadPanel({
 
   const cagiInputRef = useRef<HTMLInputElement>(null);
   const satInputRef = useRef<HTMLInputElement>(null);
+  const combinedInputRef = useRef<HTMLInputElement>(null);
+  /**
+   * Did the last `processBatchItems` stop at the F2 retake gate? The combined
+   * confirm runs the two stacks back to back, and a second run would replace
+   * the first one's still-unanswered gate -- the user would lose the front
+   * stack's prompt and its pages would never upload. Read right after each
+   * await; a ref, because the `batchReview` state is not visible to the
+   * closure that just set it.
+   */
+  const batchGateHeldRef = useRef<boolean>(false);
+  /**
+   * The back stack a combined confirm could not run yet because the front
+   * stack stopped at that gate. Answering the gate (proceed or cancel)
+   * releases it; `null` whenever nothing is waiting.
+   */
+  const deferredBackStackRef = useRef<CombinedBatchEntry[] | null>(null);
   const cameraVideoRef = useRef<HTMLVideoElement>(null);
   const cameraCanvasRef = useRef<HTMLCanvasElement>(null);
   const cameraStreamRef = useRef<MediaStream | null>(null);
@@ -1280,6 +1335,7 @@ export default function ImageUploadPanel({
     if (retakePages.length > 0) {
       // F2 batch gate: hold the whole bundle and let the user decide with
       // the failed pages named, instead of uploading originals silently.
+      batchGateHeldRef.current = true;
       setBatchReview({ type, batch, pages: preparedPages, warnings: correctionWarnings });
       return;
     }
@@ -1295,13 +1351,24 @@ export default function ImageUploadPanel({
    * PDF-only pick -- which never had a review list -- simply gets an empty
    * lookup and every page falls back to a placeholder tile.
    */
-  const runBatchFromRawFiles = async (type: UploadKind, rawFiles: File[]) => {
+  const runBatchFromRawFiles = async (
+    type: UploadKind,
+    rawFiles: File[],
+    /**
+     * Thumbnails/capture times to carry forward, when they do not live in
+     * `pendingBatch[type]`. The combined pick (§3 item E) holds its rows in
+     * `pendingCombined` instead, so it passes the matching half here;
+     * everything else omits it and behaves exactly as before.
+     */
+    previewSource?: Array<{ file: File; captureTime: number | null; previewUrl: string | null }>,
+  ) => {
     setIsBatchProcessing(true);
     setBatchStatusMessage('파일을 확인하고 있습니다.');
     setBatchCorrectionWarnings((previous) => previous.filter((warning) => warning.type !== type));
+    batchGateHeldRef.current = false;
 
     const previewByFile = new Map<File, { previewUrl: string; captureTime: number | null }>();
-    const reviewEntries = pendingBatch[type];
+    const reviewEntries = previewSource ?? pendingBatch[type];
     if (reviewEntries) {
       for (const entry of reviewEntries) {
         if (entry.previewUrl) {
@@ -1458,6 +1525,156 @@ export default function ImageUploadPanel({
     });
   };
 
+  // ---------------------------------------------------------------------
+  // §3 item E: "앞·뒷면 한 번에 선택"
+  // ---------------------------------------------------------------------
+
+  /**
+   * One combined pick: sort by capture time (item A), then ask the worker
+   * which form each photo is and stage a single reviewable list.
+   *
+   * The classifier runs on the SAME detection frame the correction runs on, so
+   * the photo is decoded once at FULL_RESOLUTION_DIMENSION and the worker
+   * downscales internally -- the same input stage 1 measured 114/114 on.
+   * Classification never uploads or prepares anything: the two stacks only
+   * reach the existing pipeline when the user presses "이 순서로 등록".
+   */
+  const handleCombinedFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+    const fileArray = Array.from(files).filter((file) => file.type.startsWith('image/'));
+    if (e.target) e.target.value = '';
+
+    if (fileArray.length === 0) {
+      alert('이미지 파일을 선택해주세요. PDF는 아래의 각 묶음 칸에 올려주세요.');
+      return;
+    }
+
+    setIsBatchProcessing(true);
+    setBatchStatusMessage('사진 촬영 시각을 확인하고 있습니다.');
+    const created: string[] = [];
+    try {
+      const captureTimes = await Promise.all(fileArray.map((file) => readCaptureTime(file)));
+      const ordered = sortBatchImages(fileArray.map((file, i) => ({ file, captureTime: captureTimes[i] })));
+
+      if (PERSPECTIVE_CORRECTION_ENABLED) {
+        setBatchStatusMessage('페이지 보정 엔진을 준비하고 있습니다.');
+        await warmupPerspectiveWorker(BATCH_WORKER_WARMUP_TIMEOUT_MS);
+      }
+
+      const total = ordered.length;
+      const entries: CombinedBatchEntry[] = [];
+      for (let i = 0; i < total; i += 1) {
+        const { file, captureTime } = ordered[i];
+        setBatchStatusMessage(`앞면·뒷면을 구분하고 있습니다 (${i + 1}/${total})`);
+
+        let decision = decideFormSide({
+          cagi: { inliers: 0, goodMatches: 0, inlierRatio: 0 },
+          satisfaction: { inliers: 0, goodMatches: 0, inlierRatio: 0 },
+        });
+        try {
+          const canvas = await createDetectionCanvas(file, FULL_RESOLUTION_DIMENSION);
+          try {
+            decision = decideFormSide(await classifyFormInWorker(canvas, FORM_CLASSIFY_TIMEOUT_MS));
+          } finally {
+            canvas.width = 1;
+            canvas.height = 1;
+          }
+        } catch {
+          // An unreadable photo stays undecided rather than taking a side;
+          // the row shows the "골라주세요" hint like any other refusal.
+        }
+
+        const previewUrl = URL.createObjectURL(file);
+        created.push(previewUrl);
+        entries.push({
+          id: createBatchId(),
+          file,
+          captureTime,
+          previewUrl,
+          side: decision.side,
+          predictedSide: decision.side,
+          bestInliers: decision.bestInliers,
+          margin: decision.margin,
+        });
+      }
+
+      setPendingCombined((previous) => {
+        if (previous) revokeCombinedBatchEntries(previous);
+        return entries;
+      });
+    } catch (err: any) {
+      created.forEach((url) => URL.revokeObjectURL(url));
+      alert(`사진을 구분하는 중 오류가 발생했습니다: ${err.message}`);
+    } finally {
+      setIsBatchProcessing(false);
+      setBatchStatusMessage('');
+    }
+  };
+
+  const setCombinedEntrySide = (id: string, side: FormSide) => {
+    setPendingCombined((previous) => (previous
+      ? previous.map((entry) => (entry.id === id
+        // Tapping the side a row already has clears it, so a user who
+        // realises they are unsure can put the row back into "골라주세요".
+        ? { ...entry, side: entry.side === side ? null : side }
+        : entry))
+      : previous));
+  };
+
+  const removeCombinedEntry = (id: string) => {
+    setPendingCombined((previous) => {
+      if (!previous) return previous;
+      const removed = previous.find((entry) => entry.id === id);
+      if (removed) URL.revokeObjectURL(removed.previewUrl);
+      return previous.filter((entry) => entry.id !== id);
+    });
+  };
+
+  const clearPendingCombined = () => {
+    setPendingCombined((previous) => {
+      if (previous) revokeCombinedBatchEntries(previous);
+      return null;
+    });
+  };
+
+  /**
+   * "이 순서로 등록": split the reviewed list and hand each half to the
+   * existing per-kind pipeline, front first. Nothing new happens downstream --
+   * the pairing strip, the capture-time warning and the count-mismatch block
+   * all see exactly what they would have seen from two separate picks.
+   */
+  const confirmPendingCombined = async () => {
+    const entries = pendingCombined;
+    if (!entries) return;
+    const split = splitBySide(entries);
+    if (!split.ready) return;
+
+    // Preview-URL ownership moves into `uploadedPreviews` inside
+    // `runBatchFromRawFiles` (matched by File identity), so this clears the
+    // list without revoking.
+    setPendingCombined(null);
+    setSatisfactionOrder('same');
+    deferredBackStackRef.current = split.satisfaction;
+
+    await runBatchFromRawFiles('cagi', split.cagi.map((entry) => entry.file), split.cagi);
+    if (batchGateHeldRef.current) {
+      // The front stack is waiting on the F2 retake prompt. Running the back
+      // stack now would replace that prompt and strand the front pages, so it
+      // waits in `deferredBackStackRef` until that prompt is answered.
+      return;
+    }
+    await runDeferredBackStack();
+  };
+
+  /** Runs (once) the back stack the combined confirm held back, if any. */
+  const runDeferredBackStack = async () => {
+    const back = deferredBackStackRef.current;
+    deferredBackStackRef.current = null;
+    if (!back) return;
+    await runBatchFromRawFiles('satisfaction', back.map((entry) => entry.file), back);
+  };
+
   /**
    * Flag-on: the same prepared pages, kept in memory instead of uploaded.
    *
@@ -1524,6 +1741,10 @@ export default function ImageUploadPanel({
   const cancelBatchReview = () => {
     setBatchReview(null);
     setBatchStatusMessage('');
+    // "다시 선택" abandons this stack, so the combined pick's other half is
+    // abandoned with it -- registering only the back stack would pair the
+    // wrong sheets together.
+    deferredBackStackRef.current = null;
   };
 
   const proceedBatchReview = async () => {
@@ -1556,10 +1777,16 @@ export default function ImageUploadPanel({
       await uploadPreparedBatch(type, batch, overriddenPages, [...warnings, ...overrideWarnings]);
     } catch (err: any) {
       alert(`업로드 처리 중 오류가 발생했습니다: ${err.message}`);
+      deferredBackStackRef.current = null;
     } finally {
       setIsBatchProcessing(false);
       setBatchStatusMessage('');
     }
+
+    // The combined pick's back stack, held while this gate was open. Outside
+    // the try/finally above so it manages its own processing flag exactly as
+    // it would have from `confirmPendingCombined`.
+    if (type === 'cagi') await runDeferredBackStack();
   };
 
   const handleSequentialFileChange = async (e: React.ChangeEvent<HTMLInputElement>, type: UploadKind): Promise<void> => {
@@ -1884,6 +2111,11 @@ export default function ImageUploadPanel({
         revokePendingBatchEntries(previous.satisfaction ?? []);
         return { cagi: null, satisfaction: null };
       });
+      deferredBackStackRef.current = null;
+      setPendingCombined((previous) => {
+        if (previous) revokeCombinedBatchEntries(previous);
+        return null;
+      });
       setUploadedPreviews((previous) => {
         revokeBatchPagePreviews(previous.cagi);
         revokeBatchPagePreviews(previous.satisfaction);
@@ -2156,6 +2388,153 @@ export default function ImageUploadPanel({
             className="btn-secondary"
             type="button"
             onClick={() => clearPendingBatch(type)}
+            disabled={isBatchProcessing}
+          >
+            다시 선택
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  /**
+   * §3 item E: the combined "앞·뒷면 한 번에 선택" review list. Same numbered
+   * rows as the per-kind list, plus a 앞면/뒷면 toggle per row. The visible
+   * number is the row's position WITHIN ITS SIDE (앞면 1, 앞면 2, ..., 뒷면 1,
+   * ...) because that number is the student it will be paired as; the overall
+   * position is shown muted beside it.
+   */
+  const renderCombinedBatchReview = () => {
+    if (!pendingCombined || pendingCombined.length === 0) return null;
+    const split = splitBySide(pendingCombined);
+    const frontCount = split.cagi.length;
+    const backCount = split.satisfaction.length;
+
+    // Position within its own side, per row id.
+    const sideIndex = new Map<string, number>();
+    let frontSeen = 0;
+    let backSeen = 0;
+    for (const entry of pendingCombined) {
+      if (entry.side === 'cagi') { frontSeen += 1; sideIndex.set(entry.id, frontSeen); }
+      else if (entry.side === 'satisfaction') { backSeen += 1; sideIndex.set(entry.id, backSeen); }
+    }
+
+    const sideOptions: Array<{ value: FormSide; label: string }> = [
+      { value: 'cagi', label: '앞면' },
+      { value: 'satisfaction', label: '뒷면' },
+    ];
+
+    return (
+      <div className="panel panel-pad" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div>
+          <strong style={{ fontSize: 15 }}>앞·뒷면 구분 확인 ({pendingCombined.length}장)</strong>
+          <p style={{ margin: '4px 0 0', fontSize: 13, color: 'var(--text-muted)' }}>
+            촬영 시각으로 정렬하고 앞면·뒷면을 자동으로 나눴습니다. 배지가 맞는지 확인하고, 다르면 눌러서 바꿔주세요.
+          </p>
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 420, overflowY: 'auto' }}>
+          {pendingCombined.map((entry, index) => (
+            <div
+              key={entry.id}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 10,
+                border: '1px solid var(--border-subtle)',
+                borderRadius: 8,
+                padding: 8,
+              }}
+            >
+              <span
+                aria-hidden="true"
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  width: 28,
+                  height: 28,
+                  flexShrink: 0,
+                  borderRadius: '50%',
+                  background: entry.side ? 'var(--brand-soft)' : 'var(--border-subtle)',
+                  color: entry.side ? 'var(--brand-primary)' : 'var(--text-muted)',
+                  fontWeight: 700,
+                  fontSize: 14,
+                }}
+              >
+                {sideIndex.get(entry.id) ?? '-'}
+              </span>
+              <img
+                src={entry.previewUrl}
+                alt=""
+                style={{ width: 64, height: 64, objectFit: 'cover', borderRadius: 6, flexShrink: 0 }}
+              />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13, color: 'var(--text-secondary)', wordBreak: 'break-all' }}>
+                  {entry.side === 'cagi' ? '앞면 ' : entry.side === 'satisfaction' ? '뒷면 ' : ''}
+                  {sideIndex.get(entry.id) ?? ''}
+                  {entry.side ? ' · ' : ''}
+                  {entry.file.name}
+                </div>
+                <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                  전체 {index + 1}번 · {formatCaptureTime(entry.captureTime)}
+                  {entry.side && entry.predictedSide && entry.side !== entry.predictedSide ? ' · 직접 지정함' : ''}
+                </div>
+                {!entry.side && (
+                  <div style={{ fontSize: 12, color: 'var(--brand-primary)', fontWeight: 700 }}>
+                    앞면/뒷면을 골라주세요
+                  </div>
+                )}
+              </div>
+              <div style={{ display: 'flex', gap: 4, flexShrink: 0 }} role="group" aria-label={`${index + 1}번 사진 면 선택`}>
+                {sideOptions.map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    className={entry.side === option.value ? 'btn-primary' : 'btn-secondary'}
+                    style={{ minHeight: 40, padding: '4px 12px', fontSize: 13 }}
+                    aria-pressed={entry.side === option.value}
+                    onClick={() => setCombinedEntrySide(entry.id, option.value)}
+                    disabled={isBatchProcessing}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  style={{ minHeight: 40, padding: '4px 10px', fontSize: 12 }}
+                  onClick={() => removeCombinedEntry(entry.id)}
+                  disabled={isBatchProcessing}
+                >
+                  빼기
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+        {split.undecidedCount > 0 && (
+          <div className="error-box">
+            {split.undecidedCount}장의 앞면·뒷면을 정하지 못했습니다. 해당 사진의 앞면 또는 뒷면을 골라주세요.
+          </div>
+        )}
+        {split.undecidedCount === 0 && frontCount !== backCount && (
+          <div className="error-box">
+            앞면 {frontCount}장, 뒷면 {backCount}장 — 장수가 같아야 합니다.
+          </div>
+        )}
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          <button
+            className="btn-primary"
+            type="button"
+            onClick={() => void confirmPendingCombined()}
+            disabled={isBatchProcessing || !split.ready}
+          >
+            이 순서로 등록 (앞면 {frontCount}장 · 뒷면 {backCount}장)
+          </button>
+          <button
+            className="btn-secondary"
+            type="button"
+            onClick={clearPendingCombined}
             disabled={isBatchProcessing}
           >
             다시 선택
@@ -2517,6 +2896,44 @@ export default function ImageUploadPanel({
         )
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          {/* §3 item E: one pick for both sides. Above the two per-kind zones
+              because it replaces both of them when it is used; the two zones
+              stay for PDFs and for picking one side at a time. */}
+          <div
+            className="panel"
+            style={{
+              padding: 22,
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 14,
+              borderStyle: pendingCombined ? 'solid' : 'dashed',
+              borderColor: pendingCombined ? 'var(--brand-primary)' : 'var(--border-medium)',
+            }}
+          >
+            <input
+              type="file"
+              ref={combinedInputRef}
+              style={{ display: 'none' }}
+              accept="image/*"
+              multiple
+              onChange={(e) => void handleCombinedFileChange(e)}
+            />
+            <div>
+              <strong style={{ fontSize: 17 }}>앞·뒷면 한 번에 선택</strong>
+              <p style={{ margin: '8px 0 0', color: 'var(--text-muted)', fontSize: 14, lineHeight: 1.6 }}>
+                학생 순서대로 찍은 사진을 전부 고르면 촬영 시각으로 정렬하고 앞면·뒷면을 자동으로 나눕니다.
+              </p>
+            </div>
+            <button
+              className="btn-secondary"
+              type="button"
+              onClick={() => !isBatchProcessing && combinedInputRef.current?.click()}
+              disabled={isBatchProcessing}
+            >
+              {pendingCombined ? '다시 선택' : '사진 전체 선택'}
+            </button>
+          </div>
+          {renderCombinedBatchReview()}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 16 }}>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
               {renderUploadBox({
