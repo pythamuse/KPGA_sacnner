@@ -51,6 +51,9 @@ describe.skipIf(!CAGI_DIR || !SAT_DIR)('photo accuracy probe', () => {
     let correct = 0;
     let wrong = 0;
     let blankLeft = 0;
+    let correctRec = 0;
+    let wrongRec = 0;
+    const wrongRecRows: string[] = [];
     const wrongRows: string[] = [];
     const blankViolations: string[] = [];
 
@@ -63,6 +66,7 @@ describe.skipIf(!CAGI_DIR || !SAT_DIR)('photo accuracy probe', () => {
         satisfactionPhotoProvenance: true,
       }) as unknown as Record<string, unknown>;
       const source = (draft.recognitionValueSource || {}) as Record<string, string>;
+      const trace = (draft.recognitionDecisionTrace || {}) as Record<string, string>;
       const flat: Record<string, unknown> = {
         ...Object.fromEntries(Object.entries((draft.basic || {}) as object).map(([k, v]) => [`basic.${k}`, v])),
         ...Object.fromEntries(Object.entries((draft.cagi || {}) as object).map(([k, v]) => [`cagi.${k}`, v])),
@@ -74,24 +78,30 @@ describe.skipIf(!CAGI_DIR || !SAT_DIR)('photo accuracy probe', () => {
       let studentCorrect = 0;
       let studentWrong = 0;
       let studentBlank = 0;
+      let studentCorrectRec = 0;
+      let studentWrongRec = 0;
       for (const [field, want] of Object.entries(keyRow)) {
         if (field === 'page') continue;
         const value = flat[field];
         const autoFilled = source[field] === 'auto' && value != null && value !== '';
+        const recommended = String(trace[field] ?? '').includes('recommend-best');
 
         if (want === null) {
           // The key says this cell is unmarked. Filling it is the failure the
           // whole gate exists to prevent -- a reviewer's blank is one keystroke,
           // a wrong value is stored as if a human confirmed it.
           if (autoFilled) {
-            blankViolations.push(`p${i + 1} ${field} filled "${String(value)}"`);
-            studentWrong += 1;
+            blankViolations.push(`p${i + 1} ${field} filled "${String(value)}"${recommended ? ' (rec)' : ''}`);
+            if (recommended) studentWrongRec += 1; else studentWrong += 1;
           }
           continue;
         }
         if (!autoFilled) { studentBlank += 1; continue; }
-        if (String(want) === String(value)) studentCorrect += 1;
-        else {
+        if (String(want) === String(value)) { if (recommended) studentCorrectRec += 1; else studentCorrect += 1; }
+        else if (recommended) {
+          studentWrongRec += 1;
+          wrongRecRows.push(`p${i + 1} ${field} got "${String(value)}" want "${String(want)}"`);
+        } else {
           studentWrong += 1;
           wrongRows.push(`p${i + 1} ${field} got "${String(value)}" want "${String(want)}"`);
         }
@@ -100,12 +110,16 @@ describe.skipIf(!CAGI_DIR || !SAT_DIR)('photo accuracy probe', () => {
       correct += studentCorrect;
       wrong += studentWrong;
       blankLeft += studentBlank;
+      correctRec += studentCorrectRec;
+      wrongRec += studentWrongRec;
       lines.push(`p${i + 1}  ${path.basename(cagiFiles[i])} + ${path.basename(satFiles[i])}`
-        + `  -> key p${i + KEY_OFFSET + 1}   CORRECT ${studentCorrect}  WRONG ${studentWrong}  left-blank ${studentBlank}`);
+        + `  -> key p${i + KEY_OFFSET + 1}   CORRECT ${studentCorrect}  WRONG ${studentWrong}  left-blank ${studentBlank}  REC ok ${studentCorrectRec} wrong ${studentWrongRec}`);
     }
 
     lines.push('');
     lines.push(`TOTAL  CORRECT ${correct}   WRONG ${wrong}   left-blank ${blankLeft}`);
+    lines.push(`RECOMMENDED (contested, reviewer confirms): ok ${correctRec} wrong ${wrongRec}`);
+    if (wrongRecRows.length) { lines.push(''); lines.push(`WRONG RECOMMENDATIONS (${wrongRecRows.length}):`); wrongRecRows.forEach((v) => lines.push(`  ${v}`)); }
     if (blankViolations.length) {
       lines.push('');
       lines.push(`BLANK-CELL VIOLATIONS (${blankViolations.length}):`);

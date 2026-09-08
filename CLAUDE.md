@@ -225,7 +225,7 @@ REAL_SCAN_SAT_REVERSED=1   REAL_SCAN_CAGI_PDF=".../선별검사 샘플3반복.pd
 세트 3   CORRECT 353  WRONG 2  BLANK 82   OFF 9
 세트 4   CORRECT 309  WRONG 6  BLANK 122  OFF 64     (옛 정답표 308/7 — p12 성별 사인펜을 맞게 읽었다)
 추천 on(기본값)에서는 하네스가 REC ok/wrong을 따로 센다: 세트 1 = 362/4/9 + REC 35/27(56%). 분모 436(옛 null 넷이 응답 가능 칸이 됨).
-사진     OLD 61/0 · Set1 36/0 · Set2 44/0 · Set3 34/0
+사진     OLD 61/0 · Set1 36/0 · Set2 44/0 · Set3 34/0     (확정만, RECOMMEND_BEST=0. 추천 on 기본값에서 Set1 = 39/0 + REC 92/7, [Task/PHOTO_SET1_2026-09-09.md](Task/PHOTO_SET1_2026-09-09.md))
 
 나이 숫자 분류기 병합(2026-09-06, 기본값 on, [Task/AGE_CLASSIFIER_2026-09-06.md](Task/AGE_CLASSIFIER_2026-09-06.md)) 전 값은
 `354/4/79 · 343/7/87 · 348/2/87 · 305/7/125`, 사진 `60/0 · 34/0 · 42/0 · 32/0`이었다. `AGE_DIGIT_CLASSIFIER=0`으로 그 값이 재현된다.
