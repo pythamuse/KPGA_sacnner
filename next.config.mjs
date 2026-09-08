@@ -40,9 +40,21 @@ const CONTENT_SECURITY_POLICY = [
   "frame-ancestors 'none'",
 ].join('; ');
 
+const BUILD_DATE = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'Asia/Seoul',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+}).format(new Date());
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
+  // Inject these values at build time so server rendering and hydration share one label.
+  env: {
+    NEXT_PUBLIC_BUILD_SHA: process.env.VERCEL_GIT_COMMIT_SHA || '',
+    NEXT_PUBLIC_BUILD_DATE: BUILD_DATE,
+  },
   async headers() {
     return [
       {

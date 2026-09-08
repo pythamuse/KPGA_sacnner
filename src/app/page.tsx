@@ -2,6 +2,7 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import ImageUploadPanel, { UploadMode, type StatelessBatchPages } from '@/components/ImageUploadPanel';
+import { BUILD_LABEL } from '@/lib/buildLabel';
 import type { StackOrder } from '@/lib/recognition/batchMatcher';
 import {
   assembleStatelessSession,
@@ -167,9 +168,8 @@ function BrandHeader() {
         </div>
       </div>
       {/* QA marker: remove this HTML block after final acceptance.
-          MUST bump on every deploy (README.md "작업 프로세스" 참고): format is
-          v{배포일 YYYY-MM-DD}.{그날 몇 번째 배포인지, 1부터}. 날짜가 바뀌면 순번은 1로
-          리셋. 코드만 바뀌고 이 줄이 그대로면 배포 자체를 빠뜨린 것으로 간주한다. */}
+          The label is injected at build time from the deployment commit SHA and Seoul build date.
+          Local development displays `local-dev`; see README.md for deployment checks. */}
       <span
         aria-label="테스트 버전"
         style={{
@@ -180,7 +180,7 @@ function BrandHeader() {
           whiteSpace: 'nowrap',
         }}
       >
-        테스트 버전 v2026-09-09.1
+        테스트 버전 {BUILD_LABEL}
       </span>
     </div>
   );
