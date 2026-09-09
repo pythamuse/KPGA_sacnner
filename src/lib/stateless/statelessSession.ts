@@ -33,6 +33,36 @@ export interface StatelessPage {
   filename: string;
   /** F1 capture meta, or null for scanned pages. Presence arms the photo-only refusals. */
   registration: unknown | null;
+  /** Sequential-only source id; omitted for batch pages so batch ids stay unchanged. */
+  imageId?: string;
+}
+
+export interface SequentialImageIds {
+  cagiImageId: string;
+  satisfactionImageId: string;
+}
+
+/** Stable source ids for one sequential student's two sheets. */
+export function buildSequentialImageIds(batchId: string): SequentialImageIds {
+  return {
+    cagiImageId: `cagi_page_${batchId}`,
+    satisfactionImageId: `satisfaction_page_${batchId}`,
+  };
+}
+
+/** Keeps a sequential draft's source ids stable while preserving every result field. */
+export function withSequentialImageIds(
+  draft: RecognitionDraft,
+  ids: SequentialImageIds,
+): RecognitionDraft {
+  return {
+    ...draft,
+    source: {
+      ...(draft.source || {}),
+      cagiImageId: ids.cagiImageId,
+      satisfactionImageId: ids.satisfactionImageId,
+    },
+  };
 }
 
 export interface StatelessStudentPair {

@@ -33,6 +33,51 @@ import {
 export async function POST(req: NextRequest) {
   let scratchDir: string | null = null;
   try {
+    if (req.headers.get('content-type')?.includes('multipart/form-data')) {
+      let formData: FormData;
+      try {
+        formData = await req.formData();
+      } catch {
+        return NextResponse.json({ error: '요청 본문이 올바르지 않습니다.' }, { status: 400 });
+      }
+
+      const file = formData.get('file');
+      const type = formData.get('type');
+      if (!(file instanceof File) || !isUploadKind(type) || file.size === 0) {
+        return NextResponse.json({ error: '요청 본문이 올바르지 않습니다.' }, { status: 400 });
+      }
+
+      const registrationField = formData.get('registration');
+      let registration: unknown = null;
+      if (registrationField !== null) {
+        if (typeof registrationField !== 'string') {
+          return NextResponse.json({ error: 'registration 메타 형식이 올바르지 않습니다.' }, { status: 400 });
+        }
+        try {
+          registration = JSON.parse(registrationField);
+        } catch {
+          return NextResponse.json({ error: 'registration 메타 형식이 올바르지 않습니다.' }, { status: 400 });
+        }
+      }
+
+      if (registration !== null && !isRegistrationMetaLike(registration)) {
+        return NextResponse.json({ error: 'registration 메타 형식이 올바르지 않습니다.' }, { status: 400 });
+      }
+
+      scratchDir = path.join(os.tmpdir(), 'kpga-scanner', 'quality', randomUUID());
+      await fs.mkdir(scratchDir, { recursive: true });
+      const imagePath = path.join(scratchDir, `${type}_page_0001.jpg`);
+      await fs.writeFile(imagePath, Buffer.from(await file.arrayBuffer()));
+
+      const verdict = await evaluateSheetQuality({
+        imagePath,
+        formType: type,
+        registration: (registration as never) ?? null,
+      });
+
+      return NextResponse.json(verdict);
+    }
+
     const body = await req.json().catch(() => null);
     if (!body || typeof body !== 'object') {
       return NextResponse.json({ error: '요청 본문이 올바르지 않습니다.' }, { status: 400 });

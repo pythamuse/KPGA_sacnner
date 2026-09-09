@@ -47,6 +47,7 @@ import { describePairing, type StackOrder } from '@/lib/recognition/batchMatcher
 import { readCaptureTime, sortBatchImages } from '@/lib/uploadOrder';
 import { decideFormSide, splitBySide, type FormSide } from '@/lib/formSplit';
 import {
+  buildSequentialImageIds,
   STATELESS_RECOGNIZE_ENABLED,
   type StatelessPage,
 } from '@/lib/stateless/statelessSession';
@@ -612,7 +613,7 @@ export default function ImageUploadPanel({
   const cameraStreamRef = useRef<MediaStream | null>(null);
   const uploadInventoryRef = useRef<UploadInventory>({ cagi: null, satisfaction: null });
   /**
-   * Flag-on only: the batch's rendered pages, kept here instead of uploaded.
+   * Flag-on only: the current run's rendered pages, kept here instead of uploaded.
    * ~11MB for 38 sheets, the same order the IndexedDB draft cache already
    * holds, and freed when the batch is reset or recognition hands off.
    */
@@ -1052,13 +1053,26 @@ export default function ImageUploadPanel({
     batch: UploadBatchReference,
     pageNumber: number,
     registration: RegistrationMeta | null,
+    file?: File,
   ): Promise<SheetVerdictSummary | null> => {
     try {
-      const res = await fetch('/api/uploads/quality', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jobId, type, batch, pageNumber, registration }),
-      });
+      let res: Response;
+      if (STATELESS_RECOGNIZE_ENABLED && file) {
+        const formData = new FormData();
+        formData.append('file', file, file.name);
+        formData.append('type', type);
+        formData.append('registration', JSON.stringify(registration));
+        res = await fetch('/api/uploads/quality', {
+          method: 'POST',
+          body: formData,
+        });
+      } else {
+        res = await fetch('/api/uploads/quality', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ jobId, type, batch, pageNumber, registration }),
+        });
+      }
       if (!res.ok) return null;
       const data = await res.json() as { verdict?: SheetVerdictSummary['verdict']; hints?: string[] };
       if (data.verdict !== 'good' && data.verdict !== 'retake-suggested' && data.verdict !== 'unusable') {
@@ -1094,7 +1108,26 @@ export default function ImageUploadPanel({
 
     try {
       const batch = { batchId: createBatchId(), expectedPageCount: 1 };
-      const data = await uploadSingleFile(file, type, batch, 1, registration);
+      let qualityFile: File | undefined;
+      let data: { imageId: string; filename: string };
+      if (STATELESS_RECOGNIZE_ENABLED) {
+        qualityFile = await shrinkImageFileIfNeeded(file, MAX_UPLOAD_IMAGE_BYTES);
+        const imageIds = buildSequentialImageIds(batch.batchId);
+        const imageId = type === 'cagi' ? imageIds.cagiImageId : imageIds.satisfactionImageId;
+        statelessPagesRef.current = {
+          ...statelessPagesRef.current,
+          [type]: [{
+            file: qualityFile,
+            page: 1,
+            filename: qualityFile.name,
+            registration,
+            imageId,
+          }],
+        };
+        data = { imageId, filename: qualityFile.name };
+      } else {
+        data = await uploadSingleFile(file, type, batch, 1, registration);
+      }
       uploadInventoryRef.current = { ...uploadInventoryRef.current, [type]: batch };
       onUploadSuccess(type, data.imageId, data.filename);
 
@@ -1113,13 +1146,13 @@ export default function ImageUploadPanel({
       else setSatCount(1);
 
       // F3: per-sheet verdict, delivered while the paper is still at hand.
-      void requestQualityVerdict(type, batch, 1, registration).then((verdict) => {
+      void requestQualityVerdict(type, batch, 1, registration, qualityFile).then((verdict) => {
         if (verdict) setSheetVerdicts((previous) => ({ ...previous, [type]: verdict }));
       });
 
       if (uploadInventoryRef.current.cagi && uploadInventoryRef.current.satisfaction) {
         // One page per side in this flow, so there is no stack to reverse.
-        void onAnalyzeTrigger(uploadInventoryRef.current, 'same');
+        void onAnalyzeTrigger(uploadInventoryRef.current, 'same', statelessBatchPages());
       }
       return true;
     } catch (err: any) {
@@ -2131,11 +2164,11 @@ export default function ImageUploadPanel({
 
   /**
    * The two held stacks, or null when this run is not stateless. Null is the
-   * signal the caller uses to stay on the Blob-backed batch route, so it must
-   * stay null whenever either stack is missing.
+   * signal the caller uses to stay on the Blob-backed recognition route, so it
+   * must stay null whenever either stack is missing.
    */
   const statelessBatchPages = (): StatelessBatchPages | null => {
-    if (!STATELESS_RECOGNIZE_ENABLED || mode !== 'batch') return null;
+    if (!STATELESS_RECOGNIZE_ENABLED) return null;
     const { cagi, satisfaction } = statelessPagesRef.current;
     if (!cagi || !satisfaction) return null;
     return { cagi, satisfaction };

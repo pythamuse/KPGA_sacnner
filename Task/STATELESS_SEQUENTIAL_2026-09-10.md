@@ -42,11 +42,46 @@
 
 ## 4. 합격 판정 (메인 에이전트가 dev 브라우저에서)
 
-1. `BLOB_OPS_TRACE`를 켠 dev 서버에서 순차·촬영 흐름을 한 학생 돌린다 → **`put` 로그 0줄**.
+1. ~~`BLOB_OPS_TRACE`를 켠 dev 서버에서 `put` 로그 0줄~~ → **쓸 수 없다.** dev는 `usesLocalMemoryStore()`가 참이라
+   `storeUploadPage`가 로컬 분기로 빠져 `traceBlobOp`에 도달하지 않는다. 대신 **서버 라우트 로그에 `POST /api/upload`가 없을 것**으로 바꾼다 —
+   페이지를 쓰는 라우트가 그것 하나뿐이므로 같은 것을 증명한다.
 2. 첫 장을 올린 직후 시트 품질 배지가 예전처럼 뜬다.
-3. 학생 두 명을 연속으로 인식·저장한 뒤 검수 화면이 각각 맞는 행을 가리킨다(B의 함정).
+3. 학생 두 명을 연속으로 인식했을 때 두 초안의 `source.cagiImageId`·`satisfactionImageId`가 서로 다르다(B의 함정).
+   저장까지 거치지 않고 식별자 자체를 본다 — `savedRowForDraft`가 짝짓는 근거가 그 값이기 때문이다.
 4. 단위 스위트 596개 유지.
 
-## 5. 결과
+## 5. 결과 — 병합 (같은 날)
 
-(라운드가 돌아오면 채운다)
+코덱스 1회 왕복, 208k 토큰. 6파일 165줄 추가·14줄 삭제.
+
+| 항목 | 구현 |
+|---|---|
+| A | `uploadSequentialFile`이 플래그 on이면 `shrinkImageFileIfNeeded` 후 `statelessPagesRef`에 한 장짜리 배열로 넣고, `statelessBatchPages()`의 `mode !== 'batch'` 가드를 풀어 트리거에 넘긴다 |
+| B | `buildSequentialImageIds(batchId)`·`withSequentialImageIds(draft, ids)`를 `statelessSession.ts`에 두고, `page.tsx`가 **순차 모드에서만** 초안의 식별자를 덮어쓴다. 배치 식별자는 그대로 |
+| C | `/api/uploads/quality`에 multipart 분기 추가. 이미지·양식·촬영 메타를 본문으로 받아 요청 단위 임시 디렉터리에 쓰고 판정 후 `finally`에서 삭제. 기존 JSON+Blob 경로는 플래그 오프용으로 유지 |
+| D | Blob 코드 다섯 파일 1,017줄 그대로 |
+
+**dev 브라우저 판정 (세트 1 원본 사진, 학생 2명 연속, 순차 파일 업로드 경로).** 서버 라우트 로그가 전부다:
+
+```
+POST /api/jobs                200
+POST /api/uploads/quality     200   (학생1 앞면)
+POST /api/uploads/quality     200   (학생1 뒷면)
+POST /api/recognize/student   200
+POST /api/uploads/quality     200   (학생2 앞면)
+POST /api/uploads/quality     200   (학생2 뒷면)
+POST /api/recognize/student   200
+```
+
+- **`/api/upload` 호출 0.** 페이지를 쓰는 라우트는 이것 하나뿐이므로 배포본에서 advanced 작업이 0이 된다는 뜻이다.
+  (dev는 `usesLocalMemoryStore()`가 참이라 `BLOB_OPS_TRACE`가 애초에 발화하지 않는다. 그래서 라우트 호출 여부가 유일하게 유효한 증거다.)
+- `/api/recognize`(Blob 배치 경로) 호출도 0. 무상태 경로로 갔다.
+- 촬영 상태 판정이 **장마다 예전처럼** 떴다(검수 화면 "선별검사지 정상 · 만족도조사 정상").
+- 식별자 충돌 해소 확인. 학생 1 `cagi_page_9fa1dfae…`·`satisfaction_page_1489fa83…`, 학생 2 `cagi_page_79e378bb…`·`satisfaction_page_f66935c8…`.
+  고치기 전이었다면 둘 다 `cagi_page_0`이었다.
+- 단위 스위트 **598 통과**(변경 전 596 + 신규 2), `tsc` 오류 0.
+
+**남은 사실.** 카메라 촬영 경로는 같은 `uploadSequentialFile` 하나를 지나가므로 코드상 동일하게 무상태다.
+다만 실기기 카메라로는 확인하지 못했다 — dev에서 판정한 것은 파일 업로드 경로다.
+
+**이 라운드로 닫히는 것**: 버셀 Blob 한도를 이유로 한 계정 이동 검토. 실행 중 Blob 작업이 0이므로 한도 문제 자체가 없어졌다.

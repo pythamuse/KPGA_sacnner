@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   assembleStatelessSession,
+  buildSequentialImageIds,
   pairStatelessPages,
   StatelessPageCountMismatchError,
   type StatelessPage,
@@ -61,6 +62,18 @@ describe('pairStatelessPages', () => {
   it('refuses two stacks of different heights instead of pairing across the gap', () => {
     expect(() => pairStatelessPages(cagiPages, satisfactionPages.slice(0, 2)))
       .toThrow(StatelessPageCountMismatchError);
+  });
+});
+
+describe('buildSequentialImageIds', () => {
+  it('gives two sequential students different stable ids for both sheets', () => {
+    const first = buildSequentialImageIds('batch_student_one');
+    const second = buildSequentialImageIds('batch_student_two');
+
+    expect(first.cagiImageId).not.toBe(second.cagiImageId);
+    expect(first.satisfactionImageId).not.toBe(second.satisfactionImageId);
+    expect(new Set(Object.values(first).concat(Object.values(second))).size).toBe(4);
+    expect(buildSequentialImageIds('batch_student_one')).toEqual(first);
   });
 });
 

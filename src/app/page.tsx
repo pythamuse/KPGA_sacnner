@@ -6,6 +6,7 @@ import { BUILD_LABEL } from '@/lib/buildLabel';
 import type { StackOrder } from '@/lib/recognition/batchMatcher';
 import {
   assembleStatelessSession,
+  withSequentialImageIds,
   pairStatelessPages,
   StatelessPageCountMismatchError,
   STATELESS_RECOGNIZE_ENABLED,
@@ -391,9 +392,17 @@ export default function Home() {
           trustUploadedTypes,
           onProgress: (completed, total) => setRecognitionProgress({ completed, total }),
         });
-        const { studentDrafts, warnings } = assembleStatelessSession(outcomes);
+        const assembled = assembleStatelessSession(outcomes);
+        const cagiImageId = statelessPages.cagi[0]?.imageId;
+        const satisfactionImageId = statelessPages.satisfaction[0]?.imageId;
+        const studentDrafts = uploadMode === 'sequential' && cagiImageId && satisfactionImageId
+          ? assembled.studentDrafts.map((draft) => withSequentialImageIds(draft, {
+            cagiImageId,
+            satisfactionImageId,
+          }))
+          : assembled.studentDrafts;
         setDrafts(studentDrafts);
-        setNotices(warnings);
+        setNotices(assembled.warnings);
         setCurrentDraftIndex(0);
         return;
       } catch (error) {

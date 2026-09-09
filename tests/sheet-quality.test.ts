@@ -217,6 +217,27 @@ describe('POST /api/uploads/quality', () => {
     expect(verdict.signals.gridFields).toBeGreaterThanOrEqual(10);
   }, 120000);
 
+  it('returns a verdict for an image sent inline as multipart data', async () => {
+    const formData = new FormData();
+    formData.append(
+      'file',
+      new File([new Uint8Array(fs.readFileSync(cagiBlankPath))], 'cagi.jpg', { type: 'image/jpeg' }),
+    );
+    formData.append('type', 'cagi');
+    formData.append('registration', JSON.stringify(makeRegistration()));
+
+    const response = await qualityPOST(new Request('http://localhost/api/uploads/quality', {
+      method: 'POST',
+      body: formData,
+    }) as any);
+    expect(response.status).toBe(200);
+
+    const verdict = await response.json() as SheetQualityVerdict;
+    expect(verdict.verdict).toBe('good');
+    expect(verdict.reasons).toEqual(['registration-verified']);
+    expect(verdict.signals.gridFields).toBeGreaterThanOrEqual(10);
+  }, 120000);
+
   it('interprets client registration meta through the same evaluator', async () => {
     const response = await callQuality({
       jobId,
